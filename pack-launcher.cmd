@@ -21,6 +21,15 @@ rem ============================================================
 setlocal
 cd /d "%~dp0"
 
+rem NuGet restore needs standard shell env vars (APPDATA/LOCALAPPDATA/TEMP).
+rem Some hosts (agent sandboxes, stripped-down terminals) launch cmd without them,
+rem which makes dotnet restore fail with: Value cannot be null (Parameter 'path1').
+rem Bootstrap them here; setlocal keeps this script's env changes contained.
+if not defined APPDATA set "APPDATA=%USERPROFILE%\AppData\Roaming"
+if not defined LOCALAPPDATA set "LOCALAPPDATA=%USERPROFILE%\AppData\Local"
+if not defined TEMP set "TEMP=%USERPROFILE%\AppData\Local\Temp"
+if not defined TMP set "TMP=%TEMP%"
+
 rem 优先用标准安装位置的 dotnet（PATH 上的可能是别的程序自带的运行时，没有 SDK）。
 set "DOTNET=%ProgramFiles%\dotnet\dotnet.exe"
 if not exist "%DOTNET%" set "DOTNET=dotnet"
