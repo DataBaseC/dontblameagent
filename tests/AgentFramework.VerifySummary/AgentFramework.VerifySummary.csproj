@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <RootNamespace>AgentFramework.VerifySummary</RootNamespace>
+    <AssemblyName>AgentFramework.VerifySummary</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../../src/AgentFramework.Tools/AgentFramework.Tools.csproj" />
+    <ProjectReference Include="../../src/AgentFramework.Llm/AgentFramework.Llm.csproj" />
+  </ItemGroup>
+
+</Project>

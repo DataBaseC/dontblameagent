@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <RootNamespace>AgentFramework.Host</RootNamespace>
+    <AssemblyName>AgentFramework.Host</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="9.0.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../AgentFramework.Contracts/AgentFramework.Contracts.csproj" />
+    <ProjectReference Include="../AgentFramework.Kernel/AgentFramework.Kernel.csproj" />
+    <ProjectReference Include="../AgentFramework.Data/AgentFramework.Data.csproj" />
+    <ProjectReference Include="../AgentFramework.Llm/AgentFramework.Llm.csproj" />
+    <ProjectReference Include="../AgentFramework.Agent/AgentFramework.Agent.csproj" />
+    <ProjectReference Include="../AgentFramework.Tools/AgentFramework.Tools.csproj" />
+    <ProjectReference Include="../AgentFramework.Index/AgentFramework.Index.csproj" />
+  </ItemGroup>
+
+</Project>

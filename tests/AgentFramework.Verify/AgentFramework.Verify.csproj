@@ -1,0 +1,27 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <RootNamespace>AgentFramework.Verify</RootNamespace>
+    <AssemblyName>AgentFramework.Verify</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../../src/AgentFramework.Kernel/AgentFramework.Kernel.csproj" />
+    <!-- ReferenceOutputAssembly=false：只让它参与构建，不引用其程序集 ——
+         否则插件会被加载进 default ALC，就验证不出「真卸载」了 -->
+    <ProjectReference Include="../../src/AgentFramework.SamplePlugin/AgentFramework.SamplePlugin.csproj"
+                      ReferenceOutputAssembly="false" />
+  </ItemGroup>
+
+  <!-- 把插件产物复制到 plugins/hello/，模拟真实的分发形态 -->
+  <Target Name="CopySamplePlugin" AfterTargets="Build">
+    <ItemGroup>
+      <_PluginFile Include="$(MSBuildThisFileDirectory)../../src/AgentFramework.SamplePlugin/bin/$(Configuration)/$(TargetFramework)/**/*" />
+    </ItemGroup>
+    <Copy SourceFiles="@(_PluginFile)"
+          DestinationFolder="$(TargetDir)plugins/hello/%(RecursiveDir)"
+          SkipUnchangedFiles="true" />
+  </Target>
+
+</Project>

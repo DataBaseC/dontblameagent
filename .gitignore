@@ -1,0 +1,42 @@
+# ── 构建产物 ────────────────────────────────────────────
+bin/
+obj/
+out/
+build/
+!build/.gitkeep
+
+# ── 打包载荷（pack-launcher.cmd 生成，体积大且可再生）────
+src/AgentFramework.Launcher/Payload/
+
+# ── IDE / 编辑器 ────────────────────────────────────────
+.vs/
+.vscode/
+.idea/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+# ── 运行时数据（本机生成，不该进仓库）──────────────────
+agent-workspace/
+agent-sessions/
+profiles/
+plugins/
+webview-data/
+*.db
+*.db-shm
+*.db-wal
+*.jsonl
+
+# ── 日志与临时文件 ──────────────────────────────────────
+*.log
+stderr.log
+*.tmp
+
+# ── 系统 / 杂项 ─────────────────────────────────────────
+Thumbs.db
+.DS_Store
+
+# ── 本机工具数据与本机配置（不上传）──
+.zwork/
+agent.json

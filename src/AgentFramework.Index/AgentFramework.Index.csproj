@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>AgentFramework.Index</RootNamespace>
+    <AssemblyName>AgentFramework.Index</AssemblyName>
+    <Description>会话历史派生索引（SQLite）：投影加速 + 历史检索</Description>
+  </PropertyGroup>
+
+  <!--
+    Microsoft.Data.Sqlite 会带出 SQLitePCLRaw.bundle_e_sqlite3（含各平台原生库）。
+    绿色版用自包含方式发布（指定 win-x64 运行时）时，e_sqlite3.dll 会被一起带上，
+    目标机无需另装任何东西。
+  -->
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.12" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\AgentFramework.Contracts\AgentFramework.Contracts.csproj" />
+  </ItemGroup>
+
+</Project>

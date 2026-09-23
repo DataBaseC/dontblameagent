@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>AgentFramework.Data</RootNamespace>
+    <AssemblyName>AgentFramework.Data</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../AgentFramework.Contracts/AgentFramework.Contracts.csproj" />
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <RootNamespace>AgentFramework.VerifyData</RootNamespace>
+    <AssemblyName>AgentFramework.VerifyData</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../../src/AgentFramework.Data/AgentFramework.Data.csproj" />
+  </ItemGroup>
+
+</Project>

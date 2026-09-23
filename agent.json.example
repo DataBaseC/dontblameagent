@@ -1,0 +1,48 @@
+{
+  // ══════════════════════════════════════════════════════════════
+  //  配置单 —— 复制成 agent.json 放在这一层，改完直接 dotnet run
+  //  （也可以用 `dotnet run --project src/AgentFramework.Host -- --init-config` 生成一份）
+  //
+  //  所有字段都可以省略；省略的走默认值。
+  //  优先级：命令行 > 环境变量 > 本文件。
+  // ══════════════════════════════════════════════════════════════
+
+  // ── 端点：填「地址 + 模型名」就算配好 ─────────────────────────
+  "cloud": {
+    "baseUrl": "https://api.deepseek.com/v1",
+    "apiKey": "在这里填你的 key",
+    "model": "deepseek-reasoner"
+  },
+
+  // 本地端点（可选）。LM Studio 默认 1234；Ollama 是 http://localhost:11434/v1
+  "local": {
+    "baseUrl": "http://localhost:1234/v1",
+    "model": "你加载的模型名"
+  },
+
+  // 在界面里配（点顶栏「模型」）会写成下面这个新格式；
+  // 上面那种 cloud / local 的老写法一样认，不用手工改。
+  // 写过 providers 之后，cloud / local 会被摘掉 —— 同一件事不留两个真相。
+  // "providers": [
+  //   {
+  //     "id": "deepseek",
+  //     "name": "DeepSeek",
+  //     "baseUrl": "https://api.deepseek.com/v1",
+  //     "apiKeyProtected": "（DPAPI 加密后的密文；没加密能力的平台存 apiKey 明文）",
+  //     "models": [{ "id": "deepseek-reasoner" }]
+  //   }
+  // ],
+  // "active": { "providerId": "deepseek", "modelId": "deepseek-reasoner" },
+
+  // ── 目录与界面 ───────────────────────────────────────────────
+  "workspace": "agent-workspace",
+  "sessions": "agent-sessions",
+  "webPort": 8090,
+  "mode": "work",
+
+  // ── 其它开关（按需打开）──────────────────────────────────────
+  // "includeUsage": true,      // 端点不认 stream_options 时设为 false
+  // "maxSteps": 12,
+  // "temperature": 0.7,
+  // "context": { "tokenBudget": 24000, "compressionTriggerRatio": 0.8 }
+}

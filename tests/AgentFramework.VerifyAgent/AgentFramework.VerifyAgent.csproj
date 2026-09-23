@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <RootNamespace>AgentFramework.VerifyAgent</RootNamespace>
+    <AssemblyName>AgentFramework.VerifyAgent</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../../src/AgentFramework.Agent/AgentFramework.Agent.csproj" />
+    <ProjectReference Include="../../src/AgentFramework.Data/AgentFramework.Data.csproj" />
+    <ProjectReference Include="../../src/AgentFramework.Kernel/AgentFramework.Kernel.csproj" />
+    <ProjectReference Include="../../src/AgentFramework.Llm/AgentFramework.Llm.csproj" />
+  </ItemGroup>
+
+</Project>

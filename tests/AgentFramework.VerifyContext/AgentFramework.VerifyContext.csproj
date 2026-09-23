@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <RootNamespace>AgentFramework.VerifyContext</RootNamespace>
+    <AssemblyName>AgentFramework.VerifyContext</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../../src/AgentFramework.Host/AgentFramework.Host.csproj" />
+  </ItemGroup>
+
+</Project>

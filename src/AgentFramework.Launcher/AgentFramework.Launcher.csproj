@@ -1,0 +1,47 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <RootNamespace>AgentFramework.Launcher</RootNamespace>
+    <AssemblyName>AgentFramework.Launcher</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!--
+      pack-launcher.cmd 把本体（Host）的自包含发布包 + 示例插件压成 Payload\host-bundle.zip；
+      这里有它就内嵌进启动器（单文件发布形态：首次运行自动解到 exe 旁的 host\），
+      没有它就是普通开发态构建 —— 两不干扰。
+    -->
+    <EmbeddedResource Include="Payload\host-bundle.zip"
+                      Condition="Exists('Payload\host-bundle.zip')" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../AgentFramework.Contracts/AgentFramework.Contracts.csproj" />
+  </ItemGroup>
+
+  <!--
+    启动器**不引用**本体工程。
+    引用了就等于「改本体就得重编启动器」—— 可这两块本来可以各编各的，
+    只要约定好「本体的输出去哪找」就够了。
+
+    所以这里只在**本体已经编译过**时顺手拷一份到 <输出>/host/，绝不因此触发本体编译。
+    本体还没编过？那就在启动器的设置里手动指路径（或先跑 build-host.cmd）。
+  -->
+  <Target Name="CopyHostIfBuilt" AfterTargets="Build" Condition="'$(PublishSingleFile)' != 'true'">
+    <PropertyGroup>
+      <HostOutputDir>$(MSBuildThisFileDirectory)..\AgentFramework.Host\bin\$(Configuration)\$(TargetFramework)</HostOutputDir>
+    </PropertyGroup>
+    <ItemGroup>
+      <HostPayload Include="$(HostOutputDir)\**\*" />
+    </ItemGroup>
+    <Copy SourceFiles="@(HostPayload)"
+          DestinationFiles="@(HostPayload->'$(OutDir)host\%(RecursiveDir)%(Filename)%(Extension)')"
+          SkipUnchangedFiles="true"
+          Condition="Exists('$(HostOutputDir)\AgentFramework.Host.dll')" />
+    <Message Importance="high"
+             Text="提示：本体还没编译过（$(HostOutputDir) 里没有 AgentFramework.Host.dll）。先跑 build-host.cmd 即可。"
+             Condition="!Exists('$(HostOutputDir)\AgentFramework.Host.dll')" />
+  </Target>
+
+</Project>

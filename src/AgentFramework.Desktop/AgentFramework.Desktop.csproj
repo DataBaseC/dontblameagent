@@ -1,0 +1,42 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UseWindowsForms>true</UseWindowsForms>
+    <!--
+      WebView2 包会同时带出 WPF 版控件（Microsoft.Web.WebView2.Wpf），
+      它引的 WindowsBase 5.0 与 .NET 10 ref pack 的 4.0 冲突，产生 MSB3277 警告。
+      我们只用 WinForms 版，明确关掉 WPF 即可消除。
+    -->
+    <UseWPF>false</UseWPF>
+    <!--
+      允许在非 Windows 机器上编译（只编译、不运行）。
+      这样 Linux CI / 沙盒也能验证这个壳没写错东西。
+    -->
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+    <AssemblyTitle>Agent 桌面客户端</AssemblyTitle>
+    <RootNamespace>AgentFramework.Desktop</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.2903.40" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\AgentFramework.Host\AgentFramework.Host.csproj" />
+  </ItemGroup>
+
+  <!--
+    已知无害警告：WebView2 包（1.0.2903.40）会无条件带出 WPF 版控件
+    （Microsoft.Web.WebView2.Wpf），它引的 WindowsBase 5.0 与 .NET ref pack 的 4.0 冲突，
+    构建时报 MSB3277。我们只用 WinForms 版，该程序集虽被复制到输出目录但永不被加载。
+
+    试过 <UseWPF>false</UseWPF> 与在 Target 里 Remove 该引用，均无法消除
+    （NuGet 资产在求值阶段注入，Target 层移除时警告已由 ResolveAssemblyReference 发出）。
+    结论：接受这 1 个警告，换取官方包的标准用法 —— 比手工引用 lib_manual 下的 dll 可靠。
+  -->
+
+</Project>

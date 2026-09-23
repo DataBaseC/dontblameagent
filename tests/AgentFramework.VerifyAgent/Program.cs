@@ -1,0 +1,429 @@
+using System.Net;
+using System.Net.Sockets;
+using System.Runtime.CompilerServices;
+using System.Text;
+using AgentFramework.Agent;
+using AgentFramework.Contracts;
+using AgentFramework.Data;
+using AgentFramework.Kernel;
+using AgentFramework.Llm;
+
+// ═══════════════════════════════════════════════════════════
+//  Agent 主干垂直切片验证
+//  调模型 → 工具调用 → 审批 → 执行 → 落日志 → 投影
+//  用脚本化假模型，不依赖任何 API key
+// ═══════════════════════════════════════════════════════════
+
+var passes = 0;
+var failures = 0;
+
+void Check(string name, bool ok, string? detail = null)
+{
+    var suffix = detail is null ? "" : $"  ({detail})";
+    if (ok)
+    {
+        passes++;
+        Console.WriteLine($"  [PASS] {name}{suffix}");
+    }
+    else
+    {
+        failures++;
+        Console.WriteLine($"  [FAIL] {name}{suffix}");
+    }
+}
+
+var root = Path.Combine(Path.GetTempPath(), "af-agent-verify", Guid.NewGuid().ToString("N")[..8]);
+Directory.CreateDirectory(root);
+Console.WriteLine("═══ Agent 主干垂直切片验证 ═══");
+Console.WriteLine($"工作目录：{root}");
+
+// ── 场景 1：一次工具调用 + 最终回答 ────────────────────────
+Console.WriteLine("\n── 1. 主循环：调模型 → 工具 → 再调模型 → 收尾 ──");
+
+const string session1 = "s-1";
+var log1Path = Path.Combine(root, "s1.jsonl");
+var host1 = new PluginHost(new PluginHostOptions
+{
+    DataRoot = Path.Combine(root, "plugin-data"),
+});
+
+var echo = new EchoTool();
+var script1 = new ScriptedLlmClient(
+    "cloud",
+    new ScriptedTurn(
+        TextPieces: ["我来调一下工具。"],
+        ToolCalls: [new ToolCallRequest("call_1", "echo", """{"text":"hello"}""")],
+        FinishReason: "tool_calls"),
+    new ScriptedTurn(
+        TextPieces: ["工具返回：", "echo:hello"],
+        ToolCalls: null,
+        FinishReason: "stop"));
+
+AgentRunResult result1;
+List<SessionEvent> events1;
+using (var log = JsonlEventLog.Open(log1Path))
+{
+    var sink = new JsonlSink(log, host1);
+    var runner = new AgentRunner(script1, () => [echo], sink, new AgentOptions
+    {
+        SessionId = session1,
+        Model = "scripted-model",
+        SystemPrompt = "测试用系统提示",
+    });
+
+    result1 = await runner.RunAsync("帮我回显 hello");
+    events1 = JsonlEventLog.Read(log1Path).ToList();
+}
+
+Check("主循环完成", result1.Completed, $"steps={result1.Steps}");
+Check("用了 2 步（工具 → 收尾）", result1.Steps == 2, $"{result1.Steps}");
+Check("最终文本正确", result1.FinalText == "工具返回：echo:hello", result1.FinalText);
+Check("工具真的被调用了", echo.Invocations.Count == 1 && echo.Invocations[0] == "hello");
+Check("第二次请求带上了工具结果", script1.ReceivedRequests[1].Messages.Any(m => m.Role == LlmRole.Tool));
+Check("第一次请求带上了工具 schema", script1.ReceivedRequests[0].Tools.Any(t => t.Name == "echo"));
+Check("系统提示已下发", script1.ReceivedRequests[0].SystemPrompt == "测试用系统提示");
+
+Console.WriteLine("\n── 1b. 事件是否完整落盘 ──");
+Check("事件共 7 条（含每轮用量）", events1.Count == 7, $"{events1.Count}");
+Check("顺序：user → 用量 → assistant → tool-requested → tool-completed → 用量 → assistant",
+    events1[0] is UserMessageEvent
+    && events1[1] is ModelUsageEvent
+    && events1[2] is AssistantMessageEvent
+    && events1[3] is ToolCallRequestedEvent
+    && events1[4] is ToolCallCompletedEvent
+    && events1[5] is ModelUsageEvent
+    && events1[6] is AssistantMessageEvent,
+    string.Join(" → ", events1.Select(e => e.GetType().Name.Replace("Event", ""))));
+
+var state1 = SessionProjector.Project(events1);
+Check("投影：3 条消息", state1.Messages.Count == 3, $"{state1.Messages.Count}");
+Check("投影：1 次工具调用且成功", state1.ToolCalls.Count == 1 && state1.ToolCalls[0].Success == true);
+Check("投影：无异常", state1.Anomalies.Count == 0, string.Join("; ", state1.Anomalies));
+
+// ── 场景 2：审批拦截 ──────────────────────────────────────
+Console.WriteLine("\n── 2. 审批拦截（分级审批就是可取消事件）──");
+
+const string session2 = "s-2";
+var log2Path = Path.Combine(root, "s2.jsonl");
+var host2 = new PluginHost(new PluginHostOptions { DataRoot = Path.Combine(root, "plugin-data") });
+
+var echo2 = new EchoTool();
+var script2 = new ScriptedLlmClient(
+    "cloud",
+    new ScriptedTurn([], [new ToolCallRequest("call_9", "echo", """{"text":"危险操作"}""")], "tool_calls"),
+    new ScriptedTurn(["我收到了错误，换个方式。"], null, "stop"));
+
+AgentRunResult result2;
+ToolCallCompletedEvent? completed2;
+long blockedBefore;
+using (var log = JsonlEventLog.Open(log2Path))
+{
+    // 内核级审批策略：凡是 text 含「危险」的一律拒绝
+    var sink = new JsonlSink(log, host2, e =>
+        e.Arguments.TryGetValue("text", out var v) && v?.Contains("危险") == true);
+
+    var runner = new AgentRunner(script2, () => [echo2], sink, new AgentOptions { SessionId = session2 });
+    result2 = await runner.RunAsync("执行一个危险操作");
+
+    var events2 = JsonlEventLog.Read(log2Path).ToList();
+    completed2 = events2.OfType<ToolCallCompletedEvent>().FirstOrDefault();
+    blockedBefore = echo2.Invocations.Count;
+}
+
+Check("被拦截的工具没有真正执行", blockedBefore == 0, $"实际执行 {blockedBefore} 次");
+Check("落盘的结果标记为失败", completed2 is { Success: false }, completed2?.Error ?? "(null)");
+Check("拒绝原因已记录", completed2?.Error?.Contains("拒绝") == true, completed2?.Error ?? "");
+Check("主循环仍能收尾（模型看到了错误）", result2.Completed);
+
+// ── 场景 3：模型路由（规则打底）────────────────────────────
+Console.WriteLine("\n── 3. 模型路由：规则打底 ──");
+
+var cloudClient = new ScriptedLlmClient("cloud", new ScriptedTurn(["云端回答"], null, "stop"));
+var localClient = new ScriptedLlmClient("local", new ScriptedTurn(["本地回答"], null, "stop"));
+var router = new RouterLlmClient(DefaultRouting.Rule(longContextChars: 200));
+router.AddTarget(cloudClient);
+router.AddTarget(localClient);
+
+// 3a：短上下文 + 带工具 → 云端
+var shortRequest = new LlmRequest
+{
+    Model = "m",
+    Messages = [new LlmMessage { Role = LlmRole.User, Content = "简短问题" }],
+    Tools = [new ToolSchema("echo", "回显", """{"type":"object","properties":{}}""")],
+};
+await foreach (var _ in router.StreamAsync(shortRequest)) { }
+
+// 3b：长上下文 + 不带工具 → 本地
+var longRequest = new LlmRequest
+{
+    Model = "m",
+    Messages = [new LlmMessage { Role = LlmRole.User, Content = new string('长', 500) }],
+};
+await foreach (var _ in router.StreamAsync(longRequest)) { }
+
+Check("短上下文+带工具 → 路由到 cloud", router.History[0].Target == "cloud", router.History[0].Target);
+Check("长上下文+无工具 → 路由到 local", router.History[1].Target == "local", router.History[1].Target);
+Check("路由来源标记为 rule", router.History.All(h => h.Source == "rule"));
+Check("两条路径都真实被调用", cloudClient.ReceivedRequests.Count == 1 && localClient.ReceivedRequests.Count == 1);
+
+// ── 场景 4：手动覆盖 ──────────────────────────────────────
+Console.WriteLine("\n── 4. 模型路由：手动覆盖 ──");
+router.ManualOverride = "local";
+await foreach (var _ in router.StreamAsync(shortRequest)) { }
+
+Check("手动覆盖后无视规则直达 local", router.History[2].Target == "local", router.History[2].Target);
+Check("路由来源标记为 manual", router.History[2].Source == "manual", router.History[2].Source);
+
+router.ManualOverride = null;
+await foreach (var _ in router.StreamAsync(shortRequest)) { }
+Check("解除覆盖后回归规则", router.History[3].Target == "cloud" && router.History[3].Source == "rule",
+    $"{router.History[3].Target}/{router.History[3].Source}");
+
+// ── 4b：只配了一个端点时，规则不该把请求送到不存在的地方 ────
+Console.WriteLine("\n── 4b. 只配一个端点：规则退让 ──");
+var soloRouter = new RouterLlmClient(DefaultRouting.Rule(longContextChars: 200));
+var soloCloud = new ScriptedLlmClient("cloud", new ScriptedTurn(["只有云端"], null, "stop"));
+soloRouter.AddTarget(soloCloud);
+
+// 按规则这个请求该走 local，但 local 根本没配 —— 应当退回云端，而不是抛异常。
+// （这正是「只配云端」的用户在闲聊模式长上下文时会撞上的路径。）
+var fallbackSurvived = true;
+try
+{
+    await foreach (var _ in soloRouter.StreamAsync(longRequest)) { }
+}
+catch (InvalidOperationException)
+{
+    fallbackSurvived = false;
+}
+
+Check("★ 只配云端时，本该走本地的请求退回云端（不抛异常）", fallbackSurvived);
+Check("★ 回退时真实调用了唯一那个端点", soloCloud.ReceivedRequests.Count == 1,
+    $"{soloCloud.ReceivedRequests.Count} 次");
+
+// ── 场景 5：步数上限保护 ──────────────────────────────────
+Console.WriteLine("\n── 5. 死循环保护（步数上限）──");
+var loopingClient = new ScriptedLlmClient(
+    "cloud",
+    Enumerable.Range(0, 20)
+        .Select(i => new ScriptedTurn(
+            [],
+            [new ToolCallRequest($"c{i}", "echo", """{"text":"loop"}""")],
+            "tool_calls"))
+        .ToArray());
+
+var host3 = new PluginHost(new PluginHostOptions { DataRoot = Path.Combine(root, "plugin-data") });
+var echo3 = new EchoTool();
+AgentRunResult result3;
+using (var log = JsonlEventLog.Open(Path.Combine(root, "s3.jsonl")))
+{
+    var runner = new AgentRunner(loopingClient, () => [echo3], new JsonlSink(log, host3), new AgentOptions
+    {
+        SessionId = "s-3",
+        MaxSteps = 4,
+    });
+    result3 = await runner.RunAsync("无限循环测试");
+}
+
+Check("步数达到上限后停止", !result3.Completed && result3.StopReason == "max-steps", result3.StopReason);
+Check("步数正好 4", result3.Steps == 4, $"{result3.Steps}");
+Check("工具调用未失控（4 次）", echo3.Invocations.Count == 4, $"{echo3.Invocations.Count}");
+
+// ── 8. SSE 坏帧容错（P0-1）────────────────────────────────
+Console.WriteLine("\n── 8. SSE 坏帧容错 ──");
+
+var sseBody =
+    "data: {\"choices\":[{\"delta\":{\"content\":\"第一段\"}}]}\n\n"
+    + "data: {这一行不是合法 JSON\n\n"          // 坏帧：端点残帧 / 代理注入的垃圾
+    + "data: \n\n"                              // 空帧
+    + "data: {\"choices\":[{\"delta\":{\"content\":\"第二段\"},\"finish_reason\":\"stop\"}]}\n\n"
+    + "data: [DONE]\n\n";
+
+var (sseListener, ssePort) = StartSseServer(sseBody);
+
+try
+{
+    var flakyClient = new OpenAiCompatibleClient("flaky", new OpenAiCompatibleOptions
+    {
+        BaseUrl = $"http://127.0.0.1:{ssePort}/v1",
+        DefaultModel = "test-model",
+    });
+
+    var streamed = new StringBuilder();
+    var completed = false;
+
+    await foreach (var chunk in flakyClient.StreamAsync(new LlmRequest
+                   {
+                       Model = "auto",
+                       Messages = [new LlmMessage { Role = LlmRole.User, Content = "打个招呼" }],
+                       Tools = [],
+                   }))
+    {
+        if (chunk is LlmStreamChunk.TextDelta delta)
+        {
+            streamed.Append(delta.Text);
+        }
+
+        if (chunk is LlmStreamChunk.Completed)
+        {
+            completed = true;
+        }
+    }
+
+    Check("★ 坏帧被跳过后本轮仍正常完成（P0-1）", completed);
+    Check("坏帧前后的正常增量都没丢", streamed.ToString() == "第一段第二段", streamed.ToString());
+}
+finally
+{
+    sseListener.Stop();
+}
+
+Console.WriteLine($"\n═══ 结果：{passes} 通过 / {failures} 失败 ═══");
+return failures == 0 ? 0 : 1;
+
+// ── 辅助：一个只会照本宣科回放 SSE 的本地端点 ──────────────
+static (HttpListener Listener, int Port) StartSseServer(string body)
+{
+    var listener = new HttpListener();
+    var port = PickFreeSsePort();
+    listener.Prefixes.Add($"http://127.0.0.1:{port}/");
+    listener.Start();
+
+    _ = Task.Run(async () =>
+    {
+        while (listener.IsListening)
+        {
+            HttpListenerContext ctx;
+            try
+            {
+                ctx = await listener.GetContextAsync();
+            }
+            catch
+            {
+                break;
+            }
+
+            var bytes = Encoding.UTF8.GetBytes(body);
+            ctx.Response.StatusCode = 200;
+            ctx.Response.ContentType = "text/event-stream; charset=utf-8";
+            ctx.Response.ContentLength64 = bytes.Length;
+            await ctx.Response.OutputStream.WriteAsync(bytes);
+            ctx.Response.Close();
+        }
+    });
+
+    return (listener, port);
+}
+
+static int PickFreeSsePort()
+{
+    var probe = new TcpListener(IPAddress.Loopback, 0);
+    probe.Start();
+    var port = ((IPEndPoint)probe.LocalEndpoint).Port;
+    probe.Stop();
+    return port;
+}
+
+// ═══════════════════════════ 测试替身 ═══════════════════════════
+
+/// <summary>按脚本返回响应的假模型 —— 让验证不依赖网络与 API key。</summary>
+internal sealed class ScriptedLlmClient : ILlmClient
+{
+    private readonly Queue<ScriptedTurn> _turns = new();
+    private readonly List<LlmRequest> _received = [];
+
+    public ScriptedLlmClient(string name, params ScriptedTurn[] turns)
+    {
+        Name = name;
+        foreach (var turn in turns)
+        {
+            _turns.Enqueue(turn);
+        }
+    }
+
+    public string Name { get; }
+
+    public IReadOnlyList<LlmRequest> ReceivedRequests => _received;
+
+    public async IAsyncEnumerable<LlmStreamChunk> StreamAsync(
+        LlmRequest request,
+        [EnumeratorCancellation] CancellationToken ct = default)
+    {
+        await Task.Yield();
+
+        _received.Add(request);
+
+        if (!_turns.TryDequeue(out var turn))
+        {
+            yield return new LlmStreamChunk.Completed("stop");
+            yield break;
+        }
+
+        foreach (var piece in turn.TextPieces)
+        {
+            yield return new LlmStreamChunk.TextDelta(piece);
+        }
+
+        if (turn.ToolCalls is { Count: > 0 })
+        {
+            yield return new LlmStreamChunk.ToolCallsReady(turn.ToolCalls);
+        }
+
+        yield return new LlmStreamChunk.Completed(turn.FinishReason);
+    }
+}
+
+internal sealed record ScriptedTurn(
+    IReadOnlyList<string> TextPieces,
+    IReadOnlyList<ToolCallRequest>? ToolCalls,
+    string FinishReason);
+
+/// <summary>把事件写进 JSONL，并把审批事件派发到内核事件总线。</summary>
+internal sealed class JsonlSink : IAgentEventSink
+{
+    private readonly JsonlEventLog _log;
+    private readonly PluginHost _host;
+    private readonly Func<ToolPreExecuteEvent, bool> _denyPolicy;
+
+    public JsonlSink(JsonlEventLog log, PluginHost host, Func<ToolPreExecuteEvent, bool>? denyPolicy = null)
+    {
+        _log = log;
+        _host = host;
+        _denyPolicy = denyPolicy ?? (_ => false);
+    }
+
+    public ValueTask EmitAsync(SessionEvent sessionEvent, CancellationToken ct)
+    {
+        _log.Append(sessionEvent);
+        return ValueTask.CompletedTask;
+    }
+
+    public async ValueTask RequestApprovalAsync(ToolPreExecuteEvent toolPreExecuteEvent, CancellationToken ct)
+    {
+        // 先让内核/插件侧的订阅者表态（它们可以置 Cancelled）
+        await _host.EmitAsync(toolPreExecuteEvent, ct).ConfigureAwait(false);
+
+        // 再套一层宿主策略
+        if (!toolPreExecuteEvent.Cancelled && _denyPolicy(toolPreExecuteEvent))
+        {
+            toolPreExecuteEvent.Cancelled = true;
+            toolPreExecuteEvent.RejectReason = "命中宿主拒绝策略";
+        }
+    }
+}
+
+internal sealed class EchoTool : ITool
+{
+    public string Name => "echo";
+
+    public string Description => "回显给定的文本";
+
+    public List<string> Invocations { get; } = [];
+
+    public ValueTask<ToolResult> InvokeAsync(ToolInvocation invocation, CancellationToken ct = default)
+    {
+        var text = invocation.Arguments.TryGetValue("text", out var value) ? value : null;
+        Invocations.Add(text ?? "");
+        return ValueTask.FromResult(ToolResult.Ok($"echo:{text}"));
+    }
+}

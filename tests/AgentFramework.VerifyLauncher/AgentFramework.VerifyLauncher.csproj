@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <RootNamespace>AgentFramework.VerifyLauncher</RootNamespace>
+    <AssemblyName>AgentFramework.VerifyLauncher</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../../src/AgentFramework.Launcher/AgentFramework.Launcher.csproj" />
+    <!-- 垂直切片要真的装配一次本体，所以这里必须引用它 —— 启动器自己不引用 -->
+    <ProjectReference Include="../../src/AgentFramework.Host/AgentFramework.Host.csproj" />
+    <ProjectReference Include="../../src/AgentFramework.SamplePlugin/AgentFramework.SamplePlugin.csproj"
+                      ReferenceOutputAssembly="false" />
+  </ItemGroup>
+
+  <Target Name="CopySamplePlugin" AfterTargets="Build">
+    <ItemGroup>
+      <_PluginFile Include="$(MSBuildThisFileDirectory)../../src/AgentFramework.SamplePlugin/bin/$(Configuration)/$(TargetFramework)/**/*" />
+    </ItemGroup>
+    <Copy SourceFiles="@(_PluginFile)"
+          DestinationFolder="$(TargetDir)plugins/hello/%(RecursiveDir)"
+          SkipUnchangedFiles="true" />
+  </Target>
+
+</Project>

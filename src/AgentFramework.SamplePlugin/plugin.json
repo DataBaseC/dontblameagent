@@ -1,0 +1,9 @@
+{
+  "id": "hello",
+  "name": "Hello Plugin",
+  "version": "1.0.0",
+  "apiVersion": "1",
+  "assembly": "AgentFramework.SamplePlugin.dll",
+  "entry": "AgentFramework.SamplePlugin.HelloPlugin",
+  "injects": [ "IClockService" ]
+}

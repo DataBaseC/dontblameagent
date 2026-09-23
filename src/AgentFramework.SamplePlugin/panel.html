@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>Hello Plugin · 面板</title>
+<style>
+  :root { color-scheme: dark; }
+  body { margin: 0; padding: 18px; background: #101216; color: #c8d0dc;
+         font: 13px/1.8 -apple-system, "Segoe UI", "Microsoft YaHei", system-ui, sans-serif; }
+  h1 { font-size: 15px; margin: 0 0 4px; }
+  .sub { color: #5f6775; font-size: 11.5px; margin-bottom: 14px; }
+  .card { border: 1px solid #2a2f39; border-radius: 10px; padding: 14px 16px; background: #161a21; margin-bottom: 12px; }
+  button { padding: 7px 14px; border-radius: 8px; border: 1px solid #2f3542; background: #1e2430;
+           color: #aab3c2; cursor: pointer; margin-right: 8px; }
+  button.accent { background: #2f6bff; border-color: #2f6bff; color: #fff; }
+  #clock { font-family: ui-monospace, Consolas, monospace; font-size: 20px; color: #7ee2a8; }
+  .note { color: #5f6775; font-size: 11.5px; }
+</style>
+</head>
+<body>
+<h1>👋 Hello Plugin 面板</h1>
+<div class="sub">这是插件自带的独立 UI（插件目录里的 panel.html，经宿主 /plugin-panel 沙箱承载）</div>
+
+<div class="card">
+  <div>IClockService 当前时间：</div>
+  <div id="clock">—</div>
+</div>
+
+<div class="card">
+  <div style="margin-bottom:8px">界面美化示例 —— 未来主题类插件的落点：</div>
+  <button onclick="document.body.style.background='#101216'">深空</button>
+  <button onclick="document.body.style.background='#141a14'">苔绿</button>
+  <button class="accent" onclick="document.body.style.background='#1a1420'">暮紫</button>
+</div>
+
+<div class="note">面板与插件同一信任域（插件代码本就跑在宿主进程里）；宿主 API 的访问能力将在后续版本按需开放。</div>
+
+<script>
+  function tick() {
+    var el = document.getElementById('clock');
+    if (el) el.textContent = new Date().toLocaleTimeString();
+  }
+  tick();
+  setInterval(tick, 1000);
+</script>
+</body>
+</html>

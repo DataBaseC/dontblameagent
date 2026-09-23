@@ -1,0 +1,32 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>AgentFramework.SamplePlugin</RootNamespace>
+    <AssemblyName>AgentFramework.SamplePlugin</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!--
+      Private=false + ExcludeAssets=runtime：
+      契约程序集【不进】插件输出目录。
+      这样能强制验证「契约共享加载」这条铁律 —— 插件运行时必须从 default ALC
+      拿到 AgentFramework.Contracts，否则 (IPlugin) 转换会当场失败。
+    -->
+    <ProjectReference Include="../AgentFramework.Contracts/AgentFramework.Contracts.csproj">
+      <Private>false</Private>
+      <ExcludeAssets>runtime</ExcludeAssets>
+    </ProjectReference>
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Update="plugin.json" CopyToOutputDirectory="PreserveNewest" />
+    <!--
+      v3.5 审查：panel.html 也必须进产物。
+      「插件自带一小块 UI」的约定是「插件目录里有 panel.html」（hasPanel 就是这么判的），
+      但原先只复制了 plugin.json —— 于是示例插件的面板在**真实分发形态**下永远不出现，
+      文档里「放下一个带 panel.html 的插件即自动出现」也就无从演示。
+    -->
+    <None Update="panel.html" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+</Project>
