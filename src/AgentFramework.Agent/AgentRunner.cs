@@ -246,33 +246,67 @@ public sealed class AgentRunner
                     ToolName = call.ToolName,
                     Arguments = arguments,
                 };
-                await _sink.RequestApprovalAsync(approval, ct).ConfigureAwait(false);
 
                 ToolResult result;
-                if (approval.Cancelled)
+                try
                 {
-                    result = ToolResult.Fail($"已被拒绝：{approval.RejectReason ?? "无理由"}");
+                    if (string.IsNullOrWhiteSpace(call.ToolName))
+                    {
+                        result = ToolResult.Fail("工具名为空：模型未给出有效的 function.name，无法执行");
+                    }
+                    else
+                    {
+                        await _sink.RequestApprovalAsync(approval, ct).ConfigureAwait(false);
+
+                        if (approval.Cancelled)
+                        {
+                            var why = approval.RejectReason ?? "无理由";
+                            result = ToolResult.Fail(
+                                why.Contains("取消", StringComparison.Ordinal)
+                                    ? $"已取消：{why}"
+                                    : $"已被拒绝：{why}");
+                        }
+                        else
+                        {
+                            var tool = tools.FirstOrDefault(t => string.Equals(t.Name, call.ToolName, StringComparison.Ordinal));
+                            try
+                            {
+                                result = tool is null
+                                    ? ToolResult.Fail($"工具不存在：{call.ToolName}")
+                                    : await tool.InvokeAsync(new ToolInvocation(call.ToolName, arguments), ct).ConfigureAwait(false);
+                            }
+                            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+                            {
+                                result = ToolResult.Fail("已取消");
+                            }
+                            catch (Exception ex)
+                            {
+                                // 工具抛异常也必须补上 completed —— 「记录意图 → 记录结果」是一对，
+                                // 缺了 completed 会话会从下一轮起每轮 400（悬空 tool_call）。
+                                result = ToolResult.Fail($"工具执行异常：{ex.GetType().Name}: {ex.Message}");
+                            }
+                        }
+                    }
                 }
-                else
+                catch (OperationCanceledException)
                 {
-                    var tool = tools.FirstOrDefault(t => string.Equals(t.Name, call.ToolName, StringComparison.Ordinal));
-                    try
+                    // 审批等待被停止键打断：仍要落 completed，否则悬空 tool_call 会弄坏会话
+                    result = ToolResult.Fail("已取消：回合被停止");
+                    await _sink.EmitAsync(new ToolCallCompletedEvent
                     {
-                        result = tool is null
-                            ? ToolResult.Fail($"工具不存在：{call.ToolName}")
-                            : await tool.InvokeAsync(new ToolInvocation(call.ToolName, arguments), ct).ConfigureAwait(false);
-                    }
-                    catch (OperationCanceledException) when (ct.IsCancellationRequested)
+                        SessionId = _options.SessionId,
+                        CallId = call.CallId,
+                        Success = false,
+                        Output = string.Empty,
+                        Error = result.Error,
+                    }, CancellationToken.None).ConfigureAwait(false);
+                    history.Add(new LlmMessage
                     {
-                        // 回合被叫停：结果照样落盘，否则会留下悬空 tool_call，下一轮直接 400
-                        result = ToolResult.Fail("已取消");
-                    }
-                    catch (Exception ex)
-                    {
-                        // 工具抛异常也必须补上 completed —— 「记录意图 → 记录结果」是一对，
-                        // 缺了 completed 会话会从下一轮起每轮 400（悬空 tool_call）。
-                        result = ToolResult.Fail($"工具执行异常：{ex.GetType().Name}: {ex.Message}");
-                    }
+                        Role = LlmRole.Tool,
+                        ToolCallId = call.CallId,
+                        Content = $"ERROR: {result.Error}",
+                    });
+                    throw;
                 }
 
                 await _sink.EmitAsync(new ToolCallCompletedEvent

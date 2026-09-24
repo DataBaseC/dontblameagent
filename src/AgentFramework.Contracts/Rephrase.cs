@@ -21,7 +21,11 @@ public sealed class RephraseOptions
     /// </summary>
     public bool AutoBeforeSend { get; set; }
 
-    /// <summary>走哪个端点（"local" / "cloud"）。转述是量大而智力要求低的活，默认给本地。</summary>
+    /// <summary>
+    /// 走哪个端点。三种写法：
+    /// <c>local</c> / <c>cloud</c>（环境变量老配置）· 端点 id（如 <c>deepseek</c>，用该端点默认模型）·
+    /// <c>端点:模型</c>（如 <c>deepseek:deepseek-chat</c>）。转述是量大而智力要求低的活，默认给本地。
+    /// </summary>
     public string Model { get; set; } = "local";
 
     /// <summary>系统提示词 —— 用户可整体替换。</summary>

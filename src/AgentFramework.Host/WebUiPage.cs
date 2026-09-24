@@ -502,7 +502,10 @@ internal static class WebUiPage
             <b id="plugin-frame-title"></b>
             <button id="plugin-frame-close" class="ghost small">关闭面板</button>
           </div>
-          <iframe id="plugin-frame" sandbox="allow-scripts" style="width:100%; height:420px; border:1px solid var(--border); border-radius:8px; background:var(--bg1)"></iframe>
+          <!-- sandbox 必须带 allow-same-origin：console-kit 面板要读写父窗口的 ConsoleKit
+               （theme.js 挂在主页面）。只给 allow-scripts 时 iframe 是不透明源，
+               父窗口 API 一律 SecurityError，面板会显示「没有连到主界面」。 -->
+          <iframe id="plugin-frame" sandbox="allow-scripts allow-same-origin" style="width:100%; height:420px; border:1px solid var(--border); border-radius:8px; background:var(--bg1)"></iframe>
         </div>
       </div>
 
@@ -847,6 +850,17 @@ function renderEvent(e) {
     case 'user-message':
       addBubble('user', e.text);
       break;
+    case 'user-input-rephrased':
+      // 自动转述也让人**看见**改成了什么（从前只落日志，界面无感）
+      if (e.rephrased) {
+        addBubble('sys',
+          (e.source === 'auto' ? '✨ 自动澄清' : '✨ 手动优化')
+          + (e.model ? ' · ' + e.model : '')
+          + (e.elapsedMs ? ' · ' + e.elapsedMs + 'ms' : '')
+          + '\n原话：' + (e.original || '')
+          + '\n澄清后：' + (e.rephrased || ''));
+      }
+      break;
     case 'assistant-message':
       // B2：assistant 落地 = 本轮结束（该帧已通过 onmessage 的归属分流），
       // 清掉这个会话的“进行中”标记。事件自带 SessionId，不依赖外层帧变量。
@@ -879,7 +893,12 @@ function renderEvent(e) {
         card.querySelector('.body').textContent +=
           '\n\n结果：' + (e.success ? (e.output || '(空)') : (e.error || '失败'));
         card.classList.add('open');
-        setPhase((card.dataset.tool || '工具') + (e.success ? ' ✓ 完成' : ' ✗ 失败'));
+        // 工具失败 ≠ 回合结束：多步还会再调模型。不写清楚的话，
+        // 状态栏停在「✗ 失败」看起来像整轮已死，实际大模型仍在工作。
+        const toolLabel = card.dataset.tool || '工具';
+        setPhase(turnRunning
+          ? toolLabel + (e.success ? ' ✓ 完成' : ' ✗ 失败') + ' · 大模型仍在工作…'
+          : toolLabel + (e.success ? ' ✓ 完成' : ' ✗ 失败'));
       }
       // B2：非当前会话的轮次到不了这里（onmessage 已分流），
       // 当前会话这里也不需要再做什么 —— 忙标记统一在 assistant-message 清。
@@ -1011,9 +1030,12 @@ async function optimize() {
     const data = await response.json();
 
     if (data.rephrased) {
+      // ★ 以转述结果**替换**输入框（用户要求的主路径），并给出可撤销入口。
       lastOriginal = text;
       input.value = data.text;
       autoGrow();
+      input.focus();
+      // 可见反馈：不只改一行 hint —— 直接在时间线里留一条对照，免得「看不到转述了什么」
       hint.textContent = '';
       hint.append('已优化 · ' + (data.model || '模型') + ' · ' + data.elapsedMs + 'ms · ');
       const undo = document.createElement('a');
@@ -1023,13 +1045,27 @@ async function optimize() {
         event.preventDefault();
         input.value = lastOriginal;
         autoGrow();
-        hint.textContent = '已撤销';
+        hint.textContent = '已撤销，恢复原话';
       };
       hint.appendChild(undo);
+
+      const card = document.createElement('div');
+      card.className = 'sys';
+      card.style.margin = '6px 0';
+      const before = document.createElement('div');
+      before.style.color = 'var(--dim)';
+      before.textContent = '原话：' + text;
+      const after = document.createElement('div');
+      after.style.color = 'var(--ok)';
+      after.textContent = '已替换为：' + data.text;
+      card.appendChild(before);
+      card.appendChild(after);
+      wrap.appendChild(card);
+      toBottom();
     } else if (data.skipReason) {
-      hint.textContent = '未优化：' + data.skipReason;
+      hint.textContent = '未优化（输入框未改）：' + data.skipReason;
     } else {
-      hint.textContent = '优化失败：' + (data.error || '未知原因');
+      hint.textContent = '优化失败（输入框未改）：' + (data.error || '未知原因');
     }
   } catch (err) {
     hint.textContent = '优化失败：' + err.message;
@@ -1086,13 +1122,13 @@ function paintRephrase() {
   rephrasePill.className = 'pill clickable ' + (available ? (enabled ? 'on' : '') : 'warn');
   rephrasePill.title = available
     ? '点击打开 / 收起转述设置'
-    : '没有可用端点：转述需要一个已配置的模型（local / cloud）';
+    : '没有可用端点：请先在「模型」里配置至少一个端点';
 
   if (!available) {
     rpEnabled.disabled = true;
     rpAuto.disabled = true;
     optimizeBtn.disabled = true;
-    optimizeBtn.title = '没有可用端点：转述需要一个已配置的模型（local / cloud）';
+    optimizeBtn.title = '没有可用端点：请先在「模型」里配置至少一个端点';
   }
 }
 
@@ -2311,6 +2347,9 @@ stream.onerror = () => setConn(false);
 (async () => {
   await loadStatus();
   await loadSessions();
+  // 先拉模型列表：转述下拉要从「已配置的端点/模型」里选，
+  // 只在打开模型面板时才 loadModels 会让首屏下拉只剩 local/cloud。
+  await loadModels();
   await loadRephrase();
   await loadHistory();
   input.focus();

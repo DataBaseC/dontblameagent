@@ -60,7 +60,9 @@ public sealed class LlmUserInputRephraser : IUserInputRephraser
         {
             var request = new LlmRequest
             {
-                Model = options.Model,
+                // options.Model 可能是 "端点:模型"（如 "deepseek:deepseek-chat"）——
+                // 端点侧只认模型 id，前缀必须剥掉；不剥会把整个串当模型名发出去。
+                Model = StripEndpointPrefix(options.Model),
                 SystemPrompt = options.BuildSystemPrompt(),
                 Messages = [new LlmMessage { Role = LlmRole.User, Content = text }],
                 Tools = [],
@@ -102,6 +104,22 @@ public sealed class LlmUserInputRephraser : IUserInputRephraser
         {
             return RephraseResult.Fail(text, ex.Message, stopwatch.ElapsedMilliseconds);
         }
+    }
+
+    /// <summary>
+    /// 「端点:模型」写法只把模型 id 交给端点。
+    /// 不剥前缀的话，请求里 model 会是 "deepseek:deepseek-chat"，端点直接拒。
+    /// </summary>
+    private static string StripEndpointPrefix(string model)
+    {
+        if (string.IsNullOrWhiteSpace(model))
+        {
+            return model;
+        }
+
+        var colon = model.IndexOf(':');
+        // "端点:模型" 取冒号后一段；纯端点名或纯模型名原样用（客户端再落 DefaultModel）。
+        return colon > 0 && colon < model.Length - 1 ? model[(colon + 1)..].Trim() : model.Trim();
     }
 
     /// <summary>

@@ -270,7 +270,9 @@ public sealed class OpenAiCompatibleClient : ILlmClient, IDisposable
                         {
                             if (fn.TryGetProperty("name", out var nameNode) && nameNode.ValueKind == JsonValueKind.String)
                             {
-                                accumulator.Name += nameNode.GetString();
+                                // 名称协议上通常一次给全；个别端点每帧重发全名，用 += 会拼成
+                                // read_fileread_file → 工具永远「不存在」。按片段语义合并而不是盲拼。
+                                AccumulateName(accumulator, nameNode.GetString());
                             }
 
                             if (fn.TryGetProperty("arguments", out var argsNode) && argsNode.ValueKind == JsonValueKind.String)
@@ -308,6 +310,46 @@ public sealed class OpenAiCompatibleClient : ILlmClient, IDisposable
         }
 
         yield return new LlmStreamChunk.Completed(finishReason);
+    }
+
+    /// <summary>
+    /// 合并流式工具名：首段直接记；全名重发不重复拼接；真后缀片段才追加。
+    /// </summary>
+    private static void AccumulateName(ToolCallAccumulator accumulator, string? part)
+    {
+        if (string.IsNullOrEmpty(part))
+        {
+            return;
+        }
+
+        if (string.IsNullOrEmpty(accumulator.Name))
+        {
+            accumulator.Name = part;
+            return;
+        }
+
+        // 整名重发（相等 / 新值更长且以前缀覆盖）—— 以前值为准，不追加
+        if (string.Equals(accumulator.Name, part, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        if (part.StartsWith(accumulator.Name, StringComparison.Ordinal))
+        {
+            accumulator.Name = part;
+            return;
+        }
+
+        if (accumulator.Name.StartsWith(part, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        // 真·分片（少见）：只在尾段衔接时追加，避免拼重
+        if (!accumulator.Name.EndsWith(part, StringComparison.Ordinal))
+        {
+            accumulator.Name += part;
+        }
     }
 
     /// <summary>
@@ -379,18 +421,40 @@ public sealed class OpenAiCompatibleClient : ILlmClient, IDisposable
     {
         var messages = new JsonArray();
 
+        // ★ 本地模板（Qwen / vLLM Jinja）硬性要求「system 只能在最前、且只在开头」。
+        //   从前 SystemPrompt 一条、冻结段一条、任务卡/笔记/召回又各一条 system 挂在末尾，
+        //   端点直接 500：System message must be at the beginning —— 主对话里什么都看不到。
+        //   这里把**全部 system 正文合并成一条**放在 index 0；消息流里不再出现 system。
+        //   （任务卡/笔记/召回本身改用 user 角色承载，见调用方 —— 它们要留在近期注意力区。）
+        var systemParts = new List<string>(2);
         if (!string.IsNullOrEmpty(request.SystemPrompt))
         {
-            messages.Add(new JsonObject { ["role"] = LlmRole.System, ["content"] = request.SystemPrompt });
+            systemParts.Add(request.SystemPrompt!);
         }
 
         foreach (var message in request.Messages)
         {
+            // 角色比较容错：大小写 / 首尾空白都不该把 system 漏在消息流中部
+            if (string.Equals(message.Role?.Trim(), LlmRole.System, StringComparison.OrdinalIgnoreCase))
+            {
+                if (!string.IsNullOrWhiteSpace(message.Content))
+                {
+                    systemParts.Add(message.Content!);
+                }
+
+                continue;
+            }
+
             var node = new JsonObject { ["role"] = message.Role };
 
             if (message.Content is not null)
             {
                 node["content"] = message.Content;
+            }
+            else if (message.ToolCalls is { Count: > 0 })
+            {
+                // 个别端点（含部分 MiMo/OpenAI 兼容层）要求 assistant+tool_calls 也带 content 键
+                node["content"] = string.Empty;
             }
 
             if (message.ToolCallId is not null)
@@ -419,6 +483,15 @@ public sealed class OpenAiCompatibleClient : ILlmClient, IDisposable
             }
 
             messages.Add(node);
+        }
+
+        if (systemParts.Count > 0)
+        {
+            messages.Insert(0, new JsonObject
+            {
+                ["role"] = LlmRole.System,
+                ["content"] = string.Join("\n\n", systemParts),
+            });
         }
 
         // "auto" 表示交给端点自己的 DefaultModel —— 宿主的某个会话不必关心具体模型名

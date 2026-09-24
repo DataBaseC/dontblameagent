@@ -207,7 +207,20 @@ public sealed partial class WebUiServer : IDisposable, IApprovalPrompt
         try
         {
             await using var registration = timeout.Token
-                .Register(() => completion.TrySetResult(new ApprovalAnswer(false, false)))
+                .Register(() =>
+                {
+                    // 回合被停止 / 取消 ≠ 用户点了拒绝。
+                    // 从前一律 TrySetResult(false) → 界面显示「已被拒绝：用户拒绝」，误导。
+                    // 外部取消就取消等待，让上层走「已停止」；只有真正超时才按拒绝。
+                    if (ct.IsCancellationRequested)
+                    {
+                        completion.TrySetCanceled(ct);
+                    }
+                    else
+                    {
+                        completion.TrySetResult(new ApprovalAnswer(false, false));
+                    }
+                })
                 .ConfigureAwait(false);
 
             return await completion.Task.ConfigureAwait(false);

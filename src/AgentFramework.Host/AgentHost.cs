@@ -730,14 +730,15 @@ public sealed class AgentHost : IAsyncDisposable
 
                 if (notesSummary is not null)
                 {
-                    dynamicMessages.Add(new LlmMessage { Role = LlmRole.System, Content = notesSummary });
+                    // user 而非 system：system 只能出现在消息流最前（本地 Jinja 模板会 500）
+                    dynamicMessages.Add(new LlmMessage { Role = LlmRole.User, Content = "【工作小本本·非用户发言】\n" + notesSummary });
                 }
             }
 
             var recall = await BuildRecallBlockAsync(profile, MapScopes(profile.MemoryScopes, projectDir), input, ct).ConfigureAwait(false);
             if (recall is not null)
             {
-                dynamicMessages.Add(new LlmMessage { Role = LlmRole.System, Content = recall });
+                dynamicMessages.Add(new LlmMessage { Role = LlmRole.User, Content = "【相关记忆·非用户发言】\n" + recall });
             }
 
             var frozen = await BuildFrozenBlockAsync(profile, MapScopes(profile.MemoryScopes, projectDir), ct).ConfigureAwait(false);
@@ -1634,10 +1635,20 @@ public sealed class HostEventSink(
                     }
                     else
                     {
-                        var allowed = await interaction.ConfirmAsync(toolPreExecuteEvent, ct).ConfigureAwait(false);
+                        // 回合被停止时 ConfirmAsync 会以取消结束 —— 不是「用户拒绝」。
+                        bool allowed;
+                        try
+                        {
+                            allowed = await interaction.ConfirmAsync(toolPreExecuteEvent, ct).ConfigureAwait(false);
+                        }
+                        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+                        {
+                            throw;
+                        }
+
                         if (!allowed)
                         {
-                            Deny(toolPreExecuteEvent, "用户拒绝");
+                            Deny(toolPreExecuteEvent, ct.IsCancellationRequested ? "回合已取消" : "用户拒绝");
                         }
                     }
 

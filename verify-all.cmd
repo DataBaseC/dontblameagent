@@ -1,36 +1,48 @@
 @echo off
-rem ══════════════════════════════════════════════════════════════
-rem  跑全部验证工程（17 个）—— 双击即可，或在包根目录执行 verify-all.cmd
+rem ============================================================
+rem  Run all 17 verify projects. Encoding MUST be ANSI/GBK.
+rem  Expect: every suite reports M failures = 0.
 rem
-rem  预期：全部 0 失败（总数以每次输出为准，不要写死）
-rem        · VerifyTools 里有 4 条要创建符号链接：Windows 非开发者模式下会打印
-rem          [SKIP] 跳过，于是总数少 4 条 —— 那是环境限制，不是失败
-rem        · VerifySandbox 里有 2 条 Job Object 专有项：非 Windows 上跳过（Windows 上转 PASS）
-rem
-rem  注意：不要给这个脚本加 --artifacts-path 或换输出根 ——
-rem        Verify/VerifyHost/VerifyLauncher 的 CopySamplePlugin 硬编码了
-rem        src\AgentFramework.SamplePlugin\bin\<配置>\<TFM>，换了输出根就复制不到插件。
-rem ══════════════════════════════════════════════════════════════
+rem  Build uses -m:1 (single node): parallel project builds can
+rem  race on AgentFramework.Contracts ref dll and produce CS0009
+rem  "file in use" plus a storm of fake CS0234/CS0246 errors.
+rem ============================================================
 setlocal
-chcp 65001 >nul
 cd /d "%~dp0"
 
-echo [1/2] 编译（首次会 restore，需联网，约 1 分钟）……
-dotnet build AgentFramework.sln -c Debug --nologo -v quiet
+echo [1/2] Building solution (Debug, single-node) ...
+
+rem Release file locks held by the incremental build server / VS.
+dotnet build-server shutdown >nul 2>&1
+
+dotnet build AgentFramework.sln -c Debug -m:1 --nologo -v quiet
 if errorlevel 1 (
     echo.
-    echo   编译失败 —— 先把编译错误解决掉再跑验证。
-    pause
-    exit /b 1
+    echo   Build failed. If CS0009 "file in use" on *.dll under obj\:
+    echo   retrying once after build-server shutdown and Contracts obj wipe ...
+    dotnet build-server shutdown >nul 2>&1
+    if exist "src\AgentFramework.Contracts\obj" rd /s /q "src\AgentFramework.Contracts\obj" 2>nul
+    if exist "src\AgentFramework.Contracts\bin" rd /s /q "src\AgentFramework.Contracts\bin" 2>nul
+    dotnet build AgentFramework.sln -c Debug -m:1 --nologo -v quiet
+    if errorlevel 1 (
+        echo.
+        echo   Build still failed. Close Visual Studio / other builds, run clean.cmd, retry.
+        pause
+        exit /b 1
+    )
 )
 
-echo [2/2] 逐个跑验证工程……
-for %%n in (Verify VerifyData VerifyAgent VerifyTools VerifyHost VerifyLauncher VerifyWeb VerifySummary VerifyRephrase VerifyContext VerifyMemory VerifyLlm VerifyPlugins VerifyBaseKit VerifySandbox VerifyToolsets VerifyCheckpoint) do (
+echo [2/2] Running verify suites ...
+rem Serial + 1s gap: suites share plugin DLL outputs; a still-open
+rem process causes false "file in use" failures.
+for %%n in (Verify VerifyData VerifyAgent VerifyTools VerifySandbox VerifyPlugins VerifyLlm VerifyHost VerifyLauncher VerifyWeb VerifySummary VerifyRephrase VerifyContext VerifyMemory VerifyToolsets VerifyBaseKit VerifyCheckpoint) do (
     echo.
     echo ============== %%n ==============
     dotnet run --project "tests\AgentFramework.%%n\AgentFramework.%%n.csproj" -c Debug --no-build --nologo
+    timeout /t 1 /nobreak >nul
 )
 
 echo.
-echo 全部跑完。逐个对一下每个工程的「结果：N 通过 / M 失败」——M 必须为 0。
+echo Done. Every suite must show "M failures = 0".
+echo If a suite says file-in-use / missing plugin DLL, wait a second and rerun it.
 pause

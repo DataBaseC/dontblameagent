@@ -113,17 +113,26 @@ dotnet run --project src\AgentFramework.Launcher -- --plugins .\plugins
 
 ## 第 3 步：跑全部验证
 
+**推荐**（一键，配置与 `run.cmd` 一致）：
+
+```bat
+verify-all.cmd
+```
+
+手工逐个跑时请与脚本同配置（**Debug**）：
+
 ```powershell
 $p = @("Verify","VerifyData","VerifyAgent","VerifyTools","VerifyHost",
        "VerifyLauncher","VerifyWeb","VerifySummary","VerifyRephrase","VerifyContext",
        "VerifyMemory","VerifyLlm","VerifyPlugins","VerifyBaseKit","VerifySandbox","VerifyToolsets",
        "VerifyCheckpoint")
 foreach ($n in $p) {
-  dotnet run --project "tests\AgentFramework.$n\AgentFramework.$n.csproj" -c Release
+  dotnet run --project "tests\AgentFramework.$n\AgentFramework.$n.csproj" -c Debug --no-build
 }
 ```
 
 预期合计 **全部 0 失败**（总数以 `verify-all.cmd` / 各工程输出为准，不要写死），退出码 0。**都不需要 API key、不需要联网、不需要真实模型。**
+若个别套件偶发「文件被占用 / 找不到插件 DLL」，等 1–2 秒重跑该套件即可（共享插件输出目录的已知竞态）。
 
 ## 命令行参数一览
 
@@ -170,10 +179,20 @@ pack-launcher.cmd
 这两块是**分开编译**的 —— 改本体不用重编启动器，改启动器也不用重编本体。
 
 ```bat
-build-host.cmd        :: 只编本体
-build-launcher.cmd    :: 只编启动器（不会连带编本体，约 1.5 分钟）
-run.cmd               :: 编本体 + 直接起对话界面
+build-host.cmd        :: 只编本体（Debug）
+build-launcher.cmd    :: 只编启动器（Debug，不会连带编本体，约 1.5 分钟）
+run.cmd               :: 编本体 + 同步三件基石插件到 plugins\ + 起对话界面
+clean.cmd             :: 清掉 bin / obj / build / out / 打包 Payload（CS0009 占用时先跑这个）
+verify-all.cmd        :: 全量验证（Debug；17 套件串行，套件间留 1 秒防 DLL 占用假失败）
 ```
+
+> 本体与插件开发统一用 **Debug**（`run.cmd` / `build-host.cmd` / `verify-all.cmd` 一致）。
+> 发布与打包用 **Release**（`pack-launcher.cmd` / 下文 `dotnet publish`）。
+>
+> **所有 `*.cmd` 必须保持 ANSI/GBK（代码页 936）+ CRLF**，**不要**存成 UTF-8，也**不要**加 `chcp 65001`。
+> 中文 Windows 的 cmd 按 OEM 代码页**解析**批处理；UTF-8 中文会让脚本在执行前就解析失败——双击窗口一闪就关，看起来像「没编译」。
+>
+> 脚本里的 `dotnet build` 带了 **`-m:1`（单节点串行）**：并行编译会抢 `Contracts` 的 ref 程序集，报 CS0009「文件被占用」并连带刷出一堆假的 CS0234/CS0246。仍占用时脚本会自动关掉 build-server、清 Contracts 的 bin/obj 再重试一次。
 
 为什么能分开：**启动器不引用本体工程**了。（原来引用，于是改一行本体就得把启动器重编一遍。）
 

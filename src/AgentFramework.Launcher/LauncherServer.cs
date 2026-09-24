@@ -426,6 +426,8 @@ public sealed class LauncherServer
               :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
               .wrap { max-width: 860px; margin: 0 auto; }
               h1 { font-size: 21px; margin: 0 0 4px; font-weight: 600; letter-spacing: .5px; }
+              h1 .ver { font-size: 12px; color: var(--dim); font-weight: 400; letter-spacing: 0;
+                        margin-left: 10px; vertical-align: middle; }
               .sub { color: var(--dim); font-size: 13px; margin: 0 0 20px; }
               .sub b { color: #aab3c2; }
               .card { background: var(--card); border: 1px solid var(--border); border-radius: 10px; overflow: hidden;
@@ -484,7 +486,10 @@ public sealed class LauncherServer
             </head>
             <body>
             <div class="wrap">
-              <h1>Agent 启动器</h1>
+              <h1>Agent 启动器
+            """);
+        builder.Append($" <span class=\"ver\">{Escape(BuildInfo.Stamp)}</span></h1>\n");
+        builder.Append("""
               <p class="sub">列表顺序 = <b>装配顺序</b>（前置必须在上）。用 ↑↓ 调序，勾选决定装不装，预检拦住会炸的组合。</p>
               <div class="card">
                 <div class="head"><span>#</span><span style="flex:1">插件（按加载顺序）</span><span>状态</span></div>
@@ -653,6 +658,7 @@ public sealed class LauncherServer
 
         builder.Append($"""
             <div class="meta">
+              启动器：<code>{Escape(BuildInfo.Stamp)}</code><br>
               插件目录：<code>{Escape(_state.PluginsDir)}</code><br>
               装配档案：<code>{Escape(_state.ProfilePath)}</code>（LoadOrder 字段 = 手动排序）<br>
               已启用 {_state.Profile.EnabledPlugins.Count} / {_state.Catalog.Count} 个 · 装配顺序见列表序号
@@ -732,6 +738,7 @@ public sealed class LauncherServer
             """);
 
         builder.Append("<table>");
+        AddRow(builder, "启动器版本", Escape(BuildInfo.Stamp));
         AddRow(builder, "宿主进程", IsRunning ? $"<span class='ok'>运行中 PID {_state.GetRunningHost()!.Id}</span>" : "<span class='warn'>未运行</span>");
         // v3.5 审查：AddRow 的 value 通道是「已渲染 HTML」（调用方有意塞 <span>），
         // 所以纯数据项必须在调用处各自转义。

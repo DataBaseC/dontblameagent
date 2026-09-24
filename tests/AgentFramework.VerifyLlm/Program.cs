@@ -66,7 +66,19 @@ var serverTask = Task.Run(async () =>
 
             ctx.Response.ContentType = "text/event-stream";
             var stream = ctx.Response.OutputStream;
-            var frame = """
+            // 工具名重发场景：同名在两帧里各给一次完整 function.name
+            var frame = capturedPayload?.Contains("tool-name-test") == true
+                ? """
+                data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"read_file","arguments":"{\"path\"" }}]},"finish_reason":null}]}
+
+                data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"name":"read_file","arguments":":\"a.txt\"}"}}]},"finish_reason":null}]}
+
+                data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}
+
+                data: [DONE]
+
+                """
+                : """
                 data: {"choices":[{"delta":{"content":"好"},"finish_reason":null}]}
 
                 data: [DONE]
@@ -158,6 +170,75 @@ await DrainAsync(qwenHigh, new LlmRequest { Model = "auto", Messages = [new LlmM
 var decodedHigh = capturedPayload is null ? null : System.Text.RegularExpressions.Regex.Unescape(capturedPayload);
 Check("qwen high 带预算", decodedHigh?.Contains("<enable_thinking>true</enable_thinking>") == true
     && decodedHigh?.Contains("<thinking_budget>16384</thinking_budget>") == true);
+
+// ── 2.5 system 必须只在最前（Qwen/vLLM Jinja 硬性要求）────────
+Console.WriteLine("\n── 2.5 system 位置与工具名累积 ──");
+
+capturedPayload = null;
+await DrainAsync(plainClient, new LlmRequest
+{
+    Model = "auto",
+    SystemPrompt = "主系统提示",
+    Messages =
+    [
+        new LlmMessage { Role = LlmRole.User, Content = "第一句" },
+        new LlmMessage { Role = LlmRole.System, Content = "任务卡旧写法" },
+        new LlmMessage { Role = LlmRole.Assistant, Content = "好" },
+        new LlmMessage { Role = LlmRole.System, Content = "笔记旧写法" },
+    ],
+});
+
+var sysCheck = capturedPayload is null ? null : JsonDocument.Parse(capturedPayload);
+var msgArr = sysCheck?.RootElement.GetProperty("messages");
+var systemIndexes = new List<int>();
+if (msgArr is not null)
+{
+    for (var i = 0; i < msgArr.Value.GetArrayLength(); i++)
+    {
+        if (msgArr.Value[i].TryGetProperty("role", out var r) && r.GetString() == "system")
+        {
+            systemIndexes.Add(i);
+        }
+    }
+}
+
+Check("★ 全部 system 合并到一条且在最前（本地 Jinja 不再 500）",
+    systemIndexes.Count == 1 && systemIndexes[0] == 0,
+    systemIndexes.Count == 0 ? "无 system" : string.Join(",", systemIndexes));
+Check("合并后的 system 含全部来源",
+    msgArr is not null
+    && msgArr.Value[0].TryGetProperty("content", out var sysContent)
+    && sysContent.GetString()?.Contains("主系统提示") == true
+    && sysContent.GetString()?.Contains("任务卡旧写法") == true
+    && sysContent.GetString()?.Contains("笔记旧写法") == true);
+Check("消息流里不再残留 system",
+    msgArr is not null && systemIndexes.Count == 1);
+
+// 工具名每帧重发全名时不得拼成 read_fileread_file
+List<ToolCallRequest>? capturedCalls = null;
+var toolNameClient = new OpenAiCompatibleClient("tool-name", new OpenAiCompatibleOptions
+{
+    BaseUrl = $"http://127.0.0.1:{freePort}/v1",
+    DefaultModel = "test-model",
+});
+await foreach (var chunk in toolNameClient.StreamAsync(new LlmRequest
+{
+    Model = "auto",
+    Messages = [new LlmMessage { Role = LlmRole.User, Content = "tool-name-test" }],
+}, CancellationToken.None).ConfigureAwait(false))
+{
+    if (chunk is LlmStreamChunk.ToolCallsReady ready)
+    {
+        capturedCalls = ready.Calls.ToList();
+    }
+}
+
+Check("★ 工具名全名重发不拼重（否则永远「工具不存在」）",
+    capturedCalls is { Count: 1 } && capturedCalls[0].ToolName == "read_file",
+    capturedCalls is null ? "(无调用)" : string.Join(",", capturedCalls.Select(c => c.ToolName)));
+Check("工具参数跨帧拼完整",
+    capturedCalls is { Count: 1 } && capturedCalls[0].ArgumentsJson.Contains("a.txt"),
+    capturedCalls is { Count: 1 } ? capturedCalls[0].ArgumentsJson : "");
 
 listener.Stop();
 

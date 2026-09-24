@@ -4,6 +4,8 @@
     <OutputType>Exe</OutputType>
     <RootNamespace>AgentFramework.Launcher</RootNamespace>
     <AssemblyName>AgentFramework.Launcher</AssemblyName>
+    <!-- 启动器页头会显示这个版本号 + 编译时间戳（BuildInfo） -->
+    <Version>3.5.0</Version>
   </PropertyGroup>
 
   <ItemGroup>

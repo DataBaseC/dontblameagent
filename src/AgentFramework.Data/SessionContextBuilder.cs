@@ -164,8 +164,8 @@ public static class SessionContextBuilder
         {
             messages.Add(new LlmMessage
             {
-                Role = LlmRole.System,
-                Content = "【早期对话摘要】原始事件仍在会话日志中，需要细节时可回到原文检索。\n" + summary,
+                Role = LlmRole.User,
+                Content = "【早期对话摘要·非用户发言】原始事件仍在会话日志中，需要细节时可回到原文检索。\n" + summary,
             });
         }
 
@@ -307,7 +307,9 @@ public static class SessionContextBuilder
             taskCard = TaskCardBuilder.Build(all, opt);
             if (taskCard.Length > 0)
             {
-                messages.Add(new LlmMessage { Role = LlmRole.System, Content = taskCard });
+                // 用 user 而不是 system：Qwen/vLLM 模板要求 system 只能在最前。
+                // 任务卡要挂在末尾（近期注意力区），role 改 user、加前缀标明不是用户发言。
+                messages.Add(new LlmMessage { Role = LlmRole.User, Content = "【任务卡·非用户发言】\n" + taskCard });
                 taskCardInjected = true;
             }
         }

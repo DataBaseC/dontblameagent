@@ -1,53 +1,53 @@
 @echo off
-rem ══════════════════════════════════════════════════════════════
-rem  一键运行：构建 → 起对话界面
-rem
-rem  为什么要有这个脚本：
-rem    dotnet run 每次都会先构建。如果界面还开着（或另开了一个终端在构建），
-rem    两次构建就会抢同一个 obj/bin 下的文件，报一大堆 CS0009「文件被占用」。
-rem    这个脚本把「构建」和「运行」串成一条线，并且运行阶段用 --no-build，
-rem    就不会再触发第二次构建。
-rem ══════════════════════════════════════════════════════════════
+rem ============================================================
+rem  One-shot: build host + base plugins -> open chat UI
+rem  Encoding: MUST be ANSI/GBK (codepage 936). Do NOT save as
+rem  UTF-8 and do NOT add chcp 65001 -- cmd parses the script
+rem  in the OEM codepage first; UTF-8 Chinese breaks parsing
+rem  and the window flashes out immediately.
+rem  Build uses -m:1 to avoid CS0009 races on Contracts ref dll.
+rem ============================================================
 
 setlocal
-chcp 65001 >nul
 cd /d "%~dp0"
 
-rem 先看是不是已经有界面在跑 —— 它会锁住 bin 里的 dll，构建必然失败。
-rem （这就是「海量 CS0009 / MSB4018 文件被占用」的真正来源。）
+rem If a host is already running it locks bin\*.dll and build fails with CS0009.
 tasklist /fi "imagename eq AgentFramework.Host.exe" 2>nul | find /i "AgentFramework.Host.exe" >nul
 if not errorlevel 1 (
     echo.
-    echo   检测到还有界面在运行（AgentFramework.Host.exe）。
-    echo   它锁着构建产物，请先关掉那个窗口再运行本脚本；
-    echo   实在关不掉就在任务管理器里结束它，或者执行：
-    echo       taskkill /f /im AgentFramework.Host.exe
+    echo   AgentFramework.Host.exe is still running and locks build output.
+    echo   Close that window first, or run: taskkill /f /im AgentFramework.Host.exe
     echo.
     pause
     exit /b 1
 )
 
-echo [1/3] 构建中（只构建宿主及其依赖，比全量快）……
-dotnet build src\AgentFramework.Host --nologo -v quiet
+dotnet build-server shutdown >nul 2>&1
+
+echo [1/3] Building host (Debug, single-node) ...
+dotnet build src\AgentFramework.Host -c Debug -m:1 --nologo -v quiet
 if errorlevel 1 (
     echo.
-    echo   构建失败。
-    echo   若报的是 CS0009 / 文件被占用，请先按顺序做：
-    echo     1^) 停掉所有正在运行的实例（跑着界面的窗口按 Ctrl+C^)
-    echo     2^) dotnet build-server shutdown
-    echo     3^) 删掉所有 obj 与 bin 目录后重试
-    exit /b 1
+    echo   Build failed. If CS0009 "file in use", retrying once ...
+    dotnet build-server shutdown >nul 2>&1
+    if exist "src\AgentFramework.Contracts\obj" rd /s /q "src\AgentFramework.Contracts\obj" 2>nul
+    if exist "src\AgentFramework.Contracts\bin" rd /s /q "src\AgentFramework.Contracts\bin" 2>nul
+    dotnet build src\AgentFramework.Host -c Debug -m:1 --nologo -v quiet
+    if errorlevel 1 (
+        echo.
+        echo   Build still failed. Try: close other builds, run clean.cmd, retry.
+        pause
+        exit /b 1
+    )
 )
 
-rem ── 基石插件 ──────────────────────────────────────────────
-rem 插件是独立工程，不随宿主构建。它们必须出现在插件目录里才会被装载，
-rem 而插件的加载路径就是 cwd 下的 plugins\（启动器里也一样）。
-rem 少了这一步，「插件写好了但界面上一个都没有」会让人以为是加载坏了。
-echo [2/3] 同步基石插件到 plugins\ ……
+rem Base plugins are separate projects; they must land in .\plugins\ to be loaded.
+rem Keep this list in sync with pack-launcher.cmd (devkit / writing-kit / console-kit).
+echo [2/3] Sync base plugins to plugins\ ...
 if not exist "plugins" mkdir "plugins"
-dotnet build src\AgentFramework.Plugins.DevKit --nologo -v quiet
-dotnet build src\AgentFramework.Plugins.WritingKit --nologo -v quiet
-dotnet build src\AgentFramework.Plugins.ConsoleKit --nologo -v quiet
+dotnet build src\AgentFramework.Plugins.DevKit -c Debug -m:1 --nologo -v quiet
+dotnet build src\AgentFramework.Plugins.WritingKit -c Debug -m:1 --nologo -v quiet
+dotnet build src\AgentFramework.Plugins.ConsoleKit -c Debug -m:1 --nologo -v quiet
 
 if not exist "plugins\devkit" mkdir "plugins\devkit"
 if not exist "plugins\writing-kit" mkdir "plugins\writing-kit"
@@ -56,7 +56,10 @@ xcopy /y /q "src\AgentFramework.Plugins.DevKit\bin\Debug\net10.0\*" "plugins\dev
 xcopy /y /q "src\AgentFramework.Plugins.WritingKit\bin\Debug\net10.0\*" "plugins\writing-kit\" >nul
 xcopy /y /q "src\AgentFramework.Plugins.ConsoleKit\bin\Debug\net10.0\*" "plugins\console-kit\" >nul
 
-echo [3/3] 启动对话界面（Ctrl+C 退出）……
+echo [3/3] Starting chat UI (Ctrl+C to stop) ...
 dotnet run --project src\AgentFramework.Host --no-build -- --web %*
 
+echo.
+echo Host exited. Press any key to close this window.
+pause >nul
 endlocal

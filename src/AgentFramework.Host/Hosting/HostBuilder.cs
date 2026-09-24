@@ -228,9 +228,14 @@ public sealed class ModelModule : IHostModule
                 return direct;
             }
 
-            // "端点:模型" 形态：按模型管理里的端点配置临时造客户端
+            if (modelSettings is null)
+            {
+                return null;
+            }
+
+            // "端点:模型" 形态（如 "deepseek:deepseek-chat"）→ 指到具体模型的客户端
             var parts = name.Split(':', 2);
-            if (parts.Length == 2 && modelSettings is not null)
+            if (parts.Length == 2)
             {
                 var provider = modelSettings.FindProvider(parts[0].Trim());
                 var modelId = parts[1].Trim();
@@ -245,6 +250,24 @@ public sealed class ModelModule : IHostModule
                         ReasoningEffort = provider.ReasoningEffort ?? string.Empty,
                     });
                 }
+
+                return null;
+            }
+
+            // 只写端点 id（"deepseek"）→ 用该端点的默认/首个模型。
+            // 界面下拉会提供这种项；从前只认 local/cloud/「端点:模型」，这里会静默失效。
+            var whole = modelSettings.FindProvider(name.Trim());
+            if (whole is not null && !string.IsNullOrWhiteSpace(whole.BaseUrl))
+            {
+                var fallbackModel = whole.Models.FirstOrDefault()?.Id;
+                return new OpenAiCompatibleClient(whole.Id, new OpenAiCompatibleOptions
+                {
+                    BaseUrl = whole.BaseUrl,
+                    ApiKey = whole.ResolveApiKey(modelStore?.Protector ?? SecretProtectors.Default) ?? string.Empty,
+                    DefaultModel = string.IsNullOrWhiteSpace(fallbackModel) ? "auto" : fallbackModel!,
+                    ReasoningStyle = string.IsNullOrWhiteSpace(whole.ReasoningStyle) ? ReasoningStyles.None : whole.ReasoningStyle,
+                    ReasoningEffort = whole.ReasoningEffort ?? string.Empty,
+                });
             }
 
             return null;

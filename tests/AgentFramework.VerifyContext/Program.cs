@@ -72,7 +72,7 @@ Check("遮蔽文本标明了工具名", narrow.Messages.Any(m => m.Content?.Cont
 Check("遮蔽文本保留了原长度", narrow.Messages.Any(m => m.Content?.Contains("原始 3005") == true));
 Check("遮蔽文本指向了取回途径", narrow.Messages.Any(m => m.Content?.Contains("search_history") == true));
 Check("窗口内的工具结果逐字保留", narrow.Messages.Last(m => m.Role == LlmRole.Tool).Content!.Contains("第8轮内容"));
-Check("遮蔽不动对话文本", narrow.Messages.Count(m => m.Role == LlmRole.User) == 8);
+Check("遮蔽不动对话文本", narrow.Messages.Count(m => m.Role == LlmRole.User && (m.Content is null || !m.Content.Contains("非用户发言"))) == 8);
 Check(
     "★ 遮蔽确实省了 token",
     narrow.EstimatedTokens < wide.EstimatedTokens,
@@ -112,7 +112,7 @@ var projected = SessionContextBuilder.Project(withTasks, new ContextOptions());
 Check("任务卡被注入上下文", projected.TaskCardInjected);
 Check(
     "★ 任务卡位于上下文末尾（近期注意力区）",
-    projected.Messages[^1].Role == LlmRole.System && projected.Messages[^1].Content!.Contains("【任务卡】"));
+    projected.Messages[^1].Role == LlmRole.User && projected.Messages[^1].Content!.Contains("【任务卡·非用户发言】"));
 Check("投影直接给出任务卡文本", projected.TaskCard is not null);
 
 Check(
@@ -203,9 +203,9 @@ withSummary.Add(new ContextCompactedEvent
 });
 
 var folded = SessionContextBuilder.Project(withSummary, new ContextOptions { RecentTurnsKeptVerbatim = 2 });
-Check("摘要被放进上下文开头", folded.Messages[0].Role == LlmRole.System && folded.Messages[0].Content!.Contains("早期对话摘要"));
+Check("摘要被放进上下文开头", folded.Messages[0].Role == LlmRole.User && folded.Messages[0].Content!.Contains("早期对话摘要·非用户发言"));
 Check("摘要内容进了上下文", folded.Messages[0].Content!.Contains("接口不能改"));
-Check("被折叠的老轮次不再逐条出现", folded.Messages.Count(m => m.Role == LlmRole.User) == 2, $"{folded.Messages.Count(m => m.Role == LlmRole.User)}");
+Check("被折叠的老轮次不再逐条出现", folded.Messages.Count(m => m.Role == LlmRole.User && (m.Content is null || !m.Content.Contains("非用户发言"))) == 2, $"{folded.Messages.Count(m => m.Role == LlmRole.User && (m.Content is null || !m.Content.Contains("非用户发言")))}");
 Check(
     "★ 折叠比单纯遮蔽更省",
     folded.EstimatedTokens < narrow.EstimatedTokens,

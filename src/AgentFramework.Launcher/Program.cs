@@ -219,7 +219,7 @@ static string Quote(string value) => value.Contains(' ') ? $"\"{value}\"" : valu
 
 var server = new LauncherServer(state, port);
 
-Console.WriteLine("═══ Agent 启动器 ═══");
+Console.WriteLine($"═══ Agent 启动器 {BuildInfo.Stamp} ═══");
 Console.WriteLine($"插件目录：{pluginsDir}");
 Console.WriteLine($"装配档案：{profilePath}");
 Console.WriteLine($"发现插件：{catalog.Plugins.Count} 个" + (catalog.Errors.Count > 0 ? $"（{catalog.Errors.Count} 个有问题的被跳过）" : ""));

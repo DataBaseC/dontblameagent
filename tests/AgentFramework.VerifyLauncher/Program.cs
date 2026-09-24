@@ -153,6 +153,7 @@ try
 {
     var html = await http.GetStringAsync(server.Url);
     Check("页面可访问", html.Contains("Agent 启动器"));
+    Check("页面显示构建版本（便于确认编译成功）", html.Contains(BuildInfo.Stamp), BuildInfo.Stamp);
     Check("页面列出插件", html.Contains("Hello Plugin"));
     Check("页面提示损坏插件", html.Contains("broken"), "坏清单提示已展示");
     Check("页面初始为未勾选", html.Contains("未启用"));
