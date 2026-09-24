@@ -1,0 +1,32 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <RootNamespace>AgentFramework.VerifyBaseKit</RootNamespace>
+    <AssemblyName>AgentFramework.VerifyBaseKit</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../../src/AgentFramework.Host/AgentFramework.Host.csproj" />
+    <!-- 三个基石插件：dll 由 ProjectReference 带进输出目录，运行期再拷进临时插件目录 -->
+    <ProjectReference Include="../../src/AgentFramework.Plugins.DevKit/AgentFramework.Plugins.DevKit.csproj" />
+    <ProjectReference Include="../../src/AgentFramework.Plugins.WritingKit/AgentFramework.Plugins.WritingKit.csproj" />
+    <ProjectReference Include="../../src/AgentFramework.Plugins.ConsoleKit/AgentFramework.Plugins.ConsoleKit.csproj" />
+  </ItemGroup>
+
+  <!--
+    插件目录里的静态文件（清单 / 样式 / 脚本 / 面板）随构建拷到输出的 baseplugins/&lt;id&gt;/。
+    为什么不用 CopySamplePlugin 那种「从源树 bin 目录拷」的写法：
+    那个路径在换输出根（artifacts-path）时会落空，制造假红。
+    这里走 MSBuild 自己的 Link，路径由构建系统算，跟输出根无关。
+  -->
+  <ItemGroup>
+    <None Include="../../src/AgentFramework.Plugins.DevKit/plugin.json" Link="baseplugins/devkit/plugin.json" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="../../src/AgentFramework.Plugins.WritingKit/plugin.json" Link="baseplugins/writing-kit/plugin.json" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="../../src/AgentFramework.Plugins.ConsoleKit/plugin.json" Link="baseplugins/console-kit/plugin.json" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="../../src/AgentFramework.Plugins.ConsoleKit/theme.css" Link="baseplugins/console-kit/theme.css" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="../../src/AgentFramework.Plugins.ConsoleKit/theme.js" Link="baseplugins/console-kit/theme.js" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="../../src/AgentFramework.Plugins.ConsoleKit/panel.html" Link="baseplugins/console-kit/panel.html" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+</Project>

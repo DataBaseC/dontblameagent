@@ -11,6 +11,10 @@
     <ProjectReference Include="../../src/AgentFramework.Agent/AgentFramework.Agent.csproj" />
     <ProjectReference Include="../../src/AgentFramework.Data/AgentFramework.Data.csproj" />
     <ProjectReference Include="../../src/AgentFramework.Kernel/AgentFramework.Kernel.csproj" />
+    <!-- 本工程直接 new SandboxRegistry（验 run_command 语义）。
+         从前靠 Tools.csproj 的传递引用；Tools 只依赖 Contracts 里的 ISandbox* 之后，
+         这里改为显式引用实现工程。 -->
+    <ProjectReference Include="../../src/AgentFramework.Sandbox/AgentFramework.Sandbox.csproj" />
   </ItemGroup>
 
 </Project>

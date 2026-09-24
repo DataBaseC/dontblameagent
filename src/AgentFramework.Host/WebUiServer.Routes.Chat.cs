@@ -78,8 +78,13 @@ public sealed partial class WebUiServer
 
                     // 回合生命周期帧：所有页面据此恢复发送按钮 / 清忙标记。
                     // 之前前端只能猜（202 后盲等事件），现在有明确的终点信号。
+                    //
+                    // ★ 带上 turnId：极快的回合（工具一失败就收尾）会在 202 响应**之前**
+                    //   就把这一帧推出去，前端随后收到 202 会盲目把按钮又置成「停止」——
+                    //   回合明明结束了，按钮却卡住，非要手动再点一下。带上 id，
+                    //   前端就能识别「这个回合已经结束了」，不再覆盖终点状态。
                     Broadcast(JsonSerializer.SerializeToElement(
-                        new { type = "turn-ended", sessionId = session.SessionId },
+                        new { type = "turn-ended", sessionId = session.SessionId, turnId },
                         WebUiJson.Options));
                 }
             });
@@ -243,17 +248,62 @@ public sealed partial class WebUiServer
             request.Json(new { ok = true, name, enabled });
         }));
 
+        // ── 工具包（可见性的最小单位）────────────────────────────
+        // 「装了什么」与「这一轮给模型看什么」解耦的界面出口：
+        // 一排开关，按这段活的需要开合，省的是每轮的 schema token，也是挑错的机会。
+        Map(new DelegateRoute("GET", "/api/toolsets", (request, _) =>
+        {
+            request.Json(new
+            {
+                ok = true,
+                toolsets = _host.Toolsets.Select(v => new
+                {
+                    id = v.Id,
+                    name = v.Name,
+                    description = v.Description,
+                    tools = v.Tools,
+                    enabled = v.Enabled,
+                    locked = v.Protected,
+                    eager = v.Eager,
+                    source = v.Source,
+                }),
+            });
+            return ValueTask.CompletedTask;
+        }));
+
+        Map(new DelegateRoute("POST", "/api/toolsets/toggle", async (request, ct) =>
+        {
+            var body = await request.ReadBodyAsync().ConfigureAwait(false);
+            var id = body is null ? null : ReadString(body.Value, "id");
+            var enabled = body is not null && TryReadBool(body.Value, "enabled", out var flag) && flag;
+
+            if (string.IsNullOrWhiteSpace(id) || _host.Toolsets.All(x => x.Id != id))
+            {
+                request.Json(new { ok = false, error = "工具包不存在" }, 404);
+                return;
+            }
+
+            // 保留包会被 SetToolsetEnabled 拒掉 —— 这里如实回原因，不假装成功
+            if (!_host.SetToolsetEnabled(id, enabled))
+            {
+                request.Json(new { ok = false, error = "这是保留包，不能关闭" }, 400);
+                return;
+            }
+
+            request.Json(new { ok = true, id, enabled });
+        }));
+
         // ── 记忆管理面板（降级/升级/合并/清扫）──────────────
-        Map(new DelegateRoute("GET", "/api/memory/list", (request, _) =>
+        Map(new DelegateRoute("GET", "/api/memory/list", async (request, ct) =>
         {
             if (_host.Memory.Kind == "none")
             {
                 request.Json(new { ok = false, error = "记忆未启用" }, 400);
-                return ValueTask.CompletedTask;
+                return;
             }
 
-            request.Json(new { ok = true, memory = MemoryListPayload(_host) });   // 列表按当前会话的项目作用域取
-            return ValueTask.CompletedTask;
+            // 列表按当前会话的项目作用域取；必须 await —— .Result 会把同步上下文卡死。
+            request.Json(new { ok = true, memory = await MemoryListPayloadAsync(_host, ct).ConfigureAwait(false) });
         }));
 
         Map(new DelegateRoute("POST", "/api/memory/action", async (request, ct) =>
@@ -413,7 +463,7 @@ public sealed partial class WebUiServer
             foreach (var scope in (string[]) [MemoryScope.Global, projectScope])
             {
                 var count = dryRun
-                    ? SweepPreview(_host.Memory, scope, now, days, maxScore)
+                    ? await SweepPreviewAsync(_host.Memory, scope, now, days, maxScore, ct).ConfigureAwait(false)
                     : await _host.Memory.SweepAsync(scope, now, days, maxScore, "system", ct).ConfigureAwait(false);
                 results.Add(new { scope, count });
                 total += count;
@@ -512,15 +562,16 @@ public sealed partial class WebUiServer
     /// 记忆面板的数据载荷：全局层 + **当前会话的项目作用域**（多项目隔离）。
     /// 项目作用域 id 内嵌项目目录 —— 面板看到的永远是"这个会话所在项目"的账。
     /// </summary>
-    private static object MemoryListPayload(AgentHost host)
+    private static async Task<object> MemoryListPayloadAsync(AgentHost host, CancellationToken ct = default)
     {
         var projectScope = MemoryScope.ProjectFor(host.Session?.ProjectDir ?? host.Options.WorkspaceRoot);
         var projectDir = host.Session?.ProjectDir ?? host.Options.WorkspaceRoot;
 
-        var active = host.Memory.LoadAsync(projectScope, 500).Result;
-        var archived = host.Memory.LoadArchivedAsync(projectScope, 500).Result;
-        var globalActive = host.Memory.LoadAsync(MemoryScope.Global, 500).Result;
-        var globalArchived = host.Memory.LoadArchivedAsync(MemoryScope.Global, 500).Result;
+        // 全部 await —— 用 .Result 是 sync-over-async，在 ASP/同步上下文上会直接卡死。
+        var active = await host.Memory.LoadAsync(projectScope, 500, ct).ConfigureAwait(false);
+        var archived = await host.Memory.LoadArchivedAsync(projectScope, 500, ct).ConfigureAwait(false);
+        var globalActive = await host.Memory.LoadAsync(MemoryScope.Global, 500, ct).ConfigureAwait(false);
+        var globalArchived = await host.Memory.LoadArchivedAsync(MemoryScope.Global, 500, ct).ConfigureAwait(false);
 
         static object MemItem(MemoryEntry e) => new
         {
@@ -558,8 +609,9 @@ public sealed partial class WebUiServer
     /// v3.5 审查 P2：必须与 <c>IMemoryStore.SweepAsync</c> 用**同一口径**（全量视图）——
     /// 原先预览只数最近 500 条、执行扫全量，活跃条目过 500 时两个数字对不上，面板会误导人。
     /// </summary>
-    private static int SweepPreview(IMemoryStore store, string scope, DateTimeOffset now, int days, int maxScore)
-        => store.LoadAsync(scope, int.MaxValue).Result.Count(e =>
+    private static async Task<int> SweepPreviewAsync(
+        IMemoryStore store, string scope, DateTimeOffset now, int days, int maxScore, CancellationToken ct = default)
+        => (await store.LoadAsync(scope, int.MaxValue, ct).ConfigureAwait(false)).Count(e =>
             !e.IsImportant && (now - e.CreatedAt).TotalDays >= days && e.Score <= maxScore);
 
     /// <summary>递归拷贝目录（工坊导入用；目标存在则整体替换 —— 同名导入视为更新）。</summary>

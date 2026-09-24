@@ -249,7 +249,7 @@ Check("关掉落盘开关时原样返回", plainRead.Output!.Length == big.Lengt
 var bigEchoCommand = OperatingSystem.IsWindows()
     ? "for /l %i in (1,1,400) do @echo line-%i-aaaaaaaaaaaaaaaaaaaaaa"
     : "for i in $(seq 1 400); do echo line-$i-aaaaaaaaaaaaaaaaaaaaaa; done";
-var commandResult = await new RunCommandTool(toolkit).InvokeAsync(
+var commandResult = await new RunCommandTool(toolkit, new AgentFramework.Sandbox.SandboxRegistry()).InvokeAsync(
     new ToolInvocation("run_command", new Dictionary<string, string?>
     {
         ["command"] = bigEchoCommand,
@@ -337,6 +337,27 @@ Check("★ 相关度排序：整串命中的排在只有片段命中的前面（
 
 var broken = await SqliteSessionIndex.OpenAsync(Path.Combine(root, "bad\0path", "x.db"));
 Check("★ 打不开时降级为无索引（不抛异常）", !broken.IsAvailable && broken.Kind == "none");
+
+// 索引水位：判断「落后」用 MAX(seq)，不用 Count（空文本事件不进表，Count 永不对齐）
+if (index is SqliteSessionIndex sqliteIndex)
+{
+    var watermarkBeforeEmpty = await sqliteIndex.GetIndexedWatermarkAsync("s1");
+    await sqliteIndex.IndexAsync("s1", new SessionCreatedEvent { Seq = 9000, SessionId = "s1", Title = "" });
+    var watermarkAfterEmpty = await sqliteIndex.GetIndexedWatermarkAsync("s1");
+    Check("★ 空文本事件也推进 seq 水位（Count 对齐靠水位，不靠条数）",
+        watermarkAfterEmpty >= 9000 && watermarkAfterEmpty > watermarkBeforeEmpty,
+        $"{watermarkBeforeEmpty} → {watermarkAfterEmpty}");
+    Check("水位与已索引条数分开（Count 仍是行数）",
+        await sqliteIndex.CountAsync("s1") < watermarkAfterEmpty,
+        $"count={await sqliteIndex.CountAsync("s1")} watermark={watermarkAfterEmpty}");
+
+    // 新类型不再叫 unknown
+    await sqliteIndex.IndexAsync("s1", new CheckpointEvent { Seq = 9100, SessionId = "s1", Intent = "水位测试 checkpoint" });
+    var checkpointHit = (await sqliteIndex.SearchAsync("水位测试 checkpoint", "s1", 5)).FirstOrDefault();
+    Check("★ checkpoint 等新类型进索引且 TypeName 不再是 unknown",
+        checkpointHit is not null && checkpointHit.Type == "checkpoint",
+        checkpointHit?.Type ?? "(null)");
+}
 
 // ── 9. search_history 工具 ─────────────────────────────────
 Section("9. search_history（把折叠掉的内容捞回来）");
@@ -489,6 +510,52 @@ Check("中断之后的对话照常在上下文里",
 
 Check("有结果的工具调用不受影响",
     danglingProjection.Messages.Any(m => m.Role == LlmRole.Tool && m.ToolCallId == "ok-1"));
+
+// ── 8.5 孤儿 ToolCallCompleted：没有 requested 的结果不得产出 role=tool ──
+Console.WriteLine("\n── 8.5 孤儿 ToolCallCompleted（只有 completed）──");
+
+var orphanEvents = new List<SessionEvent>();
+long oseq = 0;
+
+void AddOrphan(SessionEvent sessionEvent)
+{
+    sessionEvent.Seq = ++oseq;
+    sessionEvent.SessionId = "s";
+    sessionEvent.Timestamp = DateTimeOffset.UtcNow;
+    orphanEvents.Add(sessionEvent);
+}
+
+AddOrphan(new UserMessageEvent { Text = "看看这个目录" });
+
+// ← 孤儿：只有 completed、没有 requested（日志被裁剪/损坏时可能出现）
+AddOrphan(new ToolCallCompletedEvent { CallId = "orphan-1", Success = true, Output = "孤儿结果正文" });
+
+AddOrphan(new ToolCallRequestedEvent
+{
+    CallId = "ok-2",
+    ToolName = "list_dir",
+    Arguments = new Dictionary<string, string?> { ["path"] = "." },
+});
+AddOrphan(new ToolCallCompletedEvent { CallId = "ok-2", Success = true, Output = "a.txt" });
+AddOrphan(new AssistantMessageEvent { Text = "列好了。" });
+
+var orphanProjection = SessionContextBuilder.Project(orphanEvents, new ContextOptions());
+var orphanToolIds = orphanProjection.Messages
+    .Where(m => m.Role == LlmRole.Tool)
+    .Select(m => m.ToolCallId ?? string.Empty)
+    .ToList();
+
+Check("★ 孤儿 tool 结果被丢弃（不产出非法 role=tool）",
+    !orphanToolIds.Contains("orphan-1"),
+    string.Join(",", orphanToolIds));
+Check("有配对的 tool 结果不受影响", orphanToolIds.Contains("ok-2"));
+Check("★ 丢弃孤儿后协议仍合法（每个 role=tool 都有对应 tool_calls）",
+    orphanToolIds.Count > 0
+    && orphanProjection.Messages
+        .Where(m => m.Role == LlmRole.Tool)
+        .All(m => orphanProjection.Messages.Any(a => a.ToolCalls?.Any(c => c.CallId == m.ToolCallId) == true)));
+Check("孤儿丢弃后对话照常在上下文里",
+    orphanProjection.Messages.Any(m => m.Role == LlmRole.User && m.Content?.Contains("看看这个目录") == true));
 
 // ── 10. L6 骨架化：老轮次纯文本回复折叠（本批新增）──────────────
 Section("10. L6 骨架化：老轮次纯文本回复折叠（无压力零损失，超水位才折叠）");

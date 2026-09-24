@@ -60,9 +60,16 @@ public interface ISessionIndex : IAsyncDisposable
 
     /// <summary>
     /// 索引里的事件条数。<paramref name="sessionId"/> 为 null 时统计全部会话。
-    /// 宿主用它判断「索引是否落后于日志」，落后就重建。
     /// </summary>
     ValueTask<int> CountAsync(string? sessionId = null, CancellationToken ct = default);
+
+    /// <summary>
+    /// 索引水位（已索引到的最大 Seq）。判「落后」用它，不要用 <see cref="CountAsync"/> ——
+    /// 空文本事件不进 events 表，Count 永远对不齐（契约「可加不可改」）。
+    /// 默认回落到 Count：老实现不必为此重编。
+    /// </summary>
+    async ValueTask<long> GetIndexedWatermarkAsync(string sessionId, CancellationToken ct = default)
+        => await CountAsync(sessionId, ct).ConfigureAwait(false);
 
     /// <summary>
     /// 删掉某个会话的索引（会话被删时清派生物用）。
@@ -99,6 +106,9 @@ public sealed class NullSessionIndex : ISessionIndex
 
     public ValueTask<int> CountAsync(string? sessionId = null, CancellationToken ct = default)
         => ValueTask.FromResult(0);
+
+    public ValueTask<long> GetIndexedWatermarkAsync(string sessionId, CancellationToken ct = default)
+        => ValueTask.FromResult(0L);
 
     public ValueTask DisposeAsync() => ValueTask.CompletedTask;
 }

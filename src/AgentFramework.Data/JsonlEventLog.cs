@@ -61,7 +61,8 @@ public sealed class JsonlEventLog : IDisposable
     ///
     /// 打开时会扫描已有内容：既能确定序号起点（所以「重启后接着写」是天然成立的），
     /// 也会<b>修复</b>尾部可能存在的半行垃圾 —— 把文件截断到最后一个完整记录。
-    /// 不做修复的话，崩溃留下的坏行会让后续所有记录都读不到。
+    /// 中段坏行不会被截掉（其后的完整事件仍是真相源），读取时按「坏行跳过」处理。
+    /// 不做修复的话，崩溃留下的尾部半行会让后续追加写在同一截垃圾后面。
     /// </summary>
     public static JsonlEventLog Open(string path)
     {
@@ -111,9 +112,9 @@ public sealed class JsonlEventLog : IDisposable
 
     /// <summary>
     /// 读取 JSONL 文件（只读，不修改文件）。
-    /// <b>崩溃安全</b>：遇到解析不了的行（典型是崩溃时写了一半的最后一行）即停止，
-    /// 而不是抛异常 —— 前面已落盘的事件依然完整可用。
-    /// 若要让文件本身恢复一致，用 <see cref="Open"/>。
+    /// <b>崩溃安全</b>：遇到解析不了的行（典型是崩溃时写了一半的最后一行）即跳过，
+    /// 继续读后面的行 —— 中段偶发坏行不该把其后完整事件一起藏起来。
+    /// 若要让文件本身恢复一致（截掉尾部半行），用 <see cref="Open"/>。
     /// </summary>
     public static IEnumerable<SessionEvent> Read(string path)
     {
@@ -142,8 +143,8 @@ public sealed class JsonlEventLog : IDisposable
             var parsed = TryParse(line);
             if (parsed is null)
             {
-                // 截断/损坏行：到此为止，前面的记录仍有效
-                yield break;
+                // 坏行跳过（铁律 7）：其后的完整事件仍然有效
+                continue;
             }
 
             yield return parsed;
@@ -180,6 +181,10 @@ public sealed class JsonlEventLog : IDisposable
     ///
     /// 实现上把整个文件读进内存按行处理。事件日志单会话量级为 MB 以内，
     /// 启动时一次性扫描可以接受；将来会话规模上去了再换成分块流式扫描。
+    ///
+    /// <b>只许修尾巴</b>：崩溃留下的「半行」可以截掉；但若坏行之后还有完整好行
+    /// （中段损坏：磁盘坏道、手工误编辑），那些好行是真相源的一部分，
+    /// 绝不能跟着 <c>SetLength</c> 一起消失 —— 只截「第一个坏行起、且其后再无好行」的尾部。
     /// </summary>
     private static (long LastSeq, long Count) ScanAndRepair(string path)
     {
@@ -192,7 +197,9 @@ public sealed class JsonlEventLog : IDisposable
         var bytes = ReadAllBytesTolerant(path);
         long lastSeq = 0;
         long count = 0;
-        var goodLength = 0;
+        var lastGoodEnd = 0;
+        var firstBadStart = -1;
+        var sawGoodAfterBad = false;
         var start = 0;
 
         for (var i = 0; i < bytes.Length; i++)
@@ -203,31 +210,54 @@ public sealed class JsonlEventLog : IDisposable
             }
 
             var line = Encoding.UTF8.GetString(bytes, start, i - start);
+            var lineStart = start;
             start = i + 1;
 
             if (string.IsNullOrWhiteSpace(line))
             {
-                goodLength = i + 1;
+                lastGoodEnd = i + 1;
                 continue;
             }
 
             var parsed = TryParse(line);
             if (parsed is null)
             {
-                // 尾部垃圾：从这一行起全部作废
-                break;
+                if (firstBadStart < 0)
+                {
+                    firstBadStart = lineStart;
+                }
+
+                continue;
             }
 
-            lastSeq = parsed.Seq;
+            if (firstBadStart >= 0)
+            {
+                sawGoodAfterBad = true;
+            }
+
+            // 取最大序号：中段坏行之后的好行也要算进来，否则重启续写会撞号。
+            if (parsed.Seq > lastSeq)
+            {
+                lastSeq = parsed.Seq;
+            }
+
             count++;
-            goodLength = i + 1;
+            lastGoodEnd = i + 1;
         }
 
-        // 文件比「最后一个完整记录」长 → 说明尾巴上有半行，截掉
-        if (bytes.Length > goodLength)
+        // 尾部半行（没有换行收尾）：无论中段是否坏过，这截都是写到一半的垃圾。
+        var truncateTo = start < bytes.Length ? lastGoodEnd : bytes.Length;
+
+        if (!sawGoodAfterBad && firstBadStart >= 0)
+        {
+            // 尾部损坏（好行之后只剩坏行/半行）—— 从第一个坏行起截掉。
+            truncateTo = firstBadStart;
+        }
+
+        if (bytes.Length > truncateTo)
         {
             using var repair = new FileStream(path, FileMode.Open, FileAccess.Write, FileShare.None);
-            repair.SetLength(goodLength);
+            repair.SetLength(truncateTo);
         }
 
         return (lastSeq, count);

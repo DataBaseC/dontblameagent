@@ -8,12 +8,40 @@ namespace AgentFramework.Tools;
 /// </summary>
 internal static class WorkspacePath
 {
-    public static bool TryResolve(ToolkitOptions options, string relative, out string fullPath, out string? error)
+    /// <summary>
+    /// 路径前缀比较规则：Windows 文件系统大小写不敏感，用 OrdinalIgnoreCase；
+    /// 其余（Linux 等大小写敏感文件系统）必须用 Ordinal ——
+    /// 否则 /work 会误判 /Work/evil 为子路径，写边界在大小写敏感平台上被整段绕过。
+    /// </summary>
+    private static StringComparison PathComparison
+        => OperatingSystem.IsWindows() || Path.DirectorySeparatorChar == '\\'
+            ? StringComparison.OrdinalIgnoreCase
+            : StringComparison.Ordinal;
+
+    /// <summary>
+    /// 解析路径并做边界检查。
+    ///
+    /// <para>
+    /// <b>读与写的边界刻意不一样</b>：写**永远**只能落在会话的工作区内；
+    /// 读默认放行到整台机器（见 <see cref="ToolkitOptions.AllowReadOutsideWorkspace"/>）。
+    /// 「读得到、写不出去」才是本地 personal agent 想要的形状 ——
+    /// 模型能翻任意位置的资料，但落笔只在项目里。
+    /// </para>
+    /// <para>
+    /// 绝对路径直接用、相对路径相对工作区 —— 两种写法都认。
+    /// </para>
+    /// <para>
+    /// <b>写返回的是穿透符号链接后的最终路径</b>（不是调用方传入的 candidate）：
+    /// 校验与落盘用同一条真实路径，校验到写之间 junction/符号链接被换掉，
+    /// 也不会把内容写到区外 —— TOCTOU 窗口从结构上关掉。
+    /// </para>
+    /// </summary>
+    public static bool TryResolve(ToolkitOptions options, string path, bool forWrite, out string fullPath, out string? error)
     {
         fullPath = string.Empty;
         error = null;
 
-        if (string.IsNullOrWhiteSpace(relative))
+        if (string.IsNullOrWhiteSpace(path))
         {
             error = "路径为空";
             return false;
@@ -24,7 +52,11 @@ internal static class WorkspacePath
         string candidate;
         try
         {
-            candidate = Path.GetFullPath(Path.Combine(root, relative));
+            // 绝对路径直接用；相对路径仍相对工作区。两种写法都支持，
+            // 于是「读区外」既可以是 /etc/hosts，也可以是 ../shared/x.txt。
+            candidate = Path.IsPathRooted(path)
+                ? Path.GetFullPath(path)
+                : Path.GetFullPath(Path.Combine(root, path));
         }
         catch (Exception ex)
         {
@@ -32,22 +64,47 @@ internal static class WorkspacePath
             return false;
         }
 
-        // 关键：比较时带上结尾分隔符，否则 /work 会误判 /work-evil 为子路径。
-        // v3.5 审查 P2：还要**穿透符号链接**再比 —— 只比字符串前缀的话，
-        // 工作区里一个指向外部的链接（或其下的子路径）就能把读写引到区外。
-        var realRoot = RealPath(root);
-        var realRootWithSeparator = realRoot.EndsWith(Path.DirectorySeparatorChar)
-            ? realRoot
-            : realRoot + Path.DirectorySeparatorChar;
-
-        if (!RealPath(candidate).StartsWith(realRootWithSeparator, StringComparison.OrdinalIgnoreCase))
+        // 读：默认不受工作区约束（AllowReadOutsideWorkspace=false 时收回，走下面的边界检查）。
+        if (!forWrite && options.AllowReadOutsideWorkspace)
         {
-            error = $"路径越出工作区，已拒绝：{relative}";
+            fullPath = candidate;
+            return true;
+        }
+
+        // 写（以及被收回的读）：必须**真实**落在工作区内 ——
+        // 比较时带上结尾分隔符，否则 /work 会误判 /work-evil 为子路径。
+        // v3.5 审查 P2：还要**穿透符号链接**再比 —— 只比字符串前缀的话，
+        // 工作区里一个指向外部的链接（或其下的子路径）就能把写引到区外。
+        var realRoot = RealPath(root);
+        var realCandidate = RealPath(candidate);
+
+        if (!IsInsideRoot(realCandidate, realRoot))
+        {
+            error = forWrite
+                ? $"路径越出工作区（写只能落在会话项目目录内），已拒绝：{path}"
+                : $"路径越出工作区，已拒绝：{path}";
             return false;
         }
 
-        fullPath = candidate;
+        // ★ 写必须落盘到**已解析穿透后的最终路径**（realCandidate）：
+        //   若仍用 candidate，校验通过后目录/链接被换成指向区外的 junction，
+        //   File.WriteAllText 会顺着新链接写到区外 —— 这就是写边界的 TOCTOU。
+        //   改成写 realCandidate 后，即便链接在中途被换，内容也只会落在校验过的那条真实路径上。
+        fullPath = forWrite ? realCandidate : candidate;
         return true;
+    }
+
+    /// <summary>
+    /// 判断 <paramref name="realPath"/> 是否落在 <paramref name="realRoot"/> 之内。
+    /// 前缀比较带上结尾分隔符，并按平台选择大小写规则（见 <see cref="PathComparison"/>）。
+    /// </summary>
+    private static bool IsInsideRoot(string realPath, string realRoot)
+    {
+        var rootWithSeparator = realRoot.EndsWith(Path.DirectorySeparatorChar)
+            ? realRoot
+            : realRoot + Path.DirectorySeparatorChar;
+
+        return realPath.StartsWith(rootWithSeparator, PathComparison);
     }
 
     /// <summary>
@@ -57,7 +114,7 @@ internal static class WorkspacePath
     /// 否则「根/链接/尚未创建的文件」这条最常见的绕过路径会漏检（ResolveLinkTarget 在
     /// 整条路径不存在时解不出来）。平台不支持或解析失败时返回原值，交回前缀检查兜底。
     /// </summary>
-    private static string RealPath(string path)
+    internal static string RealPath(string path)
     {
         try
         {
@@ -75,7 +132,10 @@ internal static class WorkspacePath
 
                 try
                 {
-                    var target = File.ResolveLinkTarget(current, returnFinalTarget: true);
+                    // 目录链接与文件链接都要解：File.ResolveLinkTarget 在部分平台上
+                    // 对目录链接无效，因此两条 API 都试，谁解出来用谁。
+                    var target = File.ResolveLinkTarget(current, returnFinalTarget: true)
+                        ?? Directory.ResolveLinkTarget(current, returnFinalTarget: true);
                     if (target is not null)
                     {
                         current = target.FullName;
@@ -112,7 +172,8 @@ public sealed class ReadFileTool(ToolkitOptions options) : ITool, IToolWithSchem
             return ValueTask.FromResult(ToolResult.Fail("缺少参数 path"));
         }
 
-        if (!WorkspacePath.TryResolve(options, path, out var fullPath, out var error))
+        // 读：forWrite=false —— 默认允许越出工作区（「读得到、写不出去」）。
+        if (!WorkspacePath.TryResolve(options, path, forWrite: false, out var fullPath, out var error))
         {
             return ValueTask.FromResult(ToolResult.Fail(error!));
         }
@@ -161,7 +222,10 @@ public sealed class WriteFileTool(ToolkitOptions options) : ITool, IToolWithSche
             return ValueTask.FromResult(ToolResult.Fail($"内容过长：{content.Length} > {options.MaxWriteChars}"));
         }
 
-        if (!WorkspacePath.TryResolve(options, path, out var fullPath, out var error))
+        // 写：forWrite=true —— 落笔只能落在会话项目目录内。
+        // TryResolve 对写返回的是**穿透链接后的真实落点**，下面必须用它落盘，
+        // 不能退回原始 candidate（否则 junction 中途被换就能写到区外）。
+        if (!WorkspacePath.TryResolve(options, path, forWrite: true, out var fullPath, out var error))
         {
             return ValueTask.FromResult(ToolResult.Fail(error!));
         }
@@ -169,7 +233,8 @@ public sealed class WriteFileTool(ToolkitOptions options) : ITool, IToolWithSche
         Directory.CreateDirectory(Path.GetDirectoryName(fullPath)!);
         File.WriteAllText(fullPath, content);
 
-        return ValueTask.FromResult(ToolResult.Ok($"已写入 {path}（{content.Length} 字符）"));
+        // 回显真实落点：让「经符号链接写入」的最终位置可审计（也方便测试钉住落盘路径）。
+        return ValueTask.FromResult(ToolResult.Ok($"已写入 {path}（真实落点：{fullPath}，{content.Length} 字符）"));
     }
 }
 
@@ -187,7 +252,8 @@ public sealed class ListDirTool(ToolkitOptions options) : ITool, IToolWithSchema
         invocation.Arguments.TryGetValue("path", out var path);
         path = string.IsNullOrWhiteSpace(path) ? "." : path;
 
-        if (!WorkspacePath.TryResolve(options, path, out var fullPath, out var error) && path != ".")
+        // 列目录与读同一条边界（默认允许越出工作区）。
+        if (!WorkspacePath.TryResolve(options, path, forWrite: false, out var fullPath, out var error) && path != ".")
         {
             return ValueTask.FromResult(ToolResult.Fail(error!));
         }

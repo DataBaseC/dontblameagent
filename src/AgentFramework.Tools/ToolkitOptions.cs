@@ -22,6 +22,21 @@ public sealed class ToolkitOptions
     /// <summary>本次调用实际生效的工作区根（会话级优先，宿主级兜底）。</summary>
     public string EffectiveRoot => WorkspaceRootResolver?.Invoke() ?? WorkspaceRoot;
 
+    /// <summary>
+    /// 读操作是否允许越出工作区。<b>默认 true</b>。
+    ///
+    /// <para>
+    /// 「读得到、写不出去」是本地 personal agent 想要的形状：模型可以翻任意位置的
+    /// 资料（读文件、列目录），但落笔只能落在本会话的项目目录里 ——
+    /// 边界在 <see cref="WorkspacePath.TryResolve"/> 的 forWrite 分支上。
+    /// </para>
+    /// <para>
+    /// 想要更封闭的形态（读写都锁在工作区内），把它设为 false 即可，
+    /// 行为就退回 v3.5 之前的那套边界。
+    /// </para>
+    /// </summary>
+    public bool AllowReadOutsideWorkspace { get; set; } = true;
+
     // ── 长任务上下文治理（DESIGN.md 4.15 · L2 大输出引用化）────────
 
     /// <summary>
@@ -62,6 +77,28 @@ public sealed class ToolkitOptions
     public int CommandTimeoutSeconds { get; set; } = 30;
 
     public int MaxCommandOutputChars { get; set; } = 50_000;
+
+    // ── 命令沙箱 ──────────────────────────────────────────
+    // 与其它预算同一原则：护栏强度是运维的事，不进模型可见的工具契约。
+
+    /// <summary>
+    /// 沙箱档位名：<c>auto</c>（默认，Windows 用 job、其他平台用 process）/
+    /// <c>off</c> / <c>process</c> / <c>job</c>，或插件注册的后端名。
+    /// 名字不认识或平台不可用时回落并记说明（见 <c>ISandboxRegistry.ResolveNote</c>）。
+    /// </summary>
+    public string? SandboxName { get; set; }
+
+    /// <summary>单条命令所属作业的内存上限（0 = 不限）。仅 job 档生效。</summary>
+    public long CommandMaxMemoryBytes { get; set; } = 2L * 1024 * 1024 * 1024;
+
+    /// <summary>
+    /// 作业内活动进程数上限（0 = 不限，默认）。别设成 1 ——
+    /// <c>cmd.exe /c foo</c> 本身就是两个进程，设 1 命令连启动机会都没有。
+    /// </summary>
+    public int CommandMaxProcesses { get; set; }
+
+    /// <summary>单条命令的 CPU 时间上限（秒，0 = 不限）。仅 job 档生效。</summary>
+    public int CommandMaxCpuSeconds { get; set; }
 
     // ── 搜索 ─────────────────────────────────────────────
     public int SearchMaxResults { get; set; } = 8;

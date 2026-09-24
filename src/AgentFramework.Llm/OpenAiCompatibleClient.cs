@@ -44,9 +44,10 @@ public static class ReasoningStyles
 /// 所以一个实现通吃，只是 BaseUrl / ApiKey / Model 三个字段不同 ——
 /// 这正是「联网 + 本地混合路由」成本很低的原因。
 /// </summary>
-public sealed class OpenAiCompatibleClient : ILlmClient
+public sealed class OpenAiCompatibleClient : ILlmClient, IDisposable
 {
     private readonly HttpClient _http;
+    private readonly bool _ownsHttp;
     private readonly OpenAiCompatibleOptions _options;
 
     public OpenAiCompatibleClient(string name, OpenAiCompatibleOptions options, HttpClient? http = null)
@@ -57,21 +58,29 @@ public sealed class OpenAiCompatibleClient : ILlmClient
         // v3.5 审查 P1-2：HttpClient.Timeout 是**整段流**的时限 ——
         // 长回复必然被硬截断，而流式请求真正的边界是「两帧之间不能停太久」，不是「整段不能超时」。
         // 所以总时限设为无限，另用 options.Timeout 做**帧间空闲超时**（见下方 ReadLineAsync）。
+        _ownsHttp = http is null;
         _http = http ?? new HttpClient { Timeout = Timeout.InfiniteTimeSpan };
-        if (!string.IsNullOrEmpty(options.ApiKey))
+    }
+
+    /// <summary>
+    /// 把 Bearer 头挂在**单次请求**上，不改 <c>DefaultRequestHeaders</c> ——
+    /// 注入的 HttpClient 可能是共享实例，改默认头会污染同一进程里其他端点的请求。
+    /// </summary>
+    private void ApplyAuth(HttpRequestMessage request)
+    {
+        if (!string.IsNullOrEmpty(_options.ApiKey))
         {
-            SetBearerHeader(options.ApiKey);
+            request.Headers.Remove("Authorization");
+            request.Headers.TryAddWithoutValidation("Authorization", "Bearer " + _options.ApiKey);
         }
     }
 
-
-    /// <summary>给本端点的所有请求加上 Bearer 头（值来自配置，运行时注入，不落盘）。</summary>
-    private void SetBearerHeader(string apiKey)
+    public void Dispose()
     {
-        // 等价于给 DefaultRequestHeaders.Authorization 赋 AuthenticationHeaderValue，
-        // 拆开写只是为了让静态审查器能看出这是运行时值、不是字面凭据。
-        _http.DefaultRequestHeaders.Remove("Authorization");
-        _http.DefaultRequestHeaders.TryAddWithoutValidation("Authorization", "Bearer " + apiKey);
+        if (_ownsHttp)
+        {
+            _http.Dispose();
+        }
     }
     public string Name { get; }
 
@@ -91,6 +100,7 @@ public sealed class OpenAiCompatibleClient : ILlmClient
         {
             Content = content,
         };
+        ApplyAuth(httpRequest);
 
         using var response = await _http
             .SendAsync(httpRequest, HttpCompletionOption.ResponseHeadersRead, ct)

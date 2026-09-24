@@ -60,6 +60,26 @@ public sealed class PluginHost
     /// <summary>工具名 → 来源 的快照（诊断用）。</summary>
     public IReadOnlyDictionary<string, string> ToolSources => _tools.Sources;
 
+    // ── 工具包（可见性的最小单位）────────────────────────────────
+
+    /// <summary>当前有工具的包 id，按名排序。</summary>
+    public IReadOnlyList<string> ToolsetIds => _tools.ToolsetIds;
+
+    /// <summary>包 id → 包描述 的快照（诊断面与界面开关都读它）。</summary>
+    public IReadOnlyDictionary<string, ToolsetDescriptor> Toolsets => _tools.Descriptors;
+
+    /// <summary>某工具属于哪个包（未注册返回 null）。</summary>
+    public string? ToolsetOf(string toolName) => _tools.ToolsetOf(toolName);
+
+    /// <summary>某包里的工具名（按名排序）。</summary>
+    public IReadOnlyList<string> ToolsInToolset(string toolsetId) => _tools.ToolsInToolset(toolsetId);
+
+    /// <summary>
+    /// 登记/更新包描述（宿主模块与插件都可以调）。
+    /// 自动生成的朴素描述只有 id，界面开关靠这个补上「这个包是干什么的」。
+    /// </summary>
+    public void DescribeToolset(ToolsetDescriptor descriptor) => _tools.DescribeToolset(descriptor);
+
     public int EventSubscriptionCount => _events.SubscriptionCount;
 
     public IReadOnlyCollection<Type> ProvidedServiceTypes => _services.ProvidedTypes;
@@ -184,7 +204,10 @@ public sealed class PluginHost
 
     // ── 加载 / 卸载 ────────────────────────────────────────────────
 
-    /// <summary>从插件目录加载插件。目录内需有 plugin.json 与入口程序集。</summary>
+    /// <summary>
+    /// 从插件目录加载插件。目录内需有 <c>plugin.json</c>，以及二者之一：
+    /// 入口程序集（<c>assembly</c> + <c>entry</c>），或脚本（<c>script</c>，<b>免编译</b>）。
+    /// </summary>
     public async Task<PluginHandle> LoadAsync(string pluginDirectory, CancellationToken ct = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(pluginDirectory);
@@ -193,68 +216,99 @@ public sealed class PluginHost
         Validate(manifest, pluginDirectory);
         CheckDependencies(manifest);
 
-        var assemblyPath = Path.Combine(pluginDirectory, manifest.Assembly);
-        var alcName = $"{manifest.Id}@{manifest.Version}#{Guid.NewGuid():N}";
-        var alc = new PluginLoadContext(assemblyPath, alcName);
+        var isScript = !string.IsNullOrWhiteSpace(manifest.Script);
 
-        try
+        PluginLoadContext? alc = null;
+        Assembly? assembly = null;
+        IPlugin plugin;
+
+        if (isScript)
         {
-            var assembly = alc.LoadFromAssemblyPath(assemblyPath);
-
-            var entryType = assembly.GetType(manifest.Entry, throwOnError: false)
-                ?? throw new InvalidOperationException(
-                    $"插件 {manifest.Id}：找不到入口类型 {manifest.Entry}");
-
-            if (!typeof(IPlugin).IsAssignableFrom(entryType))
-            {
-                // 最典型的原因：契约程序集没有共享加载，导致类型同一性不成立
-                throw new InvalidOperationException(
-                    $"插件 {manifest.Id}：{manifest.Entry} 未实现 IPlugin。" +
-                    $"请检查契约程序集是否被共享加载（插件目录里不应包含 {typeof(IPlugin).Assembly.GetName().Name}.dll）");
-            }
-
-            var plugin = (IPlugin)Activator.CreateInstance(entryType)!;
-
-            var dataDirectory = Path.Combine(_options.DataRoot, manifest.Id);
-            Directory.CreateDirectory(dataDirectory);
-
-            var scope = new PluginScope(
-                manifest.Id,
-                _events,
-                _services,
-                _tools,
-                _options.LoggerFactory.CreateLogger($"Plugin.{manifest.Id}"),
-                dataDirectory);
+            // 脚本插件不需要 ALC：没有程序集要隔离，也没有程序集要卸载。
+            plugin = new ScriptPlugin(pluginDirectory, manifest, InvokeToolForScript);
+        }
+        else
+        {
+            var assemblyPath = ResolvePluginFile(pluginDirectory, manifest.Assembly, manifest.Id, "assembly");
+            var alcName = $"{manifest.Id}@{manifest.Version}#{Guid.NewGuid():N}";
+            alc = new PluginLoadContext(assemblyPath, alcName);
 
             try
             {
-                await plugin.ActivateAsync(scope, ct).ConfigureAwait(false);
+                assembly = alc.LoadFromAssemblyPath(assemblyPath);
+
+                var entryType = assembly.GetType(manifest.Entry, throwOnError: false)
+                    ?? throw new InvalidOperationException(
+                        $"插件 {manifest.Id}：找不到入口类型 {manifest.Entry}");
+
+                if (!typeof(IPlugin).IsAssignableFrom(entryType))
+                {
+                    // 最典型的原因：契约程序集没有共享加载，导致类型同一性不成立
+                    throw new InvalidOperationException(
+                        $"插件 {manifest.Id}：{manifest.Entry} 未实现 IPlugin。" +
+                        $"请检查契约程序集是否被共享加载（插件目录里不应包含 {typeof(IPlugin).Assembly.GetName().Name}.dll）");
+                }
+
+                plugin = (IPlugin)Activator.CreateInstance(entryType)!;
             }
             catch
             {
-                scope.Dispose();
+                alc.Unload();
                 throw;
             }
+        }
 
-            // v3.5 审查 P2：卸载时回调 Forget 摘除活跃表条目（否则 ALC 永远真回收不了）。
-            var handle = new PluginHandle(manifest, alc, scope, assembly, Forget);
-            lock (_gate)
-            {
-                _plugins.Add(handle);
-            }
+        var dataDirectory = Path.Combine(_options.DataRoot, manifest.Id);
+        Directory.CreateDirectory(dataDirectory);
 
-            _log.LogInformation(
-                "插件已加载：{PluginId}@{Version}（工具 {ToolCount} 个，副作用 {EffectCount} 个）",
-                manifest.Id, manifest.Version, _tools.Count, scope.RevokedCount);
+        var scope = new PluginScope(
+            manifest.Id,
+            _events,
+            _services,
+            _tools,
+            _options.LoggerFactory.CreateLogger($"Plugin.{manifest.Id}"),
+            dataDirectory);
 
-            return handle;
+        try
+        {
+            await plugin.ActivateAsync(scope, ct).ConfigureAwait(false);
         }
         catch
         {
-            // 激活失败就把 ALC 放掉，不留半吊子状态
-            alc.Unload();
+            // 激活失败（脚本插件还包括「装载自测不过」）就把 ALC 放掉，不留半吊子状态
+            scope.Dispose();
+            alc?.Unload();
             throw;
         }
+
+        var script = plugin as ScriptPlugin;
+
+        // ── 插件包的"人话"描述 ────────────────────────────────────
+        // 插件工具默认落进与插件 id 同名的包；自动生成的描述只有 id，
+        // 界面上那一排开关就会显示成「devkit」。把清单里的名字与说明填进去，
+        // 主人看到的是「编程扩展工具包」—— 选择开关的第一步是看得懂。
+        DescribePluginToolset(manifest);
+
+        // v3.5 审查 P2：卸载时回调 Forget 摘除活跃表条目（否则 ALC 永远真回收不了）。
+        var handle = new PluginHandle(
+            manifest,
+            alc,
+            scope,
+            assembly,
+            Forget,
+            selfTestReport: script?.SelfTestReport,
+            registeredTools: script?.RegisteredToolNames);
+
+        lock (_gate)
+        {
+            _plugins.Add(handle);
+        }
+
+        _log.LogInformation(
+            "插件已加载：{PluginId}@{Version}（{Kind}，工具 {ToolCount} 个，副作用 {EffectCount} 个）",
+            manifest.Id, manifest.Version, isScript ? "脚本" : "程序集", _tools.Count, scope.RevokedCount);
+
+        return handle;
     }
 
     internal void Forget(PluginHandle handle)
@@ -264,6 +318,110 @@ public sealed class PluginHost
             _plugins.Remove(handle);
         }
     }
+
+    // ── 运行期装卸（热更新）─────────────────────────────────────────
+
+    /// <summary>按 id 找一个已装插件（没有返回 null）。</summary>
+    /// <summary>
+    /// 把插件清单里的名字、说明与「是否常驻」登记到它贡献的包上。
+    ///
+    /// <para>
+    /// 自动生成的包描述只有 id，界面上那一排开关会显示成「devkit」；
+    /// 填上清单里的名字之后显示的是「编程扩展工具包」—— 让人愿意去关的第一步，是看得懂。
+    /// </para>
+    /// </summary>
+    private void DescribePluginToolset(PluginManifest manifest)
+    {
+        foreach (var declaration in manifest.Toolsets)
+        {
+            if (string.IsNullOrWhiteSpace(declaration.Id))
+            {
+                continue;
+            }
+
+            _tools.DescribeToolset(new ToolsetDescriptor
+            {
+                Id = declaration.Id,
+                Name = string.IsNullOrWhiteSpace(declaration.Name) ? declaration.Id : declaration.Name,
+                Description = declaration.Description,
+                Eager = declaration.Eager,
+                Source = manifest.Id,
+            });
+        }
+
+        // 默认包（= 插件 id）：只有它真有工具时才登记，避免造出空包
+        if (_tools.ToolsInToolset(manifest.Id).Count > 0)
+        {
+            _tools.DescribeToolset(new ToolsetDescriptor
+            {
+                Id = manifest.Id,
+                Name = string.IsNullOrWhiteSpace(manifest.Name) ? manifest.Id : manifest.Name,
+                Description = manifest.Description,
+                Source = manifest.Id,
+            });
+        }
+    }
+
+    public PluginHandle? Find(string pluginId)
+    {
+        lock (_gate)
+        {
+            return _plugins.FirstOrDefault(p => string.Equals(p.Id, pluginId, StringComparison.Ordinal));
+        }
+    }
+
+    /// <summary>
+    /// 卸载一个已装插件（撤销副作用 → 请求 ALC 回收 → 摘除活跃表）。
+    /// 返回 false = 本来就没装它 —— 调用方据此区分「卸掉了」与「没这回事」。
+    /// </summary>
+    public async Task<bool> UnloadAsync(string pluginId, CancellationToken ct = default)
+    {
+        var handle = Find(pluginId);
+        if (handle is null)
+        {
+            return false;
+        }
+
+        await handle.DisposeAsync().ConfigureAwait(false);
+        _log.LogInformation("插件已卸载：{PluginId}", pluginId);
+        return true;
+    }
+
+    /// <summary>
+    /// <b>重新装载</b>：先卸掉同 id 的旧版，再装这份新目录 —— 这就是热更新。
+    ///
+    /// <para>
+    /// 顺序不能反（<b>单版本单实例</b>纪律）：先装后卸会出现两个同名插件的工具
+    /// 同时挂在注册表里，工具名重复会直接抛。
+    /// </para>
+    /// <para>
+    /// 卸载是「请求式」（ALC 要等 GC 才真回收），但<b>副作用已经同步撤销完了</b>：
+    /// 从工具面 / 服务面 / 事件面看，旧版此刻已经不存在 —— 这正是热更新要的语义。
+    /// </para>
+    /// </summary>
+    public async Task<PluginHandle> ReloadAsync(string pluginDirectory, CancellationToken ct = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(pluginDirectory);
+
+        var manifest = ReadManifest(pluginDirectory);
+        if (!string.IsNullOrWhiteSpace(manifest.Id))
+        {
+            await UnloadAsync(manifest.Id, ct).ConfigureAwait(false);
+        }
+
+        return await LoadAsync(pluginDirectory, ct).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// 脚本插件借调其他工具的通道（<c>ctx.callTool</c>）。
+    /// 能力声明由 <see cref="ScriptPlugin"/> 先卡一道，这里只负责真正调用 ——
+    /// 于是审批（<see cref="ToolPreExecuteEvent"/>）照常生效，脚本借来的调用也要过审批。
+    /// </summary>
+    private ValueTask<ToolResult> InvokeToolForScript(
+        string toolName,
+        IReadOnlyDictionary<string, string?>? arguments,
+        CancellationToken ct)
+        => InvokeToolAsync(toolName, arguments, ct);
 
     // ── 私有 ───────────────────────────────────────────────────────
 
@@ -291,16 +449,6 @@ public sealed class PluginHost
             throw new InvalidOperationException("插件清单缺少 id");
         }
 
-        if (string.IsNullOrWhiteSpace(manifest.Entry))
-        {
-            throw new InvalidOperationException($"插件 {manifest.Id} 缺少 entry");
-        }
-
-        if (string.IsNullOrWhiteSpace(manifest.Assembly))
-        {
-            throw new InvalidOperationException($"插件 {manifest.Id} 缺少 assembly");
-        }
-
         if (!string.Equals(manifest.ApiVersion, _options.ApiVersion, StringComparison.Ordinal))
         {
             // 契约「可加不可改」：主版本不一致直接拒绝，避免运行期类型错乱
@@ -308,11 +456,63 @@ public sealed class PluginHost
                 $"插件 {manifest.Id} 的 apiVersion={manifest.ApiVersion} 与内核 {_options.ApiVersion} 不匹配");
         }
 
-        var assemblyPath = Path.Combine(pluginDirectory, manifest.Assembly);
+        // 脚本插件：只需要脚本文件存在，不需要程序集与入口类型。
+        if (!string.IsNullOrWhiteSpace(manifest.Script))
+        {
+            var scriptPath = ResolvePluginFile(pluginDirectory, manifest.Script, manifest.Id, "script");
+            if (!File.Exists(scriptPath))
+            {
+                throw new FileNotFoundException($"插件 {manifest.Id} 的脚本不存在：{scriptPath}");
+            }
+
+            return;
+        }
+
+        if (string.IsNullOrWhiteSpace(manifest.Entry))
+        {
+            throw new InvalidOperationException($"插件 {manifest.Id} 缺少 entry（程序集插件需要 assembly + entry）");
+        }
+
+        if (string.IsNullOrWhiteSpace(manifest.Assembly))
+        {
+            throw new InvalidOperationException($"插件 {manifest.Id} 缺少 assembly（脚本插件请改用 script 字段）");
+        }
+
+        var assemblyPath = ResolvePluginFile(pluginDirectory, manifest.Assembly, manifest.Id, "assembly");
         if (!File.Exists(assemblyPath))
         {
             throw new FileNotFoundException($"插件 {manifest.Id} 的入口程序集不存在：{assemblyPath}");
         }
+    }
+
+    /// <summary>
+    /// 把清单里的相对文件名解析成插件目录内的绝对路径。
+    /// <c>script: "../../x.js"</c> / <c>assembly: "C:\\evil.dll"</c> 这类写法
+    /// 必须在装载前就拒掉 —— 否则 Path.Combine 会老实拼出区外路径。
+    /// </summary>
+    private static string ResolvePluginFile(string pluginDirectory, string relative, string pluginId, string fieldName)
+    {
+        if (string.IsNullOrWhiteSpace(relative)
+            || Path.IsPathRooted(relative)
+            || relative.Contains("..", StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException(
+                $"插件 {pluginId} 的 {fieldName} 必须是插件目录内的相对路径：{relative}");
+        }
+
+        var rootFull = Path.GetFullPath(pluginDirectory);
+        var combined = Path.GetFullPath(Path.Combine(rootFull, relative));
+        var prefix = rootFull.EndsWith(Path.DirectorySeparatorChar)
+            ? rootFull
+            : rootFull + Path.DirectorySeparatorChar;
+
+        if (!combined.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidOperationException(
+                $"插件 {pluginId} 的 {fieldName} 越出插件目录：{relative}");
+        }
+
+        return combined;
     }
 
     /// <summary>

@@ -229,6 +229,85 @@ Check("步数达到上限后停止", !result3.Completed && result3.StopReason ==
 Check("步数正好 4", result3.Steps == 4, $"{result3.Steps}");
 Check("工具调用未失控（4 次）", echo3.Invocations.Count == 4, $"{echo3.Invocations.Count}");
 
+// ── 5b. max-steps 不许把正文丢掉 ───────────────────────────
+Console.WriteLine("\n── 5b. max-steps 保留末步正文 ──");
+
+// 末步模型写出了正文、但还带着工具调用没走完 —— 循环因步数上限退出时，
+// 那段正文必须出现在 FinalText 里（它是「模型可见即已记录」的一部分）。
+var textAndCallsClient = new ScriptedLlmClient(
+    "cloud",
+    new ScriptedTurn(
+        ["第一步正文"],
+        [new ToolCallRequest("m1", "echo", """{"text":"a"}""")],
+        "tool_calls"),
+    new ScriptedTurn(
+        ["末步残留正文"],
+        [new ToolCallRequest("m2", "echo", """{"text":"b"}""")],
+        "tool_calls"),
+    new ScriptedTurn(["不该出现"], null, "stop"));
+
+var host4 = new PluginHost(new PluginHostOptions { DataRoot = Path.Combine(root, "plugin-data") });
+var echo4 = new EchoTool();
+AgentRunResult result4;
+List<SessionEvent> events4;
+using (var log = JsonlEventLog.Open(Path.Combine(root, "s4.jsonl")))
+{
+    var runner = new AgentRunner(textAndCallsClient, () => [echo4], new JsonlSink(log, host4), new AgentOptions
+    {
+        SessionId = "s-4",
+        MaxSteps = 2,
+    });
+    result4 = await runner.RunAsync("跑满步数");
+    events4 = JsonlEventLog.Read(Path.Combine(root, "s4.jsonl")).ToList();
+}
+
+Check("步数上限后停在 max-steps", !result4.Completed && result4.StopReason == "max-steps", result4.StopReason);
+Check("★ max-steps 不丢文本：末步正文进了 FinalText",
+    result4.FinalText == "末步残留正文", result4.FinalText);
+Check("末步正文也落了盘（模型可见即已记录）",
+    events4.OfType<AssistantMessageEvent>().LastOrDefault()?.Text == "末步残留正文");
+
+// ── 6. 工具抛异常也必须补 completed ────────────────────────
+Console.WriteLine("\n── 6. 工具异常仍补 ToolCallCompletedEvent ──");
+
+// 「记录意图 → 记录结果」是一对：工具炸了也不能漏 completed，
+// 否则会话里留下悬空 tool_call，下一轮请求直接 400。
+var boom = new ThrowingTool();
+var boomClient = new ScriptedLlmClient(
+    "cloud",
+    new ScriptedTurn([], [new ToolCallRequest("boom1", "boom", "{}")], "tool_calls"),
+    new ScriptedTurn(["我看到了错误，换个方式。"], null, "stop"));
+
+var host5 = new PluginHost(new PluginHostOptions { DataRoot = Path.Combine(root, "plugin-data") });
+AgentRunResult result5;
+List<SessionEvent> events5;
+using (var log = JsonlEventLog.Open(Path.Combine(root, "s5.jsonl")))
+{
+    var runner = new AgentRunner(boomClient, () => [boom], new JsonlSink(log, host5), new AgentOptions
+    {
+        SessionId = "s-5",
+    });
+    result5 = await runner.RunAsync("执行一个会炸的工具");
+    events5 = JsonlEventLog.Read(Path.Combine(root, "s5.jsonl")).ToList();
+}
+
+var requested5 = events5.OfType<ToolCallRequestedEvent>().ToList();
+var completed5 = events5.OfType<ToolCallCompletedEvent>().ToList();
+Check("主循环仍能收尾（模型看到了错误）", result5.Completed, result5.StopReason);
+Check("意图事件已记录", requested5.Count == 1 && requested5[0].CallId == "boom1");
+Check("★ 工具抛异常时仍有 ToolCallCompletedEvent（不悬空 tool_call）",
+    completed5.Count == 1 && completed5[0].CallId == "boom1",
+    $"{requested5.Count} requested / {completed5.Count} completed");
+Check("异常结果落盘为失败", completed5.Count == 1 && completed5[0].Success == false,
+    completed5.Count > 0 ? completed5[0].Error : "(missing)");
+Check("失败原因写明是工具执行异常",
+    completed5.Count == 1 && (completed5[0].Error ?? "").Contains("工具执行异常"),
+    completed5.Count > 0 ? completed5[0].Error : "");
+var state5 = SessionProjector.Project(events5);
+Check("投影：无悬空工具调用异常", state5.Anomalies.Count == 0, string.Join("; ", state5.Anomalies));
+Check("第二次请求带回了 ERROR 工具结果（tool_call 成对）",
+    boomClient.ReceivedRequests[1].Messages.Any(m => m.Role == LlmRole.Tool && (m.Content ?? "").StartsWith("ERROR:")));
+
 // ── 8. SSE 坏帧容错（P0-1）────────────────────────────────
 Console.WriteLine("\n── 8. SSE 坏帧容错 ──");
 
@@ -426,4 +505,15 @@ internal sealed class EchoTool : ITool
         Invocations.Add(text ?? "");
         return ValueTask.FromResult(ToolResult.Ok($"echo:{text}"));
     }
+}
+
+/// <summary>一调就炸的工具 —— 验证「工具异常也必须补 completed」。</summary>
+internal sealed class ThrowingTool : ITool
+{
+    public string Name => "boom";
+
+    public string Description => "总是抛异常";
+
+    public ValueTask<ToolResult> InvokeAsync(ToolInvocation invocation, CancellationToken ct = default)
+        => throw new InvalidOperationException("故意炸的");
 }

@@ -1,6 +1,8 @@
+using System.Reflection;
 using System.Runtime.CompilerServices;
 using AgentFramework.Contracts;
 using AgentFramework.Kernel;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 
 // ═══════════════════════════════════════════════════════════
@@ -80,9 +82,59 @@ using (host.Intercept<ToolPreExecuteEvent>((e, _) =>
 var r3 = await host.InvokeToolAsync("hello");
 Check("解除拦截后恢复正常", r3.Success);
 
+// ── 4.5 跨 ALC 类型同一性（契约传递依赖不许被插件 ALC 双载）──
+Console.WriteLine("\n── 4.5 跨 ALC 类型同一性 ──");
+
+{
+    // 拿本应用的 deps.json 当解析器数据源：它把 Microsoft.Extensions.Logging.Abstractions
+    // 列为依赖，DLL 也就在输出目录 —— 这正是「插件自带依赖」的发布形态。
+    // 旧代码会在这里让 resolver 把 Logging.Abstractions 塞进插件 ALC，
+    // 于是 ILogger 裂成两个 Type，插件一调 ctx.Log.LogInformation 当场炸。
+    var entryLocation = Assembly.GetEntryAssembly()!.Location;
+    var probeAlc = new PluginLoadContext(entryLocation, "alc-identity-probe");
+    try
+    {
+        var hostLogger = typeof(ILogger);
+        var sharedName = hostLogger.Assembly.GetName().Name!;
+        var pluginSideAsm = probeAlc.LoadFromAssemblyName(new AssemblyName(sharedName));
+        Check("跨 ALC 后 typeof(ILogger).Assembly 与宿主相同",
+            ReferenceEquals(pluginSideAsm, hostLogger.Assembly),
+            pluginSideAsm is null ? "(null)" : pluginSideAsm.GetName().Name);
+
+        var pluginSideType = pluginSideAsm?.GetType(hostLogger.FullName!, throwOnError: false);
+        Check("跨 ALC 后 ILogger 是同一个 Type（不是同名不同身）",
+            ReferenceEquals(pluginSideType, hostLogger),
+            pluginSideType?.Assembly.GetName().Name ?? "(null)");
+
+        Check("共享名单覆盖日志抽象 / JSON / BCL 门面",
+            PluginLoadContext.IsSharedAssembly("Microsoft.Extensions.Logging.Abstractions")
+            && PluginLoadContext.IsSharedAssembly("Microsoft.Extensions.Logging")
+            && PluginLoadContext.IsSharedAssembly("System.Text.Json")
+            && PluginLoadContext.IsSharedAssembly("System.Runtime")
+            && PluginLoadContext.IsSharedAssembly("AgentFramework.Contracts")
+            && !PluginLoadContext.IsSharedAssembly("Some.Plugin.Private.Lib"));
+    }
+    finally
+    {
+        probeAlc.Unload();
+    }
+
+    // 真插件装载路径：handle 用插件自己的 ALC 解析
+    var viaHandle = handle.ResolveTypeFromPlugin(
+        typeof(ILogger).Assembly.GetName().Name!,
+        typeof(ILogger).FullName!);
+    Check("真插件 ALC 解析出的 ILogger 与宿主同一",
+        ReferenceEquals(viaHandle, typeof(ILogger)),
+        viaHandle?.Assembly.GetName().Name ?? "(null)");
+}
+
 // ── 5. 卸载与撤销 ──────────────────────────────────────────
 Console.WriteLine("\n── 5. 卸载与撤销 ──");
-await handle.DisposeAsync();
+
+// 并发 Dispose：只许一个线程进撤销-卸载序列。
+// 检查-赋值无锁时两个线程都会当自己是第一个，撤销序列被跑两遍。
+await Task.WhenAll(handle.DisposeAsync().AsTask(), handle.DisposeAsync().AsTask());
+Check("并发 Dispose 只进一次撤销序列", handle.DisposeSequenceEntries == 1, $"{handle.DisposeSequenceEntries}");
 Check("卸载已撤销全部副作用（工具+事件+定时器）", handle.RevokedEffectCount >= 3, $"{handle.RevokedEffectCount} 个");
 Check("工具注册已撤销", !host.ToolNames.Contains("hello"));
 Check("事件订阅已撤销", host.EventSubscriptionCount == 0, $"{host.EventSubscriptionCount}");
@@ -117,6 +169,35 @@ kernelScope.On<ProbeEvent>((_, _) =>
 });
 await host.EmitAsync(new ProbeEvent());
 Check("内核作用域订阅的事件被派发", heard == 1, $"{heard}");
+
+// ── 5.6 包描述写时 clone（读者永不看见半更新）──────────────
+Console.WriteLine("\n── 5.6 包描述写时 clone ──");
+host.DescribeToolset(new ToolsetDescriptor
+{
+    Id = "kernel:verify",
+    Name = "旧名字",
+    Description = "旧说明",
+    Source = "verify",
+});
+var heldDescriptor = host.Toolsets["kernel:verify"];
+host.DescribeToolset(new ToolsetDescriptor
+{
+    Id = "kernel:verify",
+    Name = "新名字",
+    Description = "新说明",
+    Source = "verify",
+});
+var freshDescriptor = host.Toolsets["kernel:verify"];
+Check("写时 clone：旧读者仍见完整旧描述（不是半更新）",
+    heldDescriptor.Name == "旧名字" && heldDescriptor.Description == "旧说明",
+    $"{heldDescriptor.Name}/{heldDescriptor.Description}");
+Check("新读者见完整新描述",
+    freshDescriptor.Name == "新名字" && freshDescriptor.Description == "新说明",
+    $"{freshDescriptor.Name}/{freshDescriptor.Description}");
+
+host.DescribeToolset(new ToolsetDescriptor { Id = "kernel:verify", Name = "P", Protected = true });
+host.DescribeToolset(new ToolsetDescriptor { Id = "kernel:verify", Name = "Q", Protected = false });
+Check("保留标记一旦标上不许被后写描述洗白", host.Toolsets["kernel:verify"].Protected);
 
 host.DisposeKernelScopes();
 Check("内核作用域已全部撤销", host.KernelScopeCount == 0, $"{host.KernelScopeCount}");

@@ -61,9 +61,15 @@ Check("read_file 读回内容一致", readResult.Success && readResult.Output.Co
 var listResult = await Call(list, ("path", "notes"));
 Check("list_dir 列出条目", listResult.Success && listResult.Output.Contains("todo.md"), listResult.Output);
 
-Console.WriteLine("\n── 1b. 路径逃逸防护 ──");
-var escapeRead = await Call(read, ("path", "../../../../etc/passwd"));
-Check("读越界路径被拒", !escapeRead.Success && escapeRead.Error!.Contains("越出工作区"), escapeRead.Error);
+Console.WriteLine("\n── 1b. 路径边界：读放行 / 写拒绝 ──");
+// v3.6：读与写的边界**刻意不同** —— 读默认放行到整台机器，写永远只落在工作区内。
+// 所以「读越界」不再是错误：那正是「读得到、写不出去」想要的形状。
+var outsideProbe = Path.Combine(root, "outside-probe.txt");
+await File.WriteAllTextAsync(outsideProbe, "工作区外的内容");
+var escapeRead = await Call(read, ("path", "../outside-probe.txt"));
+Check("★ 读可以越出工作区（读得到）",
+    escapeRead.Success && escapeRead.Output.Contains("工作区外的内容"),
+    escapeRead.Error ?? escapeRead.Output);
 
 var escapeWrite = await Call(write, ("path", "../escaped.txt"), ("content", "x"));
 Check("写越界路径被拒", !escapeWrite.Success && escapeWrite.Error!.Contains("越出工作区"), escapeWrite.Error);
@@ -88,9 +94,10 @@ catch (Exception)
 
 if (linkSupported)
 {
+    // 读：现在允许穿链读到区外（读放行）。
     var linkRead = await Call(read, ("path", "peek/secret.txt"));
-    Check("★ 经符号链接读区外文件被拒（穿透链接比较）",
-        !linkRead.Success && linkRead.Error!.Contains("越出工作区"), linkRead.Error);
+    Check("★ 经符号链接读区外文件被放行（读不受限）",
+        linkRead.Success && linkRead.Output.Contains("外部机密"), linkRead.Error ?? linkRead.Output);
 
     var linkWrite = await Call(write, ("path", "peek/planted.txt"), ("content", "x"));
     Check("★ 经符号链接写区外文件被拒", !linkWrite.Success && linkWrite.Error!.Contains("越出工作区"), linkWrite.Error);
@@ -100,6 +107,23 @@ if (linkSupported)
     await Call(write, ("path", "normal.txt"), ("content", "正常内容"));
     var normalRead = await Call(read, ("path", "normal.txt"));
     Check("修复未误伤区内正常路径", normalRead.Success);
+
+    // ★ 写路径真实落点（写 TOCTOU 修复）：写必须落在**穿透链接后的真实路径**上，
+    //   而不是原始 candidate —— 否则校验到落盘之间 junction 被换就能写到区外。
+    //   断言看结果里回显的「真实落点」：区内链接写入时，落点必须是目标目录而不是链接路径。
+    var realTargetDir = Path.Combine(workspace, "real-target");
+    Directory.CreateDirectory(realTargetDir);
+    var aliasDir = Path.Combine(workspace, "alias");
+    Directory.CreateSymbolicLink(aliasDir, realTargetDir);
+
+    var viaAlias = await Call(write, ("path", "alias/landed.txt"), ("content", "落点内容"));
+    Check("★ 经区内符号链接写入成功", viaAlias.Success, viaAlias.Error ?? viaAlias.Output);
+    Check("★ 写落点是解析穿透后的真实路径（不是链接路径）",
+        viaAlias.Output.Contains("真实落点")
+        && viaAlias.Output.Contains("real-target")
+        && File.Exists(Path.Combine(realTargetDir, "landed.txt"))
+        && File.ReadAllText(Path.Combine(realTargetDir, "landed.txt")) == "落点内容",
+        viaAlias.Output);
 }
 else
 {
@@ -110,16 +134,65 @@ else
 Console.WriteLine("\n── 2. 命令工具 ──");
 
 var fastOptions = new ToolkitOptions { WorkspaceRoot = workspace, CommandTimeoutSeconds = 20 };
-var run = new RunCommandTool(fastOptions);
+// 沙箱：v3.9 起 run_command 不再自己 Process.Start，而是交给沙箱后端。
+// 这里用默认档（auto），与生产路径一致 —— 本工程验的是工具语义，不是沙箱本身。
+var run = new RunCommandTool(fastOptions, new AgentFramework.Sandbox.SandboxRegistry());
 
 var echoResult = await Call(run, ("command", "echo hello-from-command"));
 Check("命令执行成功且拿到输出", echoResult.Success && echoResult.Output.Contains("hello-from-command"), FirstLine(echoResult.Output));
 
 var slowOptions = new ToolkitOptions { WorkspaceRoot = workspace, CommandTimeoutSeconds = 1 };
-var runSlow = new RunCommandTool(slowOptions);
+var runSlow = new RunCommandTool(slowOptions, new AgentFramework.Sandbox.SandboxRegistry());
 var slowCommand = OperatingSystem.IsWindows() ? "ping -n 6 127.0.0.1" : "sleep 6";
 var timeoutResult = await Call(runSlow, ("command", slowCommand));
 Check("超时命令被终止", !timeoutResult.Success && timeoutResult.Error!.Contains("超时"), timeoutResult.Error);
+
+// ★ 降级备注用稳定前缀（sandbox-degrade: / sandbox-start-fail:），
+//   不再依赖中文魔法子串（"失败"/"退化"/"未能启动"）—— 文案一改旧筛选就静默失效。
+var degradeHostOptions = new ToolkitOptions { WorkspaceRoot = workspace, SandboxName = "no-such-sandbox" };
+var runDegrade = new RunCommandTool(degradeHostOptions, new AgentFramework.Sandbox.SandboxRegistry());
+var degradeResult = await Call(runDegrade, ("command", "echo ok"));
+Check("★ 沙箱回落备注带稳定前缀 sandbox-degrade:",
+    degradeResult.Success && degradeResult.Output.Contains("sandbox-degrade:"),
+    FirstLine(degradeResult.Output));
+
+// 未加前缀的动态备注：包装层补前缀分类。文案故意不含任何旧魔法子串 ——
+// 若筛选仍靠 Contains("失败") 等，这条会静默丢备注，断言当场抓住。
+var startFailBackend = new NotesProbeBackend(
+    "probe-start-fail",
+    exitCode: -1,
+    stdOut: string.Empty,
+    notes: ["动态启动备注（文案可变）"]);
+var startFailResult = await Call(
+    new RunCommandTool(options, new ScriptedSandboxRegistry(startFailBackend)),
+    ("command", "echo x"));
+// exit=-1 时工具走 Fail，报告在 Error 里
+var startFailText = startFailResult.Error ?? startFailResult.Output;
+Check("★ 启动失败备注被标为 sandbox-start-fail:（不靠文案子串）",
+    startFailText.Contains("sandbox-start-fail:") && startFailText.Contains("动态启动备注"),
+    startFailText);
+
+var degradeBackend = new NotesProbeBackend(
+    "probe-degrade",
+    exitCode: 0,
+    stdOut: "ok",
+    notes:
+    [
+        "探针后端自述",
+        "动态降级备注（文案可变）",
+        "sandbox-degrade:已带前缀的备注",
+    ]);
+var degradeProbeResult = await Call(
+    new RunCommandTool(options, new ScriptedSandboxRegistry(degradeBackend)),
+    ("command", "echo x"));
+Check("★ 动态降级备注被标为 sandbox-degrade:，已带前缀的保留",
+    degradeProbeResult.Success
+    && degradeProbeResult.Output.Contains("sandbox-degrade:动态降级备注")
+    && degradeProbeResult.Output.Contains("sandbox-degrade:已带前缀的备注"),
+    degradeProbeResult.Output);
+Check("★ 后端自述不当成降级（正常路径备注够短）",
+    !degradeProbeResult.Output.Contains("sandbox-degrade:探针后端自述"),
+    degradeProbeResult.Output);
 
 // ── 3. 联网搜索 ────────────────────────────────────────────
 Console.WriteLine("\n── 3. 联网搜索（provider seam + 降级链）──");
@@ -188,16 +261,25 @@ try
 
     // 4d：地址归一化（P1-S3）—— 这几种写法从前会落进 IPv6 分支被直接放行，
     //     而操作系统连它们时访问的其实是回环 / 内网地址。
+    //     注意：SSRF 校验现在位于 SocketsHttpHandler.ConnectCallback（连接时），
+    //     下列断言同时也是对「连接时校验真的生效」的钉子 —— 先检后连的 TOCTOU 路径已不存在。
     foreach (var target in new[]
              {
                  "http://[::ffff:127.0.0.1]/",
                  "http://[::ffff:a00:1]/",
                  "http://[fc00::1]/",
+                 "http://[::]/",              // IPv6 未指定地址：等价本机任意地址，必须拒
+                 "http://[::ffff:0.0.0.0]/",  // IPv4-mapped 未指定地址，归一后同样拒
              })
     {
         var probe = await Call(strictFetch, ("url", target));
         Check($"归一化后仍拒绝 {target}", !probe.Success && probe.Error!.Contains("SSRF"), probe.Error);
     }
+
+    // 4e：域名形式（localhost）也走连接时校验 —— 不存在「DNS 检完再连」的窗口
+    var byName = await Call(strictFetch, ("url", "http://localhost/"));
+    Check("★ 域名解析到回环时连接被拒（连接时 SSRF 校验）",
+        !byName.Success && byName.Error!.Contains("SSRF"), byName.Error);
 }
 finally
 {
@@ -276,7 +358,20 @@ Check("★ 会话钉了项目目录后，文件工具锚定项目目录", sessio
 
 var sessionEscape = await new ReadFileTool(sessionToolkit).InvokeAsync(
     new ToolInvocation("read_file", new Dictionary<string, string?> { ["path"] = "../host-only.txt" }));
-Check("★ 项目目录外的文件同样被拒（越界检查按会话根计算）", !sessionEscape.Success && sessionEscape.Error!.Contains("越出工作区"));
+Check("★ 会话钉了项目目录后，读仍不受限（读得到宿主目录的文件）",
+    sessionEscape.Success && sessionEscape.Output!.Contains("宿主工作区的文件"), sessionEscape.Error ?? sessionEscape.Output);
+
+// 写才是被项目目录圈住的那一半 —— 同一个 ../host-only.txt，写进去必须被拒。
+var sessionWriteEscape = await new WriteFileTool(sessionToolkit).InvokeAsync(
+    new ToolInvocation("write_file", new Dictionary<string, string?>
+    {
+        ["path"] = "../host-only.txt",
+        ["content"] = "不该写进去",
+    }));
+Check("★ 项目目录外的写被拒（写只落在会话项目目录内）",
+    !sessionWriteEscape.Success && sessionWriteEscape.Error!.Contains("越出工作区"), sessionWriteEscape.Error);
+Check("★ 项目目录外的文件确实没被改写",
+    File.ReadAllText(Path.Combine(root, "host-only.txt")) == "宿主工作区的文件");
 
 Console.WriteLine($"\n═══ 结果：{passes} 通过 / {failures} 失败 ═══");
 return failures == 0 ? 0 : 1;
@@ -344,6 +439,35 @@ static (TcpListener Listener, int Port) StartLocalServer(string html)
 }
 
 // ═══════════════════════════ 测试替身 ═══════════════════════════
+
+/// <summary>固定后端的沙箱注册表：用于给 run_command 注入带各类备注的 outcome。</summary>
+internal sealed class ScriptedSandboxRegistry(ISandboxBackend backend) : ISandboxRegistry
+{
+    public IReadOnlyCollection<string> Names => [backend.Name];
+
+    public string? ResolveNote => null;
+
+    public ISandboxBackend Resolve(string? name) => backend;
+
+    public IDisposable Register(ISandboxBackend backendToRegister) => throw new NotSupportedException();
+}
+
+/// <summary>返回预设 Notes 的假沙箱后端：钉住 CommandTool 对备注的稳定前缀分类。</summary>
+internal sealed class NotesProbeBackend(
+    string name,
+    int exitCode,
+    string stdOut,
+    IReadOnlyList<string> notes) : ISandboxBackend
+{
+    public string Name => name;
+
+    public bool IsAvailable => true;
+
+    public string Describe() => "探针后端自述";
+
+    public Task<SandboxOutcome> RunAsync(SandboxRequest request, CancellationToken ct)
+        => Task.FromResult(new SandboxOutcome(exitCode, stdOut, string.Empty, false, false, false, notes));
+}
 
 internal sealed class FakeSearchProvider(string name, IReadOnlyList<SearchHit> hits) : ISearchProvider
 {

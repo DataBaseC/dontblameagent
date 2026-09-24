@@ -72,6 +72,12 @@ internal sealed class PluginScope : IKernelScope
     /// </summary>
     public IDisposable RegisterTool(ITool tool) => Track(_tools.Register(tool, PluginId));
 
+    /// <summary>
+    /// 注册工具并指定所属工具包（脚本插件用 <c>toolset</c> 字段指定；
+    /// 不指定就按来源（插件 id）自动成包）。
+    /// </summary>
+    public IDisposable RegisterTool(ITool tool, string? toolset) => Track(_tools.Register(tool, PluginId, toolset));
+
     public IDisposable Effect(Func<IDisposable> setup) => Track(setup());
 
     private IDisposable Track(IDisposable effect)

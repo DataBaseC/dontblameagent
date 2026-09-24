@@ -25,6 +25,18 @@ public sealed class AgentConfig
     /// <summary>插件目录（其下每个子目录是一个插件）。</summary>
     public string? Plugins { get; set; }
 
+    /// <summary>
+    /// 命令沙箱档位：<c>auto</c>（默认，Windows 用 job、其他平台用 process）/ <c>off</c> /
+    /// <c>process</c> / <c>job</c> —— 或插件注册的后端名。
+    /// </summary>
+    public string? Sandbox { get; set; }
+
+    /// <summary>
+    /// 启动时就收起的工具包（空 = 全部开启）。
+    /// 保留包（core / meta）写了也不生效 —— 那是「把 agent 关成残废」，不是省负担。
+    /// </summary>
+    public List<string>? DisabledToolsets { get; set; }
+
     /// <summary>只加载这些插件 id；省略 = 全部加载。</summary>
     public List<string>? EnabledPlugins { get; set; }
 
@@ -132,7 +144,9 @@ public sealed class AgentConfig
           // "includeUsage": true,             // 端点不认 stream_options 时设为 false
           // "maxSteps": 12,
           // "temperature": 0.7,
-          // "context": { "tokenBudget": 24000, "compressionTriggerRatio": 0.8 }
+          // "context": { "tokenBudget": 24000, "compressionTriggerRatio": 0.8 },
+          // "sandbox": "auto",                // 命令沙箱：auto / off / process / job（Windows）
+          // "disabledToolsets": ["writing-kit", "web"]   // 启动就收起的工具包（core/meta 不可关）
         }
         """;
 }

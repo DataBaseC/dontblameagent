@@ -97,6 +97,11 @@ if (!File.Exists(profilePath) && catalog.Plugins.Count > 0)
     profile.EnabledPlugins = [.. catalog.Plugins.Select(p => p.Id)];
 }
 
+// 启动器自己的设置（目前只有「启动时自动打开浏览器」）。与装配档案同目录，
+// 默认值见 LauncherSettings —— 首次运行没有这个文件，就用默认。
+var settingsPath = Path.Combine(Path.GetDirectoryName(profilePath) ?? cwd, "launcher-settings.json");
+var settings = LauncherSettings.Load(settingsPath);
+
 var state = new LauncherState
 {
     PluginsDir = pluginsDir,
@@ -104,6 +109,8 @@ var state = new LauncherState
     Profile = profile,
     Catalog = catalog.Plugins,
     Errors = catalog.Errors,
+    Settings = settings,
+    SettingsPath = settingsPath,
 };
 
 // 桥接：后台解压任务（可能此刻仍在跑）把进度/结果同步进 state，页面 /api/state 才能看见。
@@ -222,9 +229,20 @@ Console.WriteLine($"请用浏览器打开：{server.Url}");
 Console.WriteLine("（Ctrl+C 退出）");
 Console.WriteLine();
 
-if (!HasFlag("--no-open"))
+// ④ 浏览器自动打开做成「可开关的」：
+//   · --open    本次强制打开；--no-open 本次强制不打开（两者都优先于设置）；
+//   · 否则听设置文件（默认开）—— 管理页上的那个开关改的就是它。
+// 这样默认行为不变（省得第一次用的人找不到页面），不想被多塞标签页的人关一次就清静。
+var autoOpenBrowser = HasFlag("--open")
+    || (!HasFlag("--no-open") && settings.OpenBrowserOnStart);
+
+if (autoOpenBrowser)
 {
     TryOpenBrowser(server.Url);
+}
+else
+{
+    Console.WriteLine("（未自动打开浏览器；用 --open 可强制打开本次，或在管理页里把「启动时自动打开浏览器」打开）");
 }
 
 using var cts = new CancellationTokenSource();

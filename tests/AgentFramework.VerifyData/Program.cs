@@ -129,6 +129,44 @@ using (var forkLog = JsonlEventLog.Open(forkPath))
 Check("分叉日志可独立追加（5 条）", JsonlEventLog.Read(forkPath).Count() == 5);
 Check("源会话未受分叉影响（10 条）", JsonlEventLog.Read(logPath).Count() == 10);
 
+// ── 5.5 分叉 Seq 映射（MaskedSeqs / FromSeq / ToSeq 重写）────
+Console.WriteLine("\n── 5.5 分叉 Seq 映射（交叉引用跟着重编号一起搬）──");
+
+// 手工写盘、Seq 从 10 起 —— 制造 oldSeq≠newSeq 的真实重编号场景
+//（正常 JsonlEventLog 从 1 连续编号时映射退化为恒等，测不出引用搬移）。
+var xrefPath = Path.Combine(root, "session-xref.jsonl");
+File.WriteAllLines(xrefPath,
+[
+    """{"type":"session-created","Seq":10,"SessionId":"s-xref","Timestamp":"2026-01-01T00:00:00+00:00","Title":"xref"}""",
+    """{"type":"user-message","Seq":11,"SessionId":"s-xref","Timestamp":"2026-01-01T00:00:01+00:00","Text":"问题"}""",
+    """{"type":"assistant-message","Seq":12,"SessionId":"s-xref","Timestamp":"2026-01-01T00:00:02+00:00","Text":"回答"}""",
+    """{"type":"context-compacted","Seq":13,"SessionId":"s-xref","Timestamp":"2026-01-01T00:00:03+00:00","Trigger":"auto","PreTokens":100,"PostTokens":50,"MaskedSeqs":[11,12],"MaskedCount":2}""",
+    """{"type":"checkpoint","Seq":14,"SessionId":"s-xref","Timestamp":"2026-01-01T00:00:04+00:00","Trigger":"auto","WaterLevelPermille":350,"PreTokens":100,"FromSeq":11,"ToSeq":12,"Intent":"测试分叉引用"}""",
+]);
+
+var xrefForkPath = Path.Combine(root, "session-xref-fork.jsonl");
+SessionForker.Fork(xrefPath, xrefForkPath, fromSeq: 14, newSessionId: "s-xref-fork");
+var forkedEvents = JsonlEventLog.Read(xrefForkPath).ToList();
+var forkedCompacted = forkedEvents.OfType<ContextCompactedEvent>().Single();
+var forkedCheckpoint = forkedEvents.OfType<CheckpointEvent>().Single();
+
+// 新 header Seq=1；复制事件（原 11,12,13,14）→ 新 2,3,4,5
+Check("分叉后事件 Seq 被重编号（header=1，事件=2..5）",
+    forkedEvents.Select(e => e.Seq).SequenceEqual([1L, 2L, 3L, 4L, 5L]),
+    string.Join(",", forkedEvents.Select(e => e.Seq)));
+Check("★ 分叉后 MaskedSeqs 跟着 Seq 重编号一起搬（11,12 → 2,3）",
+    forkedCompacted.MaskedSeqs.SequenceEqual([2L, 3L]),
+    string.Join(",", forkedCompacted.MaskedSeqs));
+Check("★ 分叉后 Checkpoint FromSeq/ToSeq 已重写（11..12 → 2..3）",
+    forkedCheckpoint.FromSeq == 2 && forkedCheckpoint.ToSeq == 3,
+    $"{forkedCheckpoint.FromSeq}..{forkedCheckpoint.ToSeq}");
+
+// 常规分叉（源 Seq 从 1 连续）时映射为恒等，现有行为不回归
+var normalForkEvents = JsonlEventLog.Read(forkPath).ToList();
+var normalOk = normalForkEvents.Select(e => e.Seq).SequenceEqual(Enumerable.Range(1, normalForkEvents.Count).Select(i => (long)i));
+Check("常规分叉 Seq 连续（恒等映射不回归）", normalOk,
+    string.Join(",", normalForkEvents.Select(e => e.Seq)));
+
 // ── 6. 可重建（投影幂等）──────────────────────────────────
 Console.WriteLine("\n── 6. 可重建 ──");
 var rebuildA = SessionProjector.ProjectFile(forkPath);

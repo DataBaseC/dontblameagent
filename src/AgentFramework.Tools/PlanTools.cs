@@ -76,9 +76,11 @@ public sealed class UpdatePlanTool(Func<string?> currentSessionId, Func<SessionE
         }
 
         var action = invocation.Arguments.TryGetValue("action", out var a) ? a : null;
+        // 同秒内连续 create 两个计划会撞 id（都是 plan-HHmmss），
+        // 加 4 位随机后缀消碰撞；与 fork-/sub- 的 id 形态一致。
         var planId = invocation.Arguments.TryGetValue("planId", out var pid) && !string.IsNullOrWhiteSpace(pid)
             ? pid
-            : $"plan-{DateTime.UtcNow:HHmmss}";
+            : $"plan-{DateTime.UtcNow:HHmmss}-{Guid.NewGuid().ToString("N")[..4]}";
 
         if (action == "create")
         {

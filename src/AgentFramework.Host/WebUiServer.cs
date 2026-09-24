@@ -116,7 +116,7 @@ public sealed partial class WebUiServer : IDisposable, IApprovalPrompt
                 continue;
             }
 
-            _ = Task.Run(() => HandleAsync(context));
+            _ = Task.Run(() => HandleAsync(context, ct), CancellationToken.None);
         }
     }
 
@@ -434,6 +434,22 @@ public sealed partial class WebUiServer : IDisposable, IApprovalPrompt
             cacheHitRate = usage.CacheHitRate is null
                 ? (double?)null
                 : Math.Round(usage.CacheHitRate.Value, 4),
+        };
+    }
+
+    /// <summary>
+    /// 命令沙箱档位。界面上看得见「当前这一档到底管住了什么」——
+    /// 回落（配置写了 job、机器上用 process）也在这里如实说明。
+    /// </summary>
+    private object SandboxStatus()
+    {
+        var info = _host.SandboxInfo;
+
+        return new
+        {
+            name = info.Name,
+            description = info.Description,
+            note = info.Note,
         };
     }
 
@@ -773,7 +789,7 @@ public sealed partial class WebUiServer : IDisposable, IApprovalPrompt
 
     // ── 路由 ───────────────────────────────────────────────
 
-    private async Task HandleAsync(HttpListenerContext context)
+    private async Task HandleAsync(HttpListenerContext context, CancellationToken ct)
     {
         var path = context.Request.Url?.AbsolutePath ?? "/";
         var method = context.Request.HttpMethod;
@@ -799,10 +815,12 @@ public sealed partial class WebUiServer : IDisposable, IApprovalPrompt
 
             // 注册路由优先。顺序刻意放在内置路由**之前**：
             // 注册进来的要么用新路径，要么就是想覆盖内置行为 —— 两种都该让它先说话。
+            // 用请求的 ct 而不是 CancellationToken.None：关停/取消时自定义路由能跟着停，
+            // 而不是在后台继续跑完一整段工作。
             if (_routes.Match(method, path) is { } custom)
             {
                 await custom
-                    .HandleAsync(new WebUiRequest(context, _host, method, path), CancellationToken.None)
+                    .HandleAsync(new WebUiRequest(context, _host, method, path), ct)
                     .ConfigureAwait(false);
                 return;
             }

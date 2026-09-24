@@ -39,6 +39,7 @@ public static class AgentTaskStatus
 [JsonDerivedType(typeof(SubAgentCompletedEvent), "subagent-completed")]
 [JsonDerivedType(typeof(PlanCreatedEvent), "plan-created")]
 [JsonDerivedType(typeof(PlanStepUpdatedEvent), "plan-step-updated")]
+[JsonDerivedType(typeof(CheckpointEvent), "checkpoint")]
 public abstract class SessionEvent
 {
     /// <summary>会话内单调递增序号，由日志写入时分配。</summary>
@@ -386,4 +387,113 @@ public sealed class PlanStepUpdatedEvent : SessionEvent
 
     /// <summary>新状态：pending / done / dropped。</summary>
     public string Status { get; set; } = "pending";
+}
+
+/// <summary>
+/// 长任务的状态锚点（checkpoint）。
+///
+/// <para>
+/// 与 <see cref="ContextCompactedEvent"/> 的分工很清楚：
+/// 压缩记的是「模型<b>看不到</b>什么了」，checkpoint 记的是「我们认定现在<b>是什么状态</b>」。
+/// </para>
+/// <para>
+/// 三条纪律：
+/// ① <b>不进模型上下文</b> —— 投影器不处理它（与 <see cref="UserInputRephrasedEvent"/> 同），
+/// 只在落盘与 rebuild 时被读；
+/// ② <b>追加而非覆盖</b> —— 每次 checkpoint 是一条新事件，旧的那条永不改（文件存变更，不存状态）；
+/// ③ <b>增量</b> —— <see cref="FromSeq"/> / <see cref="ToSeq"/> 标明这份是从哪一段提取的，
+/// 于是「改主意」在时间线上是可见的，而不是被悄悄覆盖掉。
+/// </para>
+/// </summary>
+public sealed class CheckpointEvent : SessionEvent
+{
+    /// <summary>触发来源（<see cref="CheckpointTrigger"/>）。</summary>
+    public string Trigger { get; set; } = CheckpointTrigger.Auto;
+
+    /// <summary>触发时的水位（千分比）。</summary>
+    public int WaterLevelPermille { get; set; }
+
+    /// <summary>触发时的估算 token。</summary>
+    public int PreTokens { get; set; }
+
+    /// <summary>本份提取覆盖的事件区间（自上次 checkpoint 之后的增量窗口）。</summary>
+    public long FromSeq { get; set; }
+
+    public long ToSeq { get; set; }
+
+    // —— 结构化状态 ——
+    // 对照 MiMo Code 的 checkpoint 字段，砍掉我们已有事件承载的部分（任务树、计划走 TaskCreated / PlanCreated）
+
+    /// <summary>当前意图 —— 这一路在干什么。</summary>
+    public string? Intent { get; set; }
+
+    /// <summary>下一步动作 —— 醒来第一件要做的事。</summary>
+    public string? NextAction { get; set; }
+
+    /// <summary>当前工作 —— 手上这个具体活。</summary>
+    public string? CurrentWork { get; set; }
+
+    /// <summary>工作约束（不许改的、必须遵守的）。</summary>
+    public List<string> Constraints { get; set; } = [];
+
+    /// <summary>涉及文件。</summary>
+    public List<string> FilesTouched { get; set; } = [];
+
+    /// <summary>跨任务发现 —— 在别处也成立的事实。</summary>
+    public List<string> Discoveries { get; set; } = [];
+
+    /// <summary>错误与修复。</summary>
+    public string? ErrorsAndFixes { get; set; }
+
+    /// <summary>设计决策（以及为什么）。</summary>
+    public List<string> Decisions { get; set; } = [];
+
+    /// <summary>杂项笔记 —— 上面归类不下的。</summary>
+    public string? Notes { get; set; }
+
+    /// <summary>本次顺带升级进记忆的条目 id —— 可审计「这条记忆是谁写的」。</summary>
+    public List<string> PromotedMemoryIds { get; set; } = [];
+
+    /// <summary>产出这份 checkpoint 的模型（诊断用）。</summary>
+    public string? Model { get; set; }
+
+    public long ElapsedMs { get; set; }
+
+    /// <summary>
+    /// 渲染成注入块 —— rebuild 时作为新窗口的种子。
+    ///
+    /// 空字段不占用行：checkpoint 的价值在于密度，不在于格式齐整。
+    /// </summary>
+    public string RenderBlock()
+    {
+        var sb = new System.Text.StringBuilder();
+
+        void Line(string label, string? value)
+        {
+            if (!string.IsNullOrWhiteSpace(value))
+            {
+                sb.Append(label).Append('：').AppendLine(value!.Trim());
+            }
+        }
+
+        void Items(string label, List<string> values)
+        {
+            if (values.Count > 0)
+            {
+                sb.Append(label).Append('：').AppendLine(string.Join('；', values));
+            }
+        }
+
+        Line("当前意图", Intent);
+        Line("下一步", NextAction);
+        Line("当前工作", CurrentWork);
+        Items("工作约束", Constraints);
+        Items("涉及文件", FilesTouched);
+        Items("跨任务发现", Discoveries);
+        Line("错误与修复", ErrorsAndFixes);
+        Items("设计决策", Decisions);
+        Line("其他", Notes);
+
+        return sb.ToString().TrimEnd();
+    }
 }

@@ -73,6 +73,25 @@ if errorlevel 1 (
     exit /b 1
 )
 
+rem ---- Base plugins: devkit / writing-kit / console-kit ----
+rem These ship with the host and are built from src\AgentFramework.Plugins.*
+echo [3b/6] Base plugins (devkit / writing-kit / console-kit)
+"%DOTNET%" publish src\AgentFramework.Plugins.DevKit\AgentFramework.Plugins.DevKit.csproj -c Release -o "%HOST_OUT%\plugins\devkit" --nologo -v quiet
+if errorlevel 1 (
+    echo   devkit publish failed.
+    exit /b 1
+)
+"%DOTNET%" publish src\AgentFramework.Plugins.WritingKit\AgentFramework.Plugins.WritingKit.csproj -c Release -o "%HOST_OUT%\plugins\writing-kit" --nologo -v quiet
+if errorlevel 1 (
+    echo   writing-kit publish failed.
+    exit /b 1
+)
+"%DOTNET%" publish src\AgentFramework.Plugins.ConsoleKit\AgentFramework.Plugins.ConsoleKit.csproj -c Release -o "%HOST_OUT%\plugins\console-kit" --nologo -v quiet
+if errorlevel 1 (
+    echo   console-kit publish failed.
+    exit /b 1
+)
+
 echo [4/6] 发布桌面壳（原生窗口；单独目录，避免覆盖宿主 runtimeconfig）……
 if exist "%DESK_OUT%" rmdir /s /q "%DESK_OUT%"
 "%DOTNET%" publish src\AgentFramework.Desktop\AgentFramework.Desktop.csproj -c Release -r win-x64 --self-contained true -o "%DESK_OUT%" --nologo -v quiet

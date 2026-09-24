@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <RootNamespace>AgentFramework.VerifyToolsets</RootNamespace>
+    <AssemblyName>AgentFramework.VerifyToolsets</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../../src/AgentFramework.Host/AgentFramework.Host.csproj" />
+    <ProjectReference Include="../../src/AgentFramework.Plugins.DevKit/AgentFramework.Plugins.DevKit.csproj" />
+    <ProjectReference Include="../../src/AgentFramework.Plugins.WritingKit/AgentFramework.Plugins.WritingKit.csproj" />
+    <ProjectReference Include="../../src/AgentFramework.Plugins.ConsoleKit/AgentFramework.Plugins.ConsoleKit.csproj" />
+  </ItemGroup>
+
+  <!-- 插件清单随构建拷到输出的 baseplugins/&lt;id&gt;/（与 VerifyBaseKit 同一手法） -->
+  <ItemGroup>
+    <None Include="../../src/AgentFramework.Plugins.DevKit/plugin.json" Link="baseplugins/devkit/plugin.json" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="../../src/AgentFramework.Plugins.WritingKit/plugin.json" Link="baseplugins/writing-kit/plugin.json" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="../../src/AgentFramework.Plugins.ConsoleKit/plugin.json" Link="baseplugins/console-kit/plugin.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+</Project>

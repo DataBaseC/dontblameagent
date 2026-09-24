@@ -9,6 +9,56 @@ namespace AgentFramework.Host;
 /// </summary>
 internal static class WebUiPage
 {
+    /// <summary>
+    /// 把插件贡献的样式表与脚本挂进主页面。
+    ///
+    /// <para>
+    /// 拼接点在 <c>&lt;/head&gt;</c> 与 <c>&lt;/body&gt;</c> 之前 —— 样式先进头、
+    /// 脚本后进尾，于是插件的 CSS 天然压过内置样式（同权重后者胜），
+    /// 脚本也天然晚于页面自身的初始化，能安全地读 DOM。
+    /// </para>
+    ///
+    /// <para>
+    /// 注入顺序按插件 id 排序（见 <see cref="PluginUi.Collect"/>）：
+    /// 顺序稳定才谈得上「谁覆盖谁」可预期 —— 抖动的顺序会让同一套插件每次刷新长不一样。
+    /// </para>
+    /// </summary>
+    public static string WithPluginUi(string html, IReadOnlyList<PluginUiContribution> contributions)
+    {
+        if (contributions.Count == 0)
+        {
+            return html;
+        }
+
+        var head = new System.Text.StringBuilder();
+        var body = new System.Text.StringBuilder();
+
+        foreach (var contribution in contributions)
+        {
+            var id = Uri.EscapeDataString(contribution.Id);
+
+            foreach (var style in contribution.Styles)
+            {
+                head.Append("<link rel=\"stylesheet\" href=\"/plugin-ui?id=").Append(id)
+                    .Append("&file=").Append(Uri.EscapeDataString(style)).Append("\">\n");
+            }
+
+            foreach (var script in contribution.Scripts)
+            {
+                body.Append("<script src=\"/plugin-ui?id=").Append(id)
+                    .Append("&file=").Append(Uri.EscapeDataString(script)).Append("\"></script>\n");
+            }
+        }
+
+        var withHead = head.Length == 0
+            ? html
+            : html.Replace("</head>", head.ToString() + "</head>", StringComparison.Ordinal);
+
+        return body.Length == 0
+            ? withHead
+            : withHead.Replace("</body>", body.ToString() + "</body>", StringComparison.Ordinal);
+    }
+
     public const string Html = """
 <!doctype html>
 <html lang="zh-CN">
@@ -292,6 +342,19 @@ internal static class WebUiPage
   .mem-row button { padding: 2px 9px; font-size: 11px; border-radius: 5px; }
   .mem-section-title { font-size: 11px; color: var(--faint); letter-spacing: .06em; margin: 10px 0 4px; }
 
+  /* ── 目录浏览（「新建会话」挑项目目录）───────────── */
+  .dir-list { max-height: 320px; overflow-y: auto; border: 1px solid var(--border2);
+              border-radius: 10px; padding: 4px; margin-bottom: 10px; background: var(--bg1); }
+  .dir-row { display: flex; align-items: center; gap: 9px; padding: 7px 10px; border-radius: 7px;
+             cursor: pointer; font-size: 12.5px; color: var(--text); }
+  .dir-row:hover { background: var(--bg3); }
+  .dir-row .ico { flex: 0 0 auto; }
+  .dir-row .nm { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .dir-row.hidden-dir .nm { color: var(--faint); }
+  .dir-empty { padding: 12px 10px; color: var(--faint); font-size: 12px; }
+  .dir-cur { font-family: var(--mono); font-size: 11.5px; color: var(--accent-2);
+             word-break: break-all; margin-bottom: 8px; }
+
   /* ── 动画关键帧 ─────────────────────────────────────── */
   @keyframes rise { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: none; } }
   @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
@@ -325,6 +388,7 @@ internal static class WebUiPage
       <span id="pill-tools" class="pill"></span>
       <span id="pill-plugins" class="pill clickable" title="插件：已装内容与独立面板入口">插件</span>
       <span id="pill-skills" class="pill clickable" title="技能与创意工坊：启用工具白名单包 / 导入分享的技能">技能</span>
+      <span id="pill-toolsets" class="pill clickable" title="工具包：按这段活的需要开合 —— 装得多不等于负担重，收起来才省">包</span>
       <span id="pill-memory" class="pill clickable" title="记忆管理：热度 / 置顶 / 归档 / 合并 / 清扫降级">记忆</span>
       <span id="pill-ctx" class="pill" title="上下文水位：超 80% 会触发压缩（打断前缀缓存）">ctx</span>
       <span id="pill-rephrase" class="pill clickable" title="点击打开 / 收起转述设置">转述</span>
@@ -417,6 +481,15 @@ internal static class WebUiPage
         </div>
       </div>
 
+      <!-- 工具包：可见性的最小单位 —— 「装了什么」与「这一轮给模型看什么」分开 -->
+      <div class="settings" id="toolsets-panel" hidden>
+        <div class="row">
+          <b>工具包</b>
+          <span style="color:var(--faint)">用不上的收起来：省每轮的 schema token，也少让模型在几十个工具里挑错。core 与 工具包管理 不可关</span>
+        </div>
+        <div id="toolsets-list"></div>
+      </div>
+
       <!-- 插件面板：dsh 式 —— 插件自带一小块 UI，从这里点入 -->
       <div class="settings" id="plugins-panel" hidden>
         <div class="row">
@@ -461,9 +534,33 @@ internal static class WebUiPage
           <div id="mode-cards"></div>
           <div class="row" style="margin-top:6px; margin-bottom:0">
             <span style="font-size:12px; color:var(--dim); flex:0 0 auto">项目目录</span>
-            <input id="np-project-dir" placeholder="留空 = 宿主默认工作区；填绝对路径则该会话的文件与项目记忆都锚定这里">
+            <input id="np-project-dir" placeholder="留空 = 宿主默认工作区；点右侧「浏览…」挑一个文件夹">
+            <button id="np-browse" class="ghost small" type="button">浏览…</button>
+          </div>
+          <div class="modal-sub" style="margin:6px 0 0">
+            这个目录只圈「写」：会话的文件写入与项目记忆锚定在这里；「读」不受限，可读硬盘任意目录。
           </div>
           <div class="modal-acts"><button id="mode-cancel" class="ghost small">取消</button></div>
+        </div>
+      </div>
+
+      <!-- 目录浏览：挑项目目录（可进任意位置、可新建文件夹） -->
+      <div id="dir-pick" class="modal-mask" hidden>
+        <div class="modal">
+          <div class="modal-title">选择项目目录</div>
+          <div class="modal-sub" id="dp-current">…</div>
+          <div class="dir-cur" id="dp-path"></div>
+          <div class="row" style="margin-bottom:8px">
+            <button id="dp-up" class="ghost small" type="button">↑ 上一级</button>
+            <button id="dp-home" class="ghost small" type="button">🏠 主目录</button>
+            <button id="dp-new" class="ghost small" type="button">＋ 新建文件夹</button>
+            <span id="dp-state" class="state"></span>
+          </div>
+          <div id="dp-list" class="dir-list"></div>
+          <div class="modal-acts">
+            <button id="dp-cancel" class="ghost small" type="button">取消</button>
+            <button id="dp-choose" class="ghost small" type="button">就用这个目录</button>
+          </div>
         </div>
       </div>
 
@@ -532,6 +629,12 @@ let sessionModeName = '工作模式';
 let currentSessionId = null;
 let lastSeq = 0;   // F3：最后一条事件的序号（分叉按钮的默认分叉点）
 const busySessions = new Set();
+
+// ③ 竞态防线：已经发出过「回合结束」信号的 turnId（只留最近 32 个）。
+// 回合跑得极快时（例如工具一失败就收尾），turn-ended 会**先于** /api/send 的 202 响应到达；
+// 前端若在 202 回来之后无条件把按钮置成「停止」，回合明明已经结束、按钮却再也回不来，
+// 非得手动点一下。所以先记下已结束的回合，202 回来时若发现它已经结束，就不再覆盖终点状态。
+const endedTurns = [];
 
 function markSessionBusy(sessionId) {
   if (busySessions.has(sessionId)) return;
@@ -1044,7 +1147,15 @@ async function send() {
     if (!response.ok) {
       hint.textContent = '发送失败：HTTP ' + response.status;
     } else {
-      setTurnRunning(true);
+      // ③：回合可能在这条 202 响应回来**之前**就已经跑完（turn-ended 先到）。
+      // 那种情况下再置「运行中」，就是把已经收束的按钮又按回「停止」——
+      // 回合早没了，却要手动点一下才复位。所以只对「还没结束的回合」置运行中。
+      const data = await response.json().catch(() => ({}));
+      if (data && data.turnId && endedTurns.includes(data.turnId)) {
+        setTurnRunning(false);
+      } else {
+        setTurnRunning(true);
+      }
     }
   } catch (err) {
     hint.textContent = '发送失败：' + err.message;
@@ -1331,6 +1442,80 @@ optimizeBtn.onclick = optimize;
 document.getElementById('new-session').onclick = newSession;
 
 rephrasePill.onclick = () => { settingsPanel.hidden = !settingsPanel.hidden; };
+// ── 工具包（可见性的最小单位）─────────────────────────
+// 「装了什么」与「这一轮给模型看什么」分开：装得多不等于负担重，收起来才省。
+const toolsetsPanel = document.getElementById('toolsets-panel');
+document.getElementById('pill-toolsets').onclick = () => {
+  toolsetsPanel.hidden = !toolsetsPanel.hidden;
+  if (!toolsetsPanel.hidden) loadToolsets();
+};
+
+async function loadToolsets() {
+  const list = document.getElementById('toolsets-list');
+  try {
+    const data = await (await fetch('/api/toolsets')).json();
+    list.innerHTML = '';
+
+    const off = data.toolsets.filter((t) => !t.enabled).length;
+    const head = document.createElement('div');
+    head.className = 'skill-desc';
+    head.style.padding = '2px 0 6px';
+    head.textContent = '共 ' + data.toolsets.length + ' 个包，' + off + ' 个已收起';
+    list.appendChild(head);
+
+    data.toolsets.forEach((t) => {
+      const row = document.createElement('div');
+      row.className = 'skill-row';
+
+      const state = document.createElement('span');
+      state.className = 'skill-src' + (t.enabled ? ' on' : '');
+      state.textContent = t.enabled ? '● 开' : '○ 关';
+
+      const name = document.createElement('span');
+      name.className = 'skill-name';
+      name.textContent = t.name + '（' + t.id + '）';
+
+      const desc = document.createElement('span');
+      desc.className = 'skill-desc';
+      desc.textContent = t.description || '（无描述）';
+      desc.title = t.description || '';
+
+      const tools = document.createElement('span');
+      tools.className = 'skill-tools';
+      tools.textContent = '⚙ ' + t.tools.length;
+      tools.title = t.tools.length ? t.tools.join(', ') : '（空包）';
+
+      const btn = document.createElement('button');
+      btn.className = 'ghost';
+      if (t.locked) {
+        btn.textContent = '不可关';
+        btn.disabled = true;
+        btn.title = '保留包：关掉会把能力关成残废，或让开关本身再也开不回来';
+      } else {
+        btn.textContent = t.enabled ? '收起' : '打开';
+        btn.onclick = async () => {
+          const res = await (await fetch('/api/toolsets/toggle', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ id: t.id, enabled: !t.enabled })
+          })).json();
+          if (!res.ok) { hint.textContent = res.error || '开关失败'; }
+          else { hint.textContent = (t.enabled ? '已收起「' + t.name + '」' : '已打开「' + t.name + '」') + '（下一轮生效）'; }
+          loadToolsets();
+        };
+      }
+
+      row.appendChild(state);
+      row.appendChild(name);
+      row.appendChild(desc);
+      row.appendChild(tools);
+      row.appendChild(btn);
+      list.appendChild(row);
+    });
+  } catch (err) {
+    list.innerHTML = '<div class="skill-desc">工具包列表加载失败：' + err.message + '</div>';
+  }
+}
+
 document.getElementById('pill-skills').onclick = () => {
   skillsPanel.hidden = !skillsPanel.hidden;
   if (!skillsPanel.hidden) loadSkills();
@@ -1602,6 +1787,119 @@ modelPill.onclick = () => {
 };
 // HCI：模式卡片的点击在 showModePick 里逐卡挂 —— 容器不再需要全局 onclick
 document.getElementById('mode-cancel').onclick = () => { document.getElementById('mode-pick').hidden = true; };
+
+// ── 项目目录：目录浏览弹窗（「浏览…」）─────────────────────
+// 浏览器出于安全拿不到本地绝对路径（showDirectoryPicker 只给句柄），
+// 而会话的项目目录必须落成一个真实绝对路径 —— 所以目录列表由本地服务给
+// （GET /api/fs/dirs）。浏览本身不设限（用户要的就是「自己挑任意位置」），
+// 但「新建文件夹」只收单层目录名（见后端 /api/fs/mkdir）。
+const dirPick = document.getElementById('dir-pick');
+const dpList = document.getElementById('dp-list');
+const dpState = document.getElementById('dp-state');
+const dpCurrent = document.getElementById('dp-current');
+const dpPathEl = document.getElementById('dp-path');
+let dpPath = null;     // 当前浏览到的绝对路径（null = 还在「选一个起点」）
+let dpParent = null;   // 上一级（到根为止为 null）
+let dpHome = null;     // 主目录快捷入口
+
+async function dirBrowse(path) {
+  dpState.style.color = 'var(--dim)';
+  dpState.textContent = '读取中…';
+  try {
+    const url = '/api/fs/dirs' + (path ? '?path=' + encodeURIComponent(path) : '');
+    const response = await fetch(url);
+    const data = await response.json();
+
+    if (!data.ok) {
+      dpState.style.color = 'var(--bad)';
+      dpState.textContent = data.error || '读不了这个目录';
+      return;
+    }
+
+    dpState.textContent = '';
+    if (data.home) dpHome = data.home;
+    dpPath = data.path || null;
+    dpParent = data.parent || null;
+
+    dpCurrent.textContent = dpPath ? '进入子文件夹，或直接点「就用这个目录」' : '从下面选一个起点';
+    dpPathEl.textContent = dpPath || '';
+    dpList.innerHTML = '';
+
+    const addRow = (name, full, hidden) => {
+      const row = document.createElement('div');
+      row.className = 'dir-row' + (hidden ? ' hidden-dir' : '');
+      const ico = document.createElement('span');
+      ico.className = 'ico';
+      ico.textContent = '📁';
+      const nm = document.createElement('span');
+      nm.className = 'nm';
+      nm.textContent = name;
+      const arrow = document.createElement('span');
+      arrow.className = 'ico';
+      arrow.textContent = '›';
+      row.appendChild(ico);
+      row.appendChild(nm);
+      row.appendChild(arrow);
+      row.onclick = () => dirBrowse(full);
+      dpList.appendChild(row);
+    };
+
+    (data.entries || []).forEach((entry) => addRow(entry.name, entry.path, entry.hidden));
+    (data.roots || []).forEach((rootEntry) => addRow(rootEntry.name, rootEntry.path, false));
+
+    if (!dpList.children.length) {
+      const empty = document.createElement('div');
+      empty.className = 'dir-empty';
+      empty.textContent = dpPath ? '（这个目录下没有子文件夹）' : '（没找到可用的起点，直接手输路径吧）';
+      dpList.appendChild(empty);
+    }
+  } catch (err) {
+    dpState.style.color = 'var(--bad)';
+    dpState.textContent = '读取失败：' + err.message;
+  }
+}
+
+document.getElementById('dp-up').onclick = () => { if (dpParent) dirBrowse(dpParent); };
+document.getElementById('dp-home').onclick = () => { if (dpHome) dirBrowse(dpHome); };
+
+document.getElementById('dp-new').onclick = async () => {
+  if (!dpPath) { dpState.textContent = '先进入一个目录，再在里面新建'; return; }
+  const name = prompt('新文件夹名：');
+  if (!name) return;
+  dpState.style.color = 'var(--dim)';
+  dpState.textContent = '新建中…';
+  try {
+    const response = await fetch('/api/fs/mkdir', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ parent: dpPath, name })
+    });
+    const data = await response.json();
+    if (!data.ok) {
+      dpState.style.color = 'var(--bad)';
+      dpState.textContent = '新建失败：' + (data.error || response.status);
+      return;
+    }
+    await dirBrowse(dpPath);
+  } catch (err) {
+    dpState.style.color = 'var(--bad)';
+    dpState.textContent = '新建失败：' + err.message;
+  }
+};
+
+document.getElementById('dp-cancel').onclick = () => { dirPick.hidden = true; };
+
+document.getElementById('dp-choose').onclick = () => {
+  if (!dpPath) { dpState.textContent = '先进入一个目录，再点「就用这个目录」'; return; }
+  document.getElementById('np-project-dir').value = dpPath;
+  dirPick.hidden = true;
+};
+
+document.getElementById('np-browse').onclick = () => {
+  dirPick.hidden = false;
+  const current = document.getElementById('np-project-dir').value.trim();
+  dirBrowse(current || null);
+};
 document.getElementById('mode-pick').onclick = (ev) => {
   if (ev.target.id === 'mode-pick') ev.target.hidden = true;   // 点遮罩关闭
 };
@@ -1985,6 +2283,11 @@ stream.onmessage = (message) => {
     // 思考块在此收口 —— 一轮以工具调用/审批等待/报错结束而没有正文时，
     // 它只能在这里被收掉，否则永远显示「正在思考…」。
     sealReasoning();
+    // ③：记下这个回合已经结束，供 send() 的 202 回调判断（见 endedTurns 注释）。
+    if (data.turnId) {
+      endedTurns.push(data.turnId);
+      if (endedTurns.length > 32) endedTurns.shift();
+    }
     if (data.sessionId) clearSessionBusy(data.sessionId);
     if (!data.sessionId || data.sessionId === currentSessionId) setTurnRunning(false);
   }

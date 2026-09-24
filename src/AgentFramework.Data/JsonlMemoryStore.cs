@@ -51,6 +51,27 @@ public sealed class JsonlMemoryStore(MemoryStoreOptions options, Func<string, st
     /// <summary>低于这个分就当作没命中 —— 挡住「沾一个字就算相关」的噪音。</summary>
     private const double MinScore = 1.0;
 
+    /// <summary>
+    /// 合并批次在文件里的 kind 标记。
+    /// 它是「一行多 ops」的包装行种类，不是 <see cref="MemoryEntry.Kind"/> ——
+    /// 读入时会展开成多条独立事件，折叠视图因此与旧格式完全一致。
+    /// </summary>
+    private const string BatchKindMerge = "merge";
+
+    /// <summary>
+    /// 合并的原子事件载荷：一行 JSON 里装着「全部 ops」（N 条 retract + 1 条 assert）。
+    /// 崩溃要么整行落盘、要么只是半行被跳过 —— 不会留下「已撤销、未合并」。
+    /// 读旧格式（单事件行）时不会遇到它；读到 batch 行则展开 ops 后再折叠。
+    /// </summary>
+    private sealed record MemoryBatch
+    {
+        public string Kind { get; init; } = BatchKindMerge;
+
+        public string Scope { get; init; } = "";
+
+        public List<MemoryEntry> Ops { get; init; } = [];
+    }
+
     private readonly SemaphoreSlim _gate = new(1, 1);
 
     /// <summary>
@@ -236,18 +257,17 @@ public sealed class JsonlMemoryStore(MemoryStoreOptions options, Func<string, st
             sources.Add(found);
         }
 
-        // 逐条 retract（历史一个字不改）+ 追加合并后的新 assert
-        foreach (var src in sources)
+        // 逐条 retract（历史一个字不改）+ 追加合并后的新 assert，
+        // 但落盘是**单条原子事件**（一行 batch）：中途崩溃 = 这一行要么完整、要么只是半行被跳过，
+        // 不会出现「已撤销、未合并」的永久丢失 —— 记忆不可丢。
+        var retracts = sources.ConvertAll(src => new MemoryEntry
         {
-            await WriteAsync(new MemoryEntry
-            {
-                Kind = MemoryKinds.Retract,
-                Scope = scope,
-                Text = string.Empty,
-                TargetId = src.Id,
-                Source = source,
-            }, ct).ConfigureAwait(false);
-        }
+            Kind = MemoryKinds.Retract,
+            Scope = scope,
+            Text = string.Empty,
+            TargetId = src.Id,
+            Source = source,
+        });
 
         var merged = new MemoryEntry
         {
@@ -265,7 +285,12 @@ public sealed class JsonlMemoryStore(MemoryStoreOptions options, Func<string, st
             Source = source,
         };
 
-        await WriteAsync(merged, ct).ConfigureAwait(false);
+        await WriteBatchAsync(new MemoryBatch
+        {
+            Kind = BatchKindMerge,
+            Scope = scope,
+            Ops = [.. retracts, merged],
+        }, ct).ConfigureAwait(false);
         return merged;
     }
 
@@ -451,7 +476,13 @@ public sealed class JsonlMemoryStore(MemoryStoreOptions options, Func<string, st
             return entries;
         }
 
-        foreach (var line in File.ReadLines(path))
+        // 宽容共享读（与 JsonlEventLog.Read 同一套纪律）：写方随时可能持有追加句柄。
+        // File.ReadLines 的默认共享模式不容忍并发写句柄，Windows 上会直接抛「文件被占用」。
+        using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+        using var reader = new StreamReader(stream);
+
+        string? line;
+        while ((line = reader.ReadLine()) is not null)
         {
             if (string.IsNullOrWhiteSpace(line))
             {
@@ -460,6 +491,20 @@ public sealed class JsonlMemoryStore(MemoryStoreOptions options, Func<string, st
 
             try
             {
+                // batch 行（合并的原子事件）→ 展开 ops；旧格式单事件行 → 原样收下。
+                using var doc = JsonDocument.Parse(line);
+                if (doc.RootElement.ValueKind == JsonValueKind.Object
+                    && doc.RootElement.TryGetProperty("ops", out _))
+                {
+                    var batch = JsonSerializer.Deserialize<MemoryBatch>(line, SerializerOptions);
+                    if (batch is not null)
+                    {
+                        entries.AddRange(batch.Ops);
+                    }
+
+                    continue;
+                }
+
                 var entry = JsonSerializer.Deserialize<MemoryEntry>(line, SerializerOptions);
                 if (entry is not null)
                 {
@@ -635,12 +680,53 @@ public sealed class JsonlMemoryStore(MemoryStoreOptions options, Func<string, st
             await writer.WriteLineAsync(JsonSerializer.Serialize(entry, SerializerOptions)).ConfigureAwait(false);
             await writer.FlushAsync(ct).ConfigureAwait(false);
 
+            // 与事件日志同一条纪律：每条都刷到磁盘，崩溃安全优先于吞吐。
+            // 记忆是真相源（不可从事件流重建），这里的代价完全值得。
+            stream.Flush(flushToDisk: true);
+
             // ★ 失效放在**同一把闸里**（P3c）：写已经落盘，紧接着丢掉这份缓存。
             //   放到闸外就有个缝隙 —— 那一瞬间 Fold 会命中已经过期的视图。
             lock (_foldCache)
             {
                 _foldCache.Remove(entry.Scope);
                 _writeGeneration++;      // 让「正在折叠中」的读线程知道自己的结果已过期
+            }
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
+    /// <summary>
+    /// 写入一条**原子 batch**（一行装下全部 ops）。合并走这里：
+    /// 中途崩溃时整行要么完整落盘、要么只是半行被跳过，不会出现「已撤销、未合并」。
+    /// </summary>
+    private async ValueTask WriteBatchAsync(MemoryBatch batch, CancellationToken ct)
+    {
+        await _gate.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            var scope = NormalizeScope(batch.Scope);
+            batch = batch with
+            {
+                Scope = scope,
+                Ops = [.. batch.Ops.Select(op => op with { Scope = scope })],
+            };
+
+            var path = PathFor(scope);
+            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+
+            await using var stream = new FileStream(path, FileMode.Append, FileAccess.Write, FileShare.Read);
+            await using var writer = new StreamWriter(stream);
+            await writer.WriteLineAsync(JsonSerializer.Serialize(batch, SerializerOptions)).ConfigureAwait(false);
+            await writer.FlushAsync(ct).ConfigureAwait(false);
+            stream.Flush(flushToDisk: true);
+
+            lock (_foldCache)
+            {
+                _foldCache.Remove(scope);
+                _writeGeneration++;
             }
         }
         finally

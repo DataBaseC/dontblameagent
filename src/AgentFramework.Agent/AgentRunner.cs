@@ -88,6 +88,7 @@ public sealed class AgentRunner
         var history = priorContext is null
             ? new List<LlmMessage>()
             : [.. priorContext];
+        var lastAssistantText = string.Empty;
 
         // 转述模式下：日志里存「原文 + 转述结果」，模型看到的是转述结果。
         // 「模型可见即已记录」不受影响 —— 谁看见了什么，日志里都写清楚了。
@@ -205,6 +206,7 @@ public sealed class AgentRunner
             }
 
             var assistantText = text.ToString();
+            lastAssistantText = assistantText;
 
             history.Add(new LlmMessage
             {
@@ -254,9 +256,23 @@ public sealed class AgentRunner
                 else
                 {
                     var tool = tools.FirstOrDefault(t => string.Equals(t.Name, call.ToolName, StringComparison.Ordinal));
-                    result = tool is null
-                        ? ToolResult.Fail($"工具不存在：{call.ToolName}")
-                        : await tool.InvokeAsync(new ToolInvocation(call.ToolName, arguments), ct).ConfigureAwait(false);
+                    try
+                    {
+                        result = tool is null
+                            ? ToolResult.Fail($"工具不存在：{call.ToolName}")
+                            : await tool.InvokeAsync(new ToolInvocation(call.ToolName, arguments), ct).ConfigureAwait(false);
+                    }
+                    catch (OperationCanceledException) when (ct.IsCancellationRequested)
+                    {
+                        // 回合被叫停：结果照样落盘，否则会留下悬空 tool_call，下一轮直接 400
+                        result = ToolResult.Fail("已取消");
+                    }
+                    catch (Exception ex)
+                    {
+                        // 工具抛异常也必须补上 completed —— 「记录意图 → 记录结果」是一对，
+                        // 缺了 completed 会话会从下一轮起每轮 400（悬空 tool_call）。
+                        result = ToolResult.Fail($"工具执行异常：{ex.GetType().Name}: {ex.Message}");
+                    }
                 }
 
                 await _sink.EmitAsync(new ToolCallCompletedEvent
@@ -277,7 +293,8 @@ public sealed class AgentRunner
             }
         }
 
-        return new AgentRunResult(false, string.Empty, _options.MaxSteps, "max-steps");
+        // 末步可能已经写出正文，只是还带着工具调用没走完 —— 不要把它丢掉
+        return new AgentRunResult(false, lastAssistantText, _options.MaxSteps, "max-steps");
     }
 
     /// <summary>毫秒计时 —— 用 Stopwatch 时间戳，避开 DateTime 的精度与时钟回拨问题。</summary>

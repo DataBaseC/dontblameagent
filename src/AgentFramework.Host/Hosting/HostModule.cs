@@ -108,6 +108,22 @@ public sealed class HostState
     /// <summary>已启用技能名集合（回合边界生效；AgentHost 持有，运行期可变）。</summary>
     public HashSet<string> EnabledSkills { get; } = new(StringComparer.Ordinal);
 
+    /// <summary>
+    /// 本次运行<b>关掉</b>的工具包（默认空 = 一个都不关）。
+    ///
+    /// <para>
+    /// 为什么是「关」而不是「开」：默认全开意味着行为与从前<b>完全一致</b>（零回归），
+    /// 而主人真正想做的动作就是「把这次用不上的收起来」——
+    /// 装得多不等于负担重，收起来才是。
+    /// </para>
+    ///
+    /// <para>
+    /// 与技能一样是<b>会话级运行期状态</b>：<c>VisibleTools</c> 每轮现取，
+    /// 所以开关立刻生效，不必重启、不必重装插件。
+    /// </para>
+    /// </summary>
+    public HashSet<string> DisabledToolsets { get; } = new(StringComparer.Ordinal);
+
     /// <summary>子 Agent 编排入口（G1）。AgentHost 回填（需要 OpenSession/SendAsync，装配期还没有）。</summary>
     public Func<string, string, CancellationToken, Task<(string ChildId, bool Success, string Summary)>>? SubAgentRunner { get; set; }
 
@@ -117,6 +133,21 @@ public sealed class HostState
     // ── 工具集（ToolModule 填）───────────────────────────────
 
     public ToolkitOptions? Toolkit { get; set; }
+
+    /// <summary>
+    /// 沙箱后端注册表（ToolModule 建）。诊断面与 <c>/api/status</c> 靠它说清
+    /// 「当前这一档到底管住了什么」—— 沙箱的强度必须可见，否则用户只是以为自己被保护着。
+    /// </summary>
+    public ISandboxRegistry? Sandbox { get; set; }
+
+    /// <summary>
+    /// 工具包视图提供者（AgentHost 回填）。
+    /// 与 InteractionProvider 同一手法：装配期工具就要拿到回调，而宿主那时还没造出来。
+    /// </summary>
+    public Func<IReadOnlyList<ToolsetView>>? ToolsetViewProvider { get; set; }
+
+    /// <summary>工具包开关（AgentHost 回填）。返回 false = 没改成（包不存在或属保留包）。</summary>
+    public Func<string, bool, bool>? ToolsetToggle { get; set; }
 
     /// <summary>官方工具（不含插件工具）。它们随后被注册进内核注册表，成为唯一名单。</summary>
     public List<ITool> OfficialTools { get; } = [];
@@ -137,6 +168,12 @@ public sealed class HostState
     public IReadOnlyList<string> SkippedPlugins { get; set; } = [];
 
     public IReadOnlyList<string> FailedPlugins { get; set; } = [];
+
+    /// <summary>
+    /// 自写插件仓库（ToolModule 填）。PluginModule 装载时读它，
+    /// 四个自管理工具（plugin_write / reload / uninstall / list）也都要它。
+    /// </summary>
+    public PluginStore? PluginStore { get; set; }
 
     // ── 回调中继（宿主建好后回填，用于打破「runner 要先于 host」的循环）──
 
@@ -167,9 +204,12 @@ public sealed class HostState
     /// 正在跑的回合所属会话的模式 id（HCI：模式随会话钉住，不再随宿主全局切换）。
     /// SendAsync 在回合开始时设置 —— AsyncLocal 随 ExecutionContext 只向下游流动，
     /// 并发会话各自的回合互不串。工具闭包（remember 的层级选择等）读它。
+    ///
+    /// 实例字段而非 static：同进程双 Host（测试 / 多宿主）各有一套回合作用域；
+    /// static 会让两个 Host 的回合上下文在同一条 ExecutionContext 里互相覆盖。
     /// </summary>
-    private static readonly AsyncLocal<string?> TurnMode = new();
-    private static readonly AsyncLocal<string?> TurnWorkspace = new();
+    private readonly AsyncLocal<string?> TurnMode = new();
+    private readonly AsyncLocal<string?> TurnWorkspace = new();
 
     /// <summary>
     /// 正在跑的回合所属会话的 id（与 TurnMode/TurnWorkspace 同一回合作用域）。
@@ -179,7 +219,7 @@ public sealed class HostState
     /// （新建会话后搜到的是别人的历史、子 agent 留痕写进别的日志）。
     /// 非回合上下文（UI 直接调用）读到 null，调用方回落到宿主当前会话，行为不变。
     /// </summary>
-    private static readonly AsyncLocal<string?> TurnSessionId = new();
+    private readonly AsyncLocal<string?> TurnSessionId = new();
 
     public string? TurnModeId => TurnMode.Value;
 
@@ -243,6 +283,26 @@ public sealed class HostState
 
         IEnumerable<ITool> filtered = all;
 
+        // ── 工具包：整包进出的第一道闸门 ──────────────────────────
+        // 基础包（模式声明的）：null = 不限；空集 = 一个包都不给（闲聊模式最实在的一笔省）。
+        if (profile.AllowedToolsets is not null)
+        {
+            filtered = profile.AllowedToolsets.Count == 0
+                ? []
+                : filtered.Where(t => profile.AllowedToolsets.Contains(Kernel.ToolsetOf(t.Name) ?? string.Empty, StringComparer.Ordinal));
+        }
+
+        // 会话级关掉的包。默认一个都不关 —— 于是这段代码在没配置时是零影响，
+        // 装的插件照样全都能用；真觉得重了再一个个收。
+        if (DisabledToolsets.Count > 0)
+        {
+            filtered = filtered.Where(t =>
+            {
+                var toolset = Kernel.ToolsetOf(t.Name);
+                return toolset is null || !DisabledToolsets.Contains(toolset);
+            });
+        }
+
         // AllowedTools 的三态语义与 ExposedToolNames 对齐：
         //   null = 全部工具；空集 = 一个都不发（闲聊模式最实在的一笔省）；非空 = 白名单。
         // v3.4 只拦了非空白名单 —— 空集时 schema 照发，闲聊模式的省钱承诺在请求层漏掉了。
@@ -293,6 +353,23 @@ public sealed class HostState
             ? (Func<IReadOnlyCollection<ITool>>)VisibleTools
             : () => VisibleToolsFor(modeId);
 
+        // ★ relayToUi 是「这个会话要在界面上显形」的**唯一开关** —— 它已经决定 delta
+        //   往不往外推，事件（消息 / 工具卡片 / 用量）当然也该照同一个开关走。
+        //
+        //   踩过的坑（真机复现）：调用方只传了 relayToUi、忘了传 onEvent
+        //   —— `/api/sessions/new` 就是这样 —— 于是新建出来的会话，
+        //   界面只收得到 delta、收不到任何事件帧：
+        //     用户消息不显示、助手回复全串进同一个气泡、工具卡片永不出现、用量行缺失。
+        //   （默认会话走的是显式传 onEvent 的那条路，所以只有「新建的会话」坏，
+        //   也就难怪表现为「闲聊/新开会话聊着聊着消息就不对」了。）
+        //
+        //   在这里兜底之后，任何「要在界面显示的会话」都不会再因调用方漏传参数而哑掉。
+        Action<SessionEvent>? relay = onEvent;
+        if (relay is null && relayToUi)
+        {
+            relay = e => EventRelay?.Invoke(e);
+        }
+
         var sink = new HostEventSink(
             sessionLog,
             Kernel,
@@ -302,7 +379,7 @@ public sealed class HostState
             {
                 // ★ 先收进本会话的内存事件表（P2），再转给调用方的事件回调。
                 runtime?.Track(e);
-                onEvent?.Invoke(e);
+                relay?.Invoke(e);
             },
             Index,
             sessionId,

@@ -94,9 +94,18 @@ public sealed class WebSearchTool(ToolkitOptions options, ISearchProvider provid
 /// 抓取网页正文。
 ///
 /// 安全上做了三件事（桌面端必备，dsh 官方把这块<b>延期</b>了，不能照抄）：
-///   1. <b>SSRF 防护</b>：解析目标 IP，私有网段 / 回环 / 链路本地一律拒绝
+///   1. <b>SSRF 防护</b>：在**连接时**（<c>SocketsHttpHandler.ConnectCallback</c>）对目标 IP
+///      做私有/回环/ULA/CGNAT/链路本地校验，拒绝则抛异常
 ///   2. <b>不自动跟随重定向</b>：避免"公网域名 302 到内网"绕过检查
 ///   3. <b>拒绝二进制</b>：只接受 text/* 等文本类型
+///
+/// <para>
+/// 为什么 SSRF 校验必须放在<b>连接时</b>而不是「先 DNS 校验、再 GetAsync」：
+/// 两步之间存在 TOCTOU 窗口 —— DNS rebinding 可以让第一次解析落在公网 IP、
+/// 真正连接时又解析到内网 IP，先检后连等于没检。
+/// <c>ConnectCallback</c> 里「解析出的 IP」与「马上要连的 IP」是同一个，
+/// 窗口从结构上被关掉。
+/// </para>
 /// </summary>
 public sealed class WebFetchTool : ITool, IToolWithSchema
 {
@@ -108,7 +117,10 @@ public sealed class WebFetchTool : ITool, IToolWithSchema
     {
         _options = options;
         _summarizer = summarizer;
-        _http = http ?? new HttpClient(new HttpClientHandler { AllowAutoRedirect = false })
+
+        // 默认客户端必须自带连接时校验。调用方注入 HttpClient 时尊重注入（测试缝），
+        // 此时连接时 SSRF 校验由调用方自理 —— 生产接线（HostBuilder）一律传 null。
+        _http = http ?? new HttpClient(CreateSecureHandler(options.AllowPrivateNetworks))
         {
             Timeout = Timeout.InfiniteTimeSpan,
         };
@@ -149,11 +161,6 @@ public sealed class WebFetchTool : ITool, IToolWithSchema
             return ToolResult.Fail($"域名被屏蔽：{uri.Host}");
         }
 
-        if (!_options.AllowPrivateNetworks && await ResolvesToPrivateAsync(uri.Host, ct).ConfigureAwait(false))
-        {
-            return ToolResult.Fail($"目标解析到私有/回环地址，已拒绝（SSRF 防护）：{uri.Host}");
-        }
-
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
         timeout.CancelAfter(_options.FetchTimeoutMs);
 
@@ -168,6 +175,13 @@ public sealed class WebFetchTool : ITool, IToolWithSchema
         }
         catch (Exception ex)
         {
+            // 连接时 SSRF 拒绝会被 HttpClient 包进 InnerException 链 —— 沿链还原真实原因，
+            // 免得「SSRF 防护」被埋成一句笼统的「抓取失败」。
+            if (TryFindSsrfRejection(ex, out var ssrfMessage))
+            {
+                return ToolResult.Fail(ssrfMessage);
+            }
+
             return ToolResult.Fail($"抓取失败：{ex.Message}");
         }
 
@@ -260,33 +274,127 @@ public sealed class WebFetchTool : ITool, IToolWithSchema
         return Encoding.UTF8.GetString(memory.ToArray());
     }
 
-    private static async Task<bool> ResolvesToPrivateAsync(string host, CancellationToken ct)
+    /// <summary>
+    /// 建一个「连接时做 SSRF 校验」的 handler。
+    ///
+    /// <para>
+    /// <b>为什么不用「先 DNS 校验、再 GetAsync」</b>：两步之间存在 TOCTOU 窗口，
+    /// DNS rebinding 可以让校验时解析到公网、连接时解析到内网。这里把校验放进
+    /// <c>ConnectCallback</c> —— 对**即将连接的那个 IP** 判定，解析与连接之间没有第二次查表。
+    /// </para>
+    /// <para>
+    /// 显式放开私有网段（<c>AllowPrivateNetworks</c>，仅受控测试用）时跳过连接时校验，
+    /// 退回默认连接逻辑。
+    /// </para>
+    /// </summary>
+    private static SocketsHttpHandler CreateSecureHandler(bool allowPrivateAddresses)
     {
-        if (host.Equals("localhost", StringComparison.OrdinalIgnoreCase))
+        var handler = new SocketsHttpHandler
         {
-            return true;
+            // 保留：不自动跟随重定向 —— 公网 302 到内网的旁路到此为止
+            AllowAutoRedirect = false,
+        };
+
+        if (allowPrivateAddresses)
+        {
+            return handler;
         }
 
-        if (IPAddress.TryParse(host, out var literal))
+        handler.ConnectCallback = async (context, cancellationToken) =>
         {
-            return IsPrivate(literal);
-        }
+            var host = context.DnsEndPoint.Host;
+            var port = context.DnsEndPoint.Port;
 
-        IPAddress[] addresses;
-        try
-        {
-            addresses = await Dns.GetHostAddressesAsync(host, ct).ConfigureAwait(false);
-        }
-        catch
-        {
-            // 解析不了就保守拒绝
-            return true;
-        }
+            IPAddress[] addresses;
+            if (IPAddress.TryParse(host, out var literal))
+            {
+                addresses = [literal];
+            }
+            else
+            {
+                try
+                {
+                    addresses = await Dns.GetHostAddressesAsync(host, cancellationToken).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException)
+                {
+                    throw;
+                }
+                catch (Exception ex)
+                {
+                    throw new HttpRequestException($"DNS 解析失败：{host}", ex);
+                }
+            }
 
-        return addresses.Any(IsPrivate);
+            if (addresses.Length == 0)
+            {
+                throw new HttpRequestException($"DNS 解析失败：{host}");
+            }
+
+            // 策略与旧版「Any(IsPrivate) 就拒」保持一致：混杂记录（一条公网 + 一条内网）
+            // 同样整主机拒绝，不给「挑公网那条连」留解释空间。
+            foreach (var address in addresses)
+            {
+                if (IsBlockedAddress(address))
+                {
+                    throw new SsrfRejectionException(
+                        $"目标解析到私有/回环地址，已拒绝（SSRF 防护）：{host} → {address}");
+                }
+            }
+
+            // 只连刚刚校验过的地址列表（不再二次解析）—— 校验的 IP 就是落地的 IP。
+            Exception? lastError = null;
+            foreach (var address in addresses)
+            {
+                // 每个地址各起一个套接字：失败后的套接字不可复用
+                var socket = new Socket(SocketType.Stream, ProtocolType.Tcp) { NoDelay = true };
+                try
+                {
+                    await socket.ConnectAsync(address, port, cancellationToken).ConfigureAwait(false);
+                    // ConnectCallback 的约定是交回 Stream；ownsSocket:true 让流负责释放套接字
+                    return new NetworkStream(socket, ownsSocket: true);
+                }
+                catch (OperationCanceledException)
+                {
+                    socket.Dispose();
+                    throw;
+                }
+                catch (Exception ex)
+                {
+                    socket.Dispose();
+                    lastError = ex;
+                }
+            }
+
+            throw new HttpRequestException($"无法连接 {host}:{port}", lastError);
+        };
+
+        return handler;
     }
 
-    private static bool IsPrivate(IPAddress ip)
+    private static bool TryFindSsrfRejection(Exception ex, out string message)
+    {
+        for (var current = ex; current is not null; current = current.InnerException)
+        {
+            if (current is SsrfRejectionException ssrf)
+            {
+                message = ssrf.Message;
+                return true;
+            }
+        }
+
+        message = string.Empty;
+        return false;
+    }
+
+    /// <summary>连接时 SSRF 校验拒绝。用类型而不是文案匹配，避免重写消息时静默失效。</summary>
+    private sealed class SsrfRejectionException(string message) : Exception(message);
+
+    /// <summary>
+    /// 目标 IP 是否落在不可直接触达的内部网段（私有 / 回环 / ULA / CGNAT / 链路本地 / 未指定）。
+    /// 连接时校验与地址归一化共用这一份判定。
+    /// </summary>
+    private static bool IsBlockedAddress(IPAddress ip)
     {
         // ★ IPv4-mapped IPv6（如 ::ffff:127.0.0.1）先归一回 IPv4。
         //   不归一的话，http://[::ffff:127.0.0.1]/ 会落到 IPv6 分支被直接放行，
@@ -294,6 +402,12 @@ public sealed class WebFetchTool : ITool, IToolWithSchema
         if (ip.IsIPv4MappedToIPv6)
         {
             ip = ip.MapToIPv4();
+        }
+
+        // IPv6 未指定地址 ::（以及 IPv4 的 0.0.0.0）—— 等价于「本机任意地址」，拒绝。
+        if (ip.Equals(IPAddress.IPv6Any) || ip.Equals(IPAddress.Any))
+        {
+            return true;
         }
 
         if (IPAddress.IsLoopback(ip))

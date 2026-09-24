@@ -31,6 +31,16 @@ public interface IPluginContext
     /// <summary>注册工具。</summary>
     IDisposable RegisterTool(ITool tool);
 
+    /// <summary>
+    /// 注册工具，并指定它属于哪个<b>工具包</b>（<c>null</c> = 按来源自动判定）。
+    ///
+    /// <para>
+    /// 默认实现忽略 <paramref name="toolset"/> 并退回 <see cref="RegisterTool(ITool)"/> ——
+    /// 于是老的内核实现不写这个方法也能编译（契约可加不可改）。
+    /// </para>
+    /// </summary>
+    IDisposable RegisterTool(ITool tool, string? toolset) => RegisterTool(tool);
+
     /// <summary>托管外部资源（定时器、网络连接等）。setup 内创建资源并返回其撤销函数。</summary>
     IDisposable Effect(Func<IDisposable> setup);
 
@@ -105,6 +115,48 @@ public sealed record ToolResult(bool Success, string Output, string? Error = nul
 public interface IClockService
 {
     DateTimeOffset Now { get; }
+}
+
+/// <summary>
+/// 工作区访问 —— <b>插件做文件活儿唯一的正门</b>。
+///
+/// <para>
+/// 存在的理由：插件跑在独立 ALC 里，<b>只有契约程序集是共享的</b>。
+/// 宿主内部那套工具类型（<c>ToolkitOptions</c> / 路径检查器）跨不过 ALC 边界，
+/// 插件若各自重造一份，边界纪律立刻出现 N 个版本 —— 迟早有一个版本忘了防符号链接。
+/// 于是把「工作区在哪、能写到哪、能读多大」收成这一个接口：宿主提供，插件消费。
+/// </para>
+///
+/// <para>
+/// 边界纪律（与官方文件工具<b>同一份实现</b>）：<b>读默认可越出工作区，写永远只能落在工作区内</b>。
+/// 插件不许绕过它直接碰 <c>File.*</c> —— 那不是靠自觉，是靠「拿不到工作区路径之外的解析结果」。
+/// </para>
+/// </summary>
+public interface IWorkspaceService
+{
+    /// <summary>当前生效的工作区根（会话级优先，宿主级兜底）。</summary>
+    string Root { get; }
+
+    /// <summary>读操作是否允许越出工作区（默认 true）。</summary>
+    bool AllowReadOutsideWorkspace { get; }
+
+    /// <summary>单次读取的字符上限。</summary>
+    int MaxReadChars { get; }
+
+    /// <summary>单次写入的字符上限。</summary>
+    int MaxWriteChars { get; }
+
+    /// <summary>
+    /// 解析路径并做边界检查。相对路径相对 <see cref="Root"/>，绝对路径直接用。
+    /// <paramref name="forWrite"/> 为 true 时越界即拒（含穿透符号链接的比较）。
+    /// </summary>
+    bool TryResolve(string path, bool forWrite, out string fullPath, out string? error);
+
+    /// <summary>
+    /// 大输出引用化：超过阈值就落盘，只返回摘要 + 路径 + 头尾。
+    /// 与官方工具同一策略 —— 插件工具的输出同样会进上下文，同样该被治理。
+    /// </summary>
+    string Shrink(string toolName, string content);
 }
 
 /// <summary>取服务失败。</summary>

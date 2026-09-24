@@ -27,7 +27,8 @@ public sealed class AgentHost : IAsyncDisposable
     private AgentRunner _runner => _session.Runner;
     private HostEventSink _sink => _session.Sink;
     private readonly PluginHost _plugins;
-    private readonly IReadOnlyList<PluginHandle> _loadedPlugins;
+    // 注：不再持有"启动时的插件快照"—— 插件名单一律实时读内核，
+    // 否则 agent 运行期装上的插件会被界面和关闭流程双双漏掉。
     private readonly SnapshotProjectionCache _projectionCache;
     private readonly IUserInputRephraser? _rephraser;
     private readonly IContextSummarizer? _contextSummarizer;
@@ -79,7 +80,6 @@ public sealed class AgentHost : IAsyncDisposable
         _state = state;
         _session = state.MainSession!;
         _sessions[_session.SessionId] = _session;
-        _loadedPlugins = state.LoadedPlugins;
         UsingOfflineDemo = state.Offline;
         SummarizationEnabled = state.ContextSummarizer is not null;
         _rephraser = state.Rephraser;
@@ -326,29 +326,23 @@ public sealed class AgentHost : IAsyncDisposable
 
     /// <summary>
     /// 当前模式下**真正暴露给模型**的工具名。
-    /// 与 <see cref="ToolNames"/> 的区别就是「装配」与「暴露面」的区别 ——
+    /// 与 <see cref="ToolNames"/> 的区别就是「装了什么」与「这一轮给模型看什么」的区别 ——
     /// 工具一直注册着，但闲聊模式下一个 schema 都不发。
+    ///
+    /// <para>
+    /// <b>只此一份</b>：直接问 <c>VisibleTools</c>（模式收窄 ∩ 工具包开关 ∩ 技能白名单都在那里）。
+    /// 从前这里自己算了一套只看 <c>AllowedTools</c> 的逻辑 —— 于是加了工具包闸门之后，
+    /// 主循环收窄了、这个诊断面还在说「全都暴露」，两处说法对不上。
+    /// </para>
     /// </summary>
     public IReadOnlyList<string> ExposedToolNames
-    {
-        get
-        {
-            var profile = ModeProfile;
+        => [.. _state.VisibleTools().Select(t => t.Name).OrderBy(n => n, StringComparer.Ordinal)];
 
-            if (profile.AllowedTools is null)
-            {
-                return ToolNames;
-            }
-
-            return profile.AllowedTools.Count == 0
-                ? []
-                : [.. ToolNames
-                    .Where(n => profile.AllowedTools.Contains(n, StringComparer.Ordinal))
-                    .OrderBy(n => n, StringComparer.Ordinal)];
-        }
-    }
-
-    public IReadOnlyList<PluginHandle> LoadedPlugins => _loadedPlugins;
+    /// <summary>
+    /// 当前装着的插件。<b>实时读内核，不是启动时的快照</b> ——
+    /// 于是运行期装上 / 卸掉的插件，界面与诊断面立刻看得见（热更新的可见性靠它）。
+    /// </summary>
+    public IReadOnlyList<PluginHandle> LoadedPlugins => _plugins.Plugins;
 
     /// <summary>被 profile 挡下、未加载的插件 id。</summary>
     public IReadOnlyList<string> SkippedPlugins { get; private set; } = [];
@@ -357,6 +351,30 @@ public sealed class AgentHost : IAsyncDisposable
     public IReadOnlyList<string> FailedPlugins { get; private set; } = [];
 
     public IReadOnlyList<ApprovalRecord> Approvals => _sink.Approvals;
+
+    /// <summary>
+    /// 命令沙箱的当前档位（名 / 一句话释义 / 回落说明）。
+    ///
+    /// <para>
+    /// 为什么要在诊断面上露出来：<b>沙箱的强度必须可见</b>。
+    /// 配置里写了 <c>job</c> 但机器上回落到了 <c>process</c>，用户却以为自己受内核配额保护 ——
+    /// 那比干脆没有沙箱更危险。
+    /// </para>
+    /// </summary>
+    public (string Name, string Description, string? Note) SandboxInfo
+    {
+        get
+        {
+            var registry = _state.Sandbox;
+            if (registry is null)
+            {
+                return ("unknown", "沙箱注册表尚未装配", null);
+            }
+
+            var backend = registry.Resolve(_state.Options.Sandbox);
+            return (backend.Name, backend.Describe(), registry.ResolveNote);
+        }
+    }
 
     // ── 装配 ───────────────────────────────────────────────
 
@@ -393,6 +411,10 @@ public sealed class AgentHost : IAsyncDisposable
                     : (string.Empty, false, $"子 Agent 执行失败：{t.Exception?.GetBaseException().Message ?? t.Status.ToString()}"), ct);
         state.InteractionProvider = () => host.EffectiveInteraction;
         state.ModeProvider = () => host.Mode;
+        // 工具包：agent 手上的 toolsets / use_toolset 两个工具走这两条委托。
+        // 读的是同一份视图 —— 界面、诊断面、agent 三处永远一致。
+        state.ToolsetViewProvider = () => host.Toolsets;
+        state.ToolsetToggle = host.SetToolsetEnabled;
 
         // F5 补全（v3.5 审查 P1-1）：多会话下 search_history / spawn_subagent / update_plan
         // 的闭包必须读「本回合所属会话」——
@@ -1279,6 +1301,94 @@ public sealed class AgentHost : IAsyncDisposable
         return enabled ? _state.EnabledSkills.Add(name) : _state.EnabledSkills.Remove(name);
     }
 
+    // ── 工具包（可见性的最小单位）──────────────────────────────
+    // 「装了什么」与「这一轮给模型看什么」解耦的落点：
+    // 插件照常装着，用不上时把它的包收起来 —— 省的是每轮的 schema token，
+    // 也是模型在几十个工具里挑错的机会。
+
+    /// <summary>当前关掉的工具包。</summary>
+    public IReadOnlyCollection<string> DisabledToolsets => _state.DisabledToolsets;
+
+    /// <summary>
+    /// 工具包全景（按 id 排序）：界面上那一排开关、诊断面、agent 的工具读的都是它。
+    /// </summary>
+    public IReadOnlyList<ToolsetView> Toolsets
+    {
+        get
+        {
+            var descriptors = _plugins.Toolsets;
+
+            return [.. descriptors.Values
+                .OrderBy(d => d.Id, StringComparer.Ordinal)
+                .Select(d => new ToolsetView(
+                    d.Id,
+                    string.IsNullOrWhiteSpace(d.Name) ? d.Id : d.Name,
+                    d.Description,
+                    _plugins.ToolsInToolset(d.Id),
+                    IsToolsetExposed(d.Id),
+                    d.Protected || Contracts.BuiltinToolsets.Protected.Contains(d.Id),
+                    d.Eager,
+                    d.Source))];
+        }
+    }
+
+    /// <summary>
+    /// 包是否处于暴露态 —— 与 <c>VisibleToolsCore</c> 同谓词
+    /// （模式 AllowedToolsets / AllowedTools 空集 / DisabledToolsets）。
+    ///
+    /// 只看 DisabledToolsets 时，闲聊模式（AllowedTools = 空集）下包仍显示为开，
+    /// 界面开关与实际暴露面就对不上了。
+    /// </summary>
+    private bool IsToolsetExposed(string toolsetId)
+    {
+        var profile = _state.CurrentProfile;
+
+        // 与 VisibleToolsCore 的 AllowedTools 三态对齐：空集 = 一个工具都不发。
+        if (profile.AllowedTools is { Count: 0 })
+        {
+            return false;
+        }
+
+        if (profile.AllowedToolsets is not null
+            && !profile.AllowedToolsets.Contains(toolsetId, StringComparer.Ordinal))
+        {
+            return false;
+        }
+
+        return !_state.DisabledToolsets.Contains(toolsetId);
+    }
+
+    /// <summary>
+    /// 开/关一个工具包。返回 <c>false</c> = 没改成（包不存在，或是不许关的保留包）。
+    ///
+    /// <para>
+    /// 保留包（core / meta）拒绝关闭：关掉「读文件 + 写文件 + 列目录 + 问用户」会把 agent 关成残废；
+    /// 关掉「工具包开关」这个工具，就再也没有办法开回来了。
+    /// </para>
+    /// </summary>
+    public bool SetToolsetEnabled(string toolsetId, bool enabled)
+    {
+        if (string.IsNullOrWhiteSpace(toolsetId))
+        {
+            return false;
+        }
+
+        var descriptors = _plugins.Toolsets;
+        if (!descriptors.TryGetValue(toolsetId, out var descriptor))
+        {
+            return false;
+        }
+
+        if (!enabled && (descriptor.Protected || Contracts.BuiltinToolsets.Protected.Contains(toolsetId)))
+        {
+            return false;
+        }
+
+        return enabled
+            ? _state.DisabledToolsets.Remove(toolsetId)
+            : _state.DisabledToolsets.Add(toolsetId);
+    }
+
     /// <summary>
     /// 向**指定会话**落一条事件（G1 子 Agent 编排用）：从会话表取它的 Sink，
     /// 不经过「当前会话」指针 —— 派发/完成留痕必须落在父会话自己的流里。
@@ -1412,7 +1522,9 @@ public sealed class AgentHost : IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
-        foreach (var plugin in _loadedPlugins)
+        // 实时取内核里的插件名单：运行期（agent 自己）装上的插件也要一起收掉，
+        // 不能只收启动时那一批 —— 否则热装进来的插件在关闭时会被漏掉。
+        foreach (var plugin in _plugins.Plugins)
         {
             await plugin.DisposeAsync().ConfigureAwait(false);
         }
@@ -1457,9 +1569,12 @@ public sealed class HostEventSink(
     string? sessionId = null,
     Func<string, bool>? isToolAllowed = null) : IAgentEventSink
 {
-    private readonly List<ApprovalRecord> _approvals = [];
+    // 并发安全：RequestApprovalAsync 可能被多个会话/子 agent 同时调用，
+    // 无锁 List.Add 会丢条目甚至把内部数组写坏。用 ConcurrentQueue 入队，
+    // 读侧每次取快照（诊断面只读，不需要跨调用的严格一致视图）。
+    private readonly System.Collections.Concurrent.ConcurrentQueue<ApprovalRecord> _approvals = new();
 
-    public IReadOnlyList<ApprovalRecord> Approvals => _approvals;
+    public IReadOnlyList<ApprovalRecord> Approvals => [.. _approvals];
 
     public async ValueTask EmitAsync(SessionEvent sessionEvent, CancellationToken ct)
     {
@@ -1531,7 +1646,7 @@ public sealed class HostEventSink(
             }
         }
 
-        _approvals.Add(new ApprovalRecord(
+        _approvals.Enqueue(new ApprovalRecord(
             toolPreExecuteEvent.ToolName,
             toolPreExecuteEvent.Cancelled,
             toolPreExecuteEvent.RejectReason));

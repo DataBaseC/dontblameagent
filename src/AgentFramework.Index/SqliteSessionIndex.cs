@@ -72,11 +72,20 @@ public sealed class SqliteSessionIndex : ISessionIndex
                 Mode = SqliteOpenMode.ReadWriteCreate,
             }.ToString());
 
-            await connection.OpenAsync(ct).ConfigureAwait(false);
+            try
+            {
+                await connection.OpenAsync(ct).ConfigureAwait(false);
 
-            var index = new SqliteSessionIndex(connection, options ?? new SqliteIndexOptions());
-            await index.InitializeAsync(ct).ConfigureAwait(false);
-            return index;
+                var index = new SqliteSessionIndex(connection, options ?? new SqliteIndexOptions());
+                await index.InitializeAsync(ct).ConfigureAwait(false);
+                return index;
+            }
+            catch
+            {
+                // 打开/建表失败时连接已经创建 —— 不 Dispose 就成了孤儿句柄
+                await connection.DisposeAsync().ConfigureAwait(false);
+                throw;
+            }
         }
         catch (Exception)
         {
@@ -98,21 +107,30 @@ public sealed class SqliteSessionIndex : ISessionIndex
                 PRIMARY KEY (session_id, seq)
             );
             CREATE INDEX IF NOT EXISTS ix_events_type ON events(type);
+            CREATE TABLE IF NOT EXISTS watermark (
+                session_id TEXT    PRIMARY KEY,
+                max_seq    INTEGER NOT NULL
+            );
             """, ct).ConfigureAwait(false);
     }
 
     public async ValueTask IndexAsync(string sessionId, SessionEvent sessionEvent, CancellationToken ct = default)
     {
-        var text = Describe(sessionEvent);
-        if (text.Length == 0)
-        {
-            // 没有可检索文本的事件（比如纯粹的会话创建）不进索引
-            return;
-        }
-
         await _gate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
+            // 水位先行：空文本事件也要推进水位。
+            // 否则「最后几条恰好没有可检索文本」时 MAX(seq) 永远落后于日志，
+            // 用条数/水位判断「索引是否跟上」会一直误报落后、每次启动都白重建。
+            await UpsertWatermarkAsync(sessionId, sessionEvent.Seq, ct).ConfigureAwait(false);
+
+            var text = Describe(sessionEvent);
+            if (text.Length == 0)
+            {
+                // 没有可检索文本的事件（比如纯粹的会话创建）不进索引 —— 但水位已经推进
+                return;
+            }
+
             await using var command = _connection.CreateCommand();
             command.CommandText = """
                 INSERT INTO events(session_id, seq, type, ts, text)
@@ -150,8 +168,14 @@ public sealed class SqliteSessionIndex : ISessionIndex
                 await delete.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
             }
 
+            long maxSeq = 0;
             foreach (var sessionEvent in events)
             {
+                if (sessionEvent.Seq > maxSeq)
+                {
+                    maxSeq = sessionEvent.Seq;
+                }
+
                 var text = Describe(sessionEvent);
                 if (text.Length == 0)
                 {
@@ -168,6 +192,21 @@ public sealed class SqliteSessionIndex : ISessionIndex
                 await insert.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
             }
 
+            // 重建后水位直接推到日志最大 Seq（含未进索引的空文本事件），
+            // 否则「尾部几条没文本」会让水位永远差一截。
+            if (maxSeq > 0)
+            {
+                await using var mark = _connection.CreateCommand();
+                mark.Transaction = (SqliteTransaction)transaction;
+                mark.CommandText = """
+                    INSERT INTO watermark(session_id, max_seq) VALUES ($session, $seq)
+                    ON CONFLICT(session_id) DO UPDATE SET max_seq = MAX(max_seq, excluded.max_seq);
+                    """;
+                mark.Parameters.AddWithValue("$session", sessionId);
+                mark.Parameters.AddWithValue("$seq", maxSeq);
+                await mark.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+            }
+
             await transaction.CommitAsync(ct).ConfigureAwait(false);
         }
         catch (SqliteException)
@@ -178,6 +217,56 @@ public sealed class SqliteSessionIndex : ISessionIndex
         {
             _gate.Release();
         }
+    }
+
+    /// <summary>
+    /// 索引水位：该会话已处理到的最大事件 Seq（含未进索引的空文本事件）。
+    ///
+    /// 为什么不用 <see cref="CountAsync"/> 判断落后：空文本事件不进 events 表、
+    /// 新类型也可能压不出可检索文本，<c>indexedCount &lt; logged.Count</c> 永不对齐，
+    /// 于是每次启动都误判「落后」并白重建。Seq 水位与「日志写到哪」同一把尺子。
+    /// </summary>
+    public async ValueTask<long> GetIndexedWatermarkAsync(string sessionId, CancellationToken ct = default)
+    {
+        await _gate.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            await using var command = _connection.CreateCommand();
+            command.CommandText = "SELECT max_seq FROM watermark WHERE session_id = $session;";
+            command.Parameters.AddWithValue("$session", sessionId);
+            var value = await command.ExecuteScalarAsync(ct).ConfigureAwait(false);
+            if (value is not null && value is not DBNull)
+            {
+                return Convert.ToInt64(value, CultureInfo.InvariantCulture);
+            }
+
+            // 老库没有 watermark 表里的行时，退回 MAX(seq) —— 至少不比已索引的最后一条更旧
+            await using var fallback = _connection.CreateCommand();
+            fallback.CommandText = "SELECT MAX(seq) FROM events WHERE session_id = $session;";
+            fallback.Parameters.AddWithValue("$session", sessionId);
+            var max = await fallback.ExecuteScalarAsync(ct).ConfigureAwait(false);
+            return max is null || max is DBNull ? 0L : Convert.ToInt64(max, CultureInfo.InvariantCulture);
+        }
+        catch (SqliteException)
+        {
+            return 0L;
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
+    private async Task UpsertWatermarkAsync(string sessionId, long seq, CancellationToken ct)
+    {
+        await using var command = _connection.CreateCommand();
+        command.CommandText = """
+            INSERT INTO watermark(session_id, max_seq) VALUES ($session, $seq)
+            ON CONFLICT(session_id) DO UPDATE SET max_seq = MAX(max_seq, excluded.max_seq);
+            """;
+        command.Parameters.AddWithValue("$session", sessionId);
+        command.Parameters.AddWithValue("$seq", seq);
+        await command.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
     }
 
     /// <summary>query 最多拆成几个片段 —— 防止一个超长 query 把 SQL 参数撑爆。</summary>
@@ -313,7 +402,10 @@ public sealed class SqliteSessionIndex : ISessionIndex
         try
         {
             await using var command = _connection.CreateCommand();
-            command.CommandText = "DELETE FROM events WHERE session_id = $session;";
+            command.CommandText = """
+                DELETE FROM events WHERE session_id = $session;
+                DELETE FROM watermark WHERE session_id = $session;
+                """;
             command.Parameters.AddWithValue("$session", sessionId);
             await command.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
         }
@@ -373,6 +465,11 @@ public sealed class SqliteSessionIndex : ISessionIndex
         ContextCompactedEvent compacted => $"{compacted.Summary}\n{compacted.TaskCard}",
         ModelUsageEvent usage => DescribeUsage(usage),
         ReasoningEvent reasoning => reasoning.Text,
+        SubAgentDispatchedEvent dispatched => $"子Agent派发：{dispatched.Task}",
+        SubAgentCompletedEvent subDone => $"子Agent完成：{subDone.Summary}",
+        PlanCreatedEvent plan => $"计划创建：{string.Join('；', plan.Steps)}",
+        PlanStepUpdatedEvent step => $"计划步骤 {step.Index} → {step.Status}",
+        CheckpointEvent checkpoint => DescribeCheckpoint(checkpoint),
         _ => string.Empty,
     };
 
@@ -382,6 +479,10 @@ public sealed class SqliteSessionIndex : ISessionIndex
     /// </summary>
     private static string DescribeUsage(ModelUsageEvent usage)
         => $"用量 {usage.Model} in={usage.InputTokens} out={usage.OutputTokens} cache={usage.CachedTokens}";
+
+    /// <summary>checkpoint 也合成一句可检索摘要（RenderBlock 可能为空，这里保证非空）。</summary>
+    private static string DescribeCheckpoint(CheckpointEvent checkpoint)
+        => $"checkpoint {checkpoint.Trigger} #{checkpoint.FromSeq}-{checkpoint.ToSeq} {checkpoint.RenderBlock()}";
 
     private static string TypeName(SessionEvent sessionEvent) => sessionEvent switch
     {
@@ -394,6 +495,13 @@ public sealed class SqliteSessionIndex : ISessionIndex
         TaskStatusChangedEvent => "task-status-changed",
         UserInputRephrasedEvent => "user-input-rephrased",
         ContextCompactedEvent => "context-compacted",
+        ModelUsageEvent => "model-usage",
+        ReasoningEvent => "reasoning",
+        SubAgentDispatchedEvent => "subagent-dispatched",
+        SubAgentCompletedEvent => "subagent-completed",
+        PlanCreatedEvent => "plan-created",
+        PlanStepUpdatedEvent => "plan-step-updated",
+        CheckpointEvent => "checkpoint",
         _ => "unknown",
     };
 

@@ -25,10 +25,13 @@ public sealed partial class WebUiServer
     /// <summary>注册会话域的内置端点。</summary>
     private void RegisterSessionRoutes()
     {
-        // 首页
+        // 首页。插件贡献的样式/脚本在此注入 —— 主界面的外观是插件可以改的。
+        // 为什么必须有这条正门：面板走 iframe，改不了父窗口；
+        // 「换个皮肤 / 调个密度」这类需求没有别的正当出口（只能去改宿主源码，那不叫插件）。
         Map(new DelegateRoute("GET", "/", (request, _) =>
         {
-            request.Text(WebUiPage.Html, "text/html; charset=utf-8");
+            var contributions = PluginUi.Collect(_baseOptions.PluginsDir, _host.LoadedPlugins.Select(p => p.Id));
+            request.Text(WebUiPage.WithPluginUi(WebUiPage.Html, contributions), "text/html; charset=utf-8");
             return ValueTask.CompletedTask;
         }));
 
@@ -59,6 +62,7 @@ public sealed partial class WebUiServer
                 context = ContextStatus(),
                 mode = ModeStatus(),
                 usage = UsageStatus(),
+                sandbox = SandboxStatus(),
             });
 
             return ValueTask.CompletedTask;
@@ -269,6 +273,52 @@ public sealed partial class WebUiServer
             request.Json(new { ok = true, sessionId, mode = ModeStatus(), projectDir = _host.Session?.ProjectDir });
         }));
 
+        // ── 目录浏览（「新建会话」挑项目目录用）────────────────────
+        //
+        // 为什么要后端来列目录：浏览器出于安全**拿不到本地绝对路径**
+        // （showDirectoryPicker 只给一个句柄，不给路径），而会话的项目目录必须落成
+        // 一个真实绝对路径。所以由本地服务如实列出来，前端只做展示与选择。
+        //
+        // 这是「本机自用」的能力：服务只监听回环地址，且写操作（含 mkdir）都过了
+        // Origin 同源校验（见 Handle 的跨站防护）—— 本地 ≠ 放任任意网页来读你的盘。
+        Map(new DelegateRoute("GET", "/api/fs/dirs", (request, _) =>
+        {
+            request.Json(DescribeDirectory(request.Http.Request.QueryString["path"]));
+            return ValueTask.CompletedTask;
+        }));
+
+        // 在浏览到的目录下新建一个子目录（「新建文件夹」）。
+        Map(new DelegateRoute("POST", "/api/fs/mkdir", async (request, _) =>
+        {
+            var body = await request.ReadBodyAsync().ConfigureAwait(false);
+            var parent = body is null ? null : ReadString(body.Value, "parent");
+            var name = body is null ? null : ReadString(body.Value, "name");
+
+            if (string.IsNullOrWhiteSpace(parent) || string.IsNullOrWhiteSpace(name))
+            {
+                request.Json(new { ok = false, error = "缺少 parent 或 name" }, 400);
+                return;
+            }
+
+            // 只收**单层目录名**：浏览本身不设限，但「新建」不该能顺着名字越层写。
+            if (name.IndexOfAny(['/', '\\']) >= 0 || name is "." or "..")
+            {
+                request.Json(new { ok = false, error = "文件夹名不能包含路径分隔符，也不能是 . 或 .." }, 400);
+                return;
+            }
+
+            try
+            {
+                var full = Path.GetFullPath(Path.Combine(parent, name));
+                Directory.CreateDirectory(full);
+                request.Json(new { ok = true, path = full });
+            }
+            catch (Exception ex)
+            {
+                request.Json(new { ok = false, error = ex.Message }, 400);
+            }
+        }));
+
         // 插件列表（HCI：agent 工具的"已装内容"一览；有独立面板的插件给出入口）
         Map(new DelegateRoute("GET", "/api/plugins", (request, _) =>
         {
@@ -287,6 +337,10 @@ public sealed partial class WebUiServer
                     version = p.Version,
                     tools = toolCount.TryGetValue(p.Id, out var n) ? n : 0,
                     hasPanel = FindPanelPath(p.Id) is not null,
+                    // 界面贡献：插件改主界面外观就靠它（清单 ui.styles / ui.scripts）
+                    ui = PluginUi.Describe(_baseOptions.PluginsDir, p.Id) is { } ui
+                        ? new { styles = ui.Styles, scripts = ui.Scripts }
+                        : null,
                 }),
                 skipped = _host.SkippedPlugins,
                 failed = _host.FailedPlugins,
@@ -307,6 +361,42 @@ public sealed partial class WebUiServer
             }
 
             request.Text(File.ReadAllText(panel), "text/html; charset=utf-8");
+            return ValueTask.CompletedTask;
+        }));
+
+        // 插件界面文件（样式/脚本/素材）。白名单口径见 PluginUi.ResolveFile：
+        // **只服务清单里声明过的文件**，不是「插件目录下的任意文件」——
+        // 声明式让「装了个插件到底往页面里塞了什么」永远查得到。
+        Map(new DelegateRoute("GET", "/plugin-ui", (request, _) =>
+        {
+            var id = request.Query["id"];
+            var file = request.Query["file"];
+
+            if (!IsValidSessionId(id ?? string.Empty) || string.IsNullOrWhiteSpace(file))
+            {
+                request.Text("/* 缺少或非法的 id / file */", "text/plain; charset=utf-8", 400);
+                return ValueTask.CompletedTask;
+            }
+
+            var resolved = PluginUi.ResolveFile(_baseOptions.PluginsDir, id!, file!);
+            if (resolved is null)
+            {
+                // 不区分「没声明」与「文件不存在」：两者对前端是同一种情况，也都是配置问题
+                request.Text("/* 未声明的插件界面文件 */", "text/plain; charset=utf-8", 404);
+                return ValueTask.CompletedTask;
+            }
+
+            try
+            {
+                // 不缓存：插件是热更新的，改了样式刷新就该看到 —— 本地单用户，读盘不心疼
+                request.Http.Response.Headers["Cache-Control"] = "no-store";
+                request.Text(File.ReadAllText(resolved), PluginUi.ContentTypeFor(file!));
+            }
+            catch (Exception ex)
+            {
+                request.Text($"/* 读取失败：{ex.Message} */", "text/plain; charset=utf-8", 500);
+            }
+
             return ValueTask.CompletedTask;
         }));
 
@@ -499,6 +589,126 @@ public sealed partial class WebUiServer
             </table>
             </body></html>
             """;
+    }
+
+    /// <summary>
+    /// 列出一个目录下的子目录（供「选择项目目录」的浏览弹窗用）。
+    ///
+    /// <para>
+    /// 空路径 = 交「从哪儿开始」的候选（各盘符 / 根目录）+ 用户主目录；
+    /// 给了路径 = 列出它下面的子目录、以及它的上一级。
+    /// 读不到就如实回错误 —— 用户要的是「看见真实文件系统」，静默吞掉反而更难用。
+    /// </para>
+    /// </summary>
+    private static object DescribeDirectory(string? raw)
+    {
+        var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        var path = string.IsNullOrWhiteSpace(raw) ? null : raw.Trim().Trim('"', '\'');
+
+        // 起点候选：Windows 是各盘符，类 Unix 一般只有 /。
+        var roots = new List<(string Name, string Path)>();
+        try
+        {
+            foreach (var drive in DriveInfo.GetDrives())
+            {
+                try
+                {
+                    if (drive.IsReady)
+                    {
+                        roots.Add((drive.Name, drive.RootDirectory.FullName));
+                    }
+                }
+                catch
+                {
+                    // 单个不可读的盘跳过
+                }
+            }
+        }
+        catch
+        {
+            // 平台不支持枚举盘符 —— 下面兜底
+        }
+
+        if (roots.Count == 0 && !OperatingSystem.IsWindows())
+        {
+            roots.Add(("/", "/"));
+        }
+
+        // 去重：类 Unix 上 GetDrives() 会把同一个挂载点报多次（/dev/pts 之流），
+        // 列表里重复出现同一个入口既难看也没意义。
+        var seenRoots = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        roots = roots.Where(r => seenRoots.Add(r.Path)).ToList();
+
+        if (path is null)
+        {
+            return new
+            {
+                ok = true,
+                path = (string?)null,
+                parent = (string?)null,
+                entries = Array.Empty<object>(),
+                roots = roots.Select(r => new { name = r.Name, path = r.Path }).ToList(),
+                home,
+            };
+        }
+
+        string full;
+        try
+        {
+            full = Path.GetFullPath(path);
+        }
+        catch (Exception ex)
+        {
+            return new { ok = false, error = $"路径非法：{ex.Message}", home };
+        }
+
+        if (!Directory.Exists(full))
+        {
+            return new { ok = false, error = $"目录不存在：{full}", home };
+        }
+
+        var entries = new List<(string Name, string Path, bool Hidden)>();
+        try
+        {
+            foreach (var dir in Directory.EnumerateDirectories(full))
+            {
+                try
+                {
+                    var info = new DirectoryInfo(dir);
+                    entries.Add((info.Name, info.FullName, (info.Attributes & FileAttributes.Hidden) != 0));
+                }
+                catch
+                {
+                    // 单个目录读属性失败 → 跳过
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            return new { ok = false, error = $"读不了这个目录：{ex.Message}", home };
+        }
+
+        entries.Sort((a, b) => string.Compare(a.Name, b.Name, StringComparison.OrdinalIgnoreCase));
+
+        string? parent = null;
+        try
+        {
+            parent = Directory.GetParent(full)?.FullName;
+        }
+        catch
+        {
+            // 已经在根上了
+        }
+
+        return new
+        {
+            ok = true,
+            path = full,
+            parent,
+            entries = entries.Select(e => new { name = e.Name, path = e.Path, hidden = e.Hidden }).ToList(),
+            roots = roots.Select(r => new { name = r.Name, path = r.Path }).ToList(),
+            home,
+        };
     }
 
     /// <summary>HTML 转义（与 LauncherServer 同款；两个服务各自持有，避免跨层引用）。</summary>

@@ -17,6 +17,7 @@
     <ProjectReference Include="../AgentFramework.Llm/AgentFramework.Llm.csproj" />
     <ProjectReference Include="../AgentFramework.Agent/AgentFramework.Agent.csproj" />
     <ProjectReference Include="../AgentFramework.Tools/AgentFramework.Tools.csproj" />
+    <ProjectReference Include="../AgentFramework.Sandbox/AgentFramework.Sandbox.csproj" />
     <ProjectReference Include="../AgentFramework.Index/AgentFramework.Index.csproj" />
   </ItemGroup>
 

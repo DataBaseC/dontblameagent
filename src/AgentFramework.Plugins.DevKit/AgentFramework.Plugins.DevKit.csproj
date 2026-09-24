@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>AgentFramework.Plugins.DevKit</RootNamespace>
+    <AssemblyName>AgentFramework.Plugins.DevKit</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- 契约程序集不进插件产物：强制走 default ALC 共享加载（与 SamplePlugin 同一纪律） -->
+    <ProjectReference Include="../AgentFramework.Contracts/AgentFramework.Contracts.csproj">
+      <Private>false</Private>
+      <ExcludeAssets>runtime</ExcludeAssets>
+    </ProjectReference>
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Update="plugin.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+</Project>

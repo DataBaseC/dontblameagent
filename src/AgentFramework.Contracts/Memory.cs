@@ -335,6 +335,16 @@ public sealed class ModeProfile
     /// <summary>暴露给模型的工具名白名单；<c>null</c> = 全部工具。</summary>
     public IReadOnlyList<string>? AllowedTools { get; init; }
 
+    /// <summary>
+    /// 这一档位只允许哪些<b>工具包</b>；<c>null</c> = 不限（默认）。
+    ///
+    /// <para>
+    /// 与 <see cref="AllowedTools"/> 的关系：两者取交集 ——
+    /// 包是「一档模式大概要哪几类能力」的粗筛，逐工具名是细调，两个维度都留着。
+    /// </para>
+    /// </summary>
+    public IReadOnlyList<string>? AllowedToolsets { get; init; }
+
     public bool InjectTaskCard { get; init; } = true;
 
     /// <summary>

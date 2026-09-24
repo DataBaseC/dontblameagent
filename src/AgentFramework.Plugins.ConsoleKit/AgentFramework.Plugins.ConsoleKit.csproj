@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>AgentFramework.Plugins.ConsoleKit</RootNamespace>
+    <AssemblyName>AgentFramework.Plugins.ConsoleKit</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../AgentFramework.Contracts/AgentFramework.Contracts.csproj">
+      <Private>false</Private>
+      <ExcludeAssets>runtime</ExcludeAssets>
+    </ProjectReference>
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Update="plugin.json" CopyToOutputDirectory="PreserveNewest" />
+    <None Update="theme.css" CopyToOutputDirectory="PreserveNewest" />
+    <None Update="theme.js" CopyToOutputDirectory="PreserveNewest" />
+    <None Update="panel.html" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+</Project>

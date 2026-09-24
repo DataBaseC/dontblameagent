@@ -1,0 +1,90 @@
+/* ══════════════════════════════════════════════════════════════
+   console-kit · 基础 UI 美化
+   ──────────────────────────────────────────────────────────────
+   分三层，互不干扰：
+     ① 细节（无条件生效）—— 滚动条 / 选区 / 焦点环。这些原来就没有，
+        加上只是补全，不改变任何既有观感。
+     ② 主题色板（html[data-ck-theme]）—— 覆盖主界面的 CSS 变量。
+        宿主界面本就靠变量着色，所以一套色板即可整体换肤。
+     ③ 阅读模式（html[data-ck-reading="on"]）—— 只动消息气泡的
+        行高/字号/宽度，其他一律不碰。
+   原则：宁少勿滥。插件样式一旦改到宿主没预期的地方，界面就会长出
+   各种「说不清哪里不对」的小毛病。
+   ══════════════════════════════════════════════════════════════ */
+
+/* ── ① 细节 ─────────────────────────────────────────────── */
+
+/* 滚动条：与深色底融合，不再是一条系统灰 */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border2) transparent;
+}
+
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: var(--border2);
+  border: 2px solid transparent;
+  background-clip: content-box;
+  border-radius: 6px;
+}
+::-webkit-scrollbar-thumb:hover { background: var(--faint); background-clip: content-box; }
+
+/* 选区与焦点环：键盘操作时看得见落点 */
+::selection { background: color-mix(in srgb, var(--accent) 45%, transparent); }
+:focus-visible { outline: 2px solid var(--accent-2); outline-offset: 2px; }
+
+/* 消息流两端留白对称一点，滚到底时不贴边 */
+#stream { scroll-padding-bottom: 12px; }
+
+/* ── ② 主题色板 ─────────────────────────────────────────── */
+
+/* 浅色 */
+html[data-ck-theme="light"] {
+  color-scheme: light;
+  --bg0: #f6f7fa;  --bg1: #ffffff;  --bg2: #f1f3f7;  --bg3: #e7eaf0;
+  --surface: #ffffff;  --surface-2: #f4f6fa;
+  --border: #e2e6ee;  --border2: #ccd3e0;
+  --text: #1b1f27;  --dim: #5c6577;  --faint: #8d96a8;
+  --accent: #2f6bff;  --accent-2: #2f6bff;  --accent-dim: #dbe4ff;
+  --ok: #197f4b;  --warn: #9a6a00;  --bad: #c0392b;
+}
+
+/* 墨黑：高对比，夜里盯着不刺眼 */
+html[data-ck-theme="ink"] {
+  color-scheme: dark;
+  --bg0: #000000;  --bg1: #05060a;  --bg2: #0a0c11;  --bg3: #101319;
+  --surface: #0b0d13;  --surface-2: #11141b;
+  --border: #1a1e26;  --border2: #262b36;
+  --text: #f2f4f8;  --dim: #98a0ad;  --faint: #6a7280;
+  --accent: #4d86ff;  --accent-2: #8fb0ff;  --accent-dim: #1a2c54;
+}
+
+/* 护眼绿：偏暖的低饱和深色 */
+html[data-ck-theme="forest"] {
+  color-scheme: dark;
+  --bg0: #0f1613;  --bg1: #131b17;  --bg2: #16201b;  --bg3: #1b2721;
+  --surface: #16201b;  --surface-2: #1c2822;
+  --border: #24322a;  --border2: #2f4237;
+  --text: #e2ece5;  --dim: #94a89c;  --faint: #6b7d72;
+  --accent: #3fa06a;  --accent-2: #79c79b;  --accent-dim: #1d3d2b;
+  --ok: #7ee2a8;  --warn: #d8bf7a;  --bad: #e58b8b;
+}
+
+/* 气泡描边用的是硬编码色，浅色下会显脏 —— 主题化后统一跟变量走 */
+html[data-ck-theme="light"] .assistant .bubble { border-color: var(--border); }
+html[data-ck-theme="light"] .user .bubble { box-shadow: 0 1px 6px rgba(47, 107, 255, .22); }
+
+/* ── ③ 阅读模式 ─────────────────────────────────────────── */
+
+/* 只动气泡：行长、行距、字号 —— 长文读起来松一口气，其余布局原样 */
+html[data-ck-reading="on"] .bubble {
+  line-height: 1.9;
+  font-size: 15px;
+  max-width: 72%;
+  letter-spacing: .012em;
+}
+
+html[data-ck-reading="on"] #stream { padding: 28px 24px 12px; }
+
+html[data-ck-reading="on"] .row + .row { margin-top: 6px; }

@@ -1,0 +1,10 @@
+{
+  "id": "writing-kit",
+  "name": "写作扩展工具包",
+  "version": "1.0.0",
+  "apiVersion": "1",
+  "assembly": "AgentFramework.Plugins.WritingKit.dll",
+  "entry": "AgentFramework.Plugins.WritingKit.WritingKitPlugin",
+  "description": "基石插件：字数统计（word_count）、段落体检（paragraph_report）、口头禅检测（repeat_words）、标点检查（check_punctuation）、提纲抽取（outline）。写作类任务的地基 —— 让「字数够不够、哪儿重复了、标点乱不乱」不再靠模型目测。",
+  "injects": [ "IWorkspaceService" ]
+}

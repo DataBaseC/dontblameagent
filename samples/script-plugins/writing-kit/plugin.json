@@ -1,0 +1,9 @@
+{
+  "id": "writing-kit",
+  "name": "写作扩展工具包（脚本插件示例）",
+  "version": "1.0.0",
+  "apiVersion": "1",
+  "script": "main.js",
+  "description": "写作辅助三件套：字数统计、段落体检、把长文抽成骨架。纯计算，不借任何外部工具。",
+  "capabilities": []
+}

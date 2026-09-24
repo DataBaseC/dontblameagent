@@ -664,20 +664,37 @@ Check("恢复后归档层为空（该条）", !(await tierStore.LoadArchivedAsyn
 // 清扫：只动「老 && 冷 && 未置顶」—— hot 有 5 分、pinned 置顶，都不该被扫走
 // 合并：两条旧方案 → 一条"结论"记忆（来源 retract + 新 assert + src: 凭据）
 // 注意合并必须在来源还活跃时做 —— 合并整理的是主视图（归档里的先恢复再合并）。
+var mergePath = Path.Combine(root, "mem-tier", "project.jsonl");
+var mergeLinesBefore = File.ReadAllLines(mergePath).Length;
 var merged = await tierStore.MergeAsync(
     MemoryScope.Project,
     [cold1.Id, cold2.Id],
     "方案 A/B 均已验证无效：构建必须走 scripts/build.sh（结论由合并得出）",
     source: "user");
+var mergeLinesAfter = File.ReadAllLines(mergePath).Length;
 Check("★ 合并返回新记忆", merged.Text.Contains("build.sh") && merged.Tags.Any(t => t == "src:" + cold1.Id) && merged.Tags.Any(t => t == "src:" + cold2.Id));
 Check("★ 来源热度继承（max：两条来源都是 1）", merged.Score == 1, $"merged={merged.Score}");
+Check("★ 合并是单条原子事件（一行 batch，不是 N+1 行）——中途崩溃不会「已撤销未合并」",
+    mergeLinesAfter == mergeLinesBefore + 1,
+    $"{mergeLinesBefore} → {mergeLinesAfter} 行");
+var mergeBatchLine = File.ReadAllLines(mergePath).Last();
+Check("★ batch 行同时含全部 retract 与新 assert（全成或全不成）",
+    mergeBatchLine.Split("\"retract\"").Length - 1 >= 2 && mergeBatchLine.Contains(merged.Id, StringComparison.Ordinal),
+    $"retract×{mergeBatchLine.Split("\"retract\"").Length - 1}");
 var afterMerge = await tierStore.LoadAsync(MemoryScope.Project, 20);
 Check("★ 来源条目已 retract 退出主视图", afterMerge.All(e => e.Id != cold1.Id && e.Id != cold2.Id));
 Check("★ 合并结果在主视图且可检索",
     (await tierStore.SearchAsync("build.sh", MemoryScope.Project, 5)).Any(e => e.Id == merged.Id));
-Check("合并同样是事件（retract×2）",
-    File.ReadAllLines(Path.Combine(root, "mem-tier", "project.jsonl"))
-        .Count(l => l.Contains("\"retract\"")) >= 2);
+// 跨实例重开：batch 展开后折叠语义不变（旧格式单事件行也照常读）
+var mergeReopen = new JsonlMemoryStore(new MemoryStoreOptions
+{
+    GlobalPath = Path.Combine(root, "mem-tier", "global.jsonl"),
+    ProjectPath = mergePath,
+});
+var mergeReopenView = await mergeReopen.LoadAsync(MemoryScope.Project, 20);
+Check("★ 重开后 batch 仍折叠正确（来源不在、结论在）",
+    mergeReopenView.Any(e => e.Id == merged.Id)
+    && mergeReopenView.All(e => e.Id != cold1.Id && e.Id != cold2.Id));
 
 // v3.5 审查 P2：合并要**继承置顶** —— 否则合并一条被用户显式钉住的约定后，
 // IsImportant 就丢了，下次清扫会把它当冷条目扫走（钉住的意义荡然无存）。

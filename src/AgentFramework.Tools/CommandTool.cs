@@ -1,4 +1,3 @@
-using System.Diagnostics;
 using System.Text;
 using AgentFramework.Contracts;
 
@@ -7,12 +6,31 @@ namespace AgentFramework.Tools;
 /// <summary>
 /// 执行 shell 命令。
 ///
+/// <para>
 /// 这是最危险的一个工具 —— 因此它<b>故意不做任何"聪明"的安全分析</b>
-/// （命令白名单/黑名单永远能被绕过），而是把把关交给审批事件：
-/// 让宿主或插件用 <c>ToolPreExecuteEvent</c> 决定放不放行。
+/// （命令白名单/黑名单永远能被绕过），而是把关交给两层：
+/// <b>审批</b>（<c>ToolPreExecuteEvent</c>，让宿主或插件决定放不放行）
+/// 与<b>沙箱</b>（把跑起来之后能造成的破坏降下来）。
+/// </para>
+///
+/// <para>
+/// v3.9 起命令不再直接 <c>Process.Start</c>，而是交给 <see cref="ISandboxRegistry"/>
+/// 解析出的后端执行。档位由配置决定（默认 <c>auto</c>：Windows 用 job，其他平台用 process）。
+/// 于是"换一种沙箱"是加一个插件，而不是改这个文件。
+/// </para>
 /// </summary>
-public sealed class RunCommandTool(ToolkitOptions options) : ITool, IToolWithSchema
+public sealed class RunCommandTool(ToolkitOptions options, ISandboxRegistry sandbox) : ITool, IToolWithSchema
 {
+    /// <summary>
+    /// 沙箱降级备注的稳定前缀：护栏回落 / 配额未生效 / 作业创建失败等。
+    /// </summary>
+    private const string NoteDegradePrefix = "sandbox-degrade:";
+
+    /// <summary>
+    /// 沙箱启动失败备注的稳定前缀：命令进程根本没起来。
+    /// </summary>
+    private const string NoteStartFailPrefix = "sandbox-start-fail:";
+
     public string Name => "run_command";
 
     public string Description => "在工作区目录下执行一条 shell 命令并返回标准输出与退出码。属危险操作。";
@@ -27,126 +45,136 @@ public sealed class RunCommandTool(ToolkitOptions options) : ITool, IToolWithSch
             return ToolResult.Fail("缺少参数 command");
         }
 
-        var isWindows = OperatingSystem.IsWindows();
-        var startInfo = new ProcessStartInfo
+        var root = Path.GetFullPath(options.EffectiveRoot);
+        var backend = sandbox.Resolve(options.SandboxName);
+
+        var limits = new SandboxLimits
         {
-            FileName = isWindows ? "cmd.exe" : "/bin/sh",
-            WorkingDirectory = Path.GetFullPath(options.EffectiveRoot),
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false,
-            CreateNoWindow = true,
+            TimeoutSeconds = options.CommandTimeoutSeconds,
+            MaxOutputChars = options.MaxCommandOutputChars,
+            MaxMemoryBytes = options.CommandMaxMemoryBytes,
+            MaxProcesses = options.CommandMaxProcesses,
+            MaxCpuSeconds = options.CommandMaxCpuSeconds,
         };
 
-        if (isWindows)
+        // 临时目录钉在工作区内：命令随手写的临时文件也落在同一个可审计的地方
+        // （见 ProcessRunner 里对 TMP/TEMP/TMPDIR 的重定向）。
+        var tempDirectory = Path.Combine(root, ".agent-sandbox", "tmp");
+
+        var outcome = await backend.RunAsync(
+            new SandboxRequest(command, root, tempDirectory, limits),
+            ct).ConfigureAwait(false);
+
+        if (outcome.Cancelled)
         {
-            // ★ ArgumentList 的 Win32 引号规则 cmd.exe 不认（.NET 官方文档明确警告不要
-            //   对 cmd/bat 用 ArgumentList）：含引号的命令会被解析成畸形转义。
-            //   安全性不受影响 —— 命令内容来自模型，把关本来就在审批层（本工具的设计原则）。
-            startInfo.Arguments = $"/c {command}";
-        }
-        else
-        {
-            startInfo.ArgumentList.Add("-c");
-            startInfo.ArgumentList.Add(command);
-        }
-
-        using var process = new Process { StartInfo = startInfo };
-
-        var stdout = new StringBuilder();
-        var stderr = new StringBuilder();
-        var ioGate = new object();
-        var truncated = false;
-
-        // 过程中封顶（P1-F4）：从前是「先全收进内存、最后才截断」——
-        // 一条 npm install 的输出就足以把内存吃掉。现在到上限即停收。
-        void AppendCapped(StringBuilder target, string line)
-        {
-            lock (ioGate)
-            {
-                if (target.Length < options.MaxCommandOutputChars)
-                {
-                    target.AppendLine(line);
-                }
-                else
-                {
-                    truncated = true;
-                }
-            }
-        }
-
-        process.OutputDataReceived += (_, e) =>
-        {
-            if (e.Data is not null)
-            {
-                AppendCapped(stdout, e.Data);
-            }
-        };
-        process.ErrorDataReceived += (_, e) =>
-        {
-            if (e.Data is not null)
-            {
-                AppendCapped(stderr, e.Data);
-            }
-        };
-
-        process.Start();
-        process.BeginOutputReadLine();
-        process.BeginErrorReadLine();
-
-        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        timeout.CancelAfter(TimeSpan.FromSeconds(options.CommandTimeoutSeconds));
-
-        try
-        {
-            await process.WaitForExitAsync(timeout.Token).ConfigureAwait(false);
-
-            // 再同步等一次，确保异步输出流已经排空（否则可能丢尾部输出）
-            process.WaitForExit();
-        }
-        catch (OperationCanceledException) when (ct.IsCancellationRequested)
-        {
-            // 用户叫停与超时是两件事，报错也该分开
-            KillQuietly(process);
             return ToolResult.Fail("命令已被取消");
         }
-        catch (OperationCanceledException)
+
+        if (outcome.TimedOut)
         {
-            KillQuietly(process);
-            return ToolResult.Fail($"命令超时（{options.CommandTimeoutSeconds}s），已被终止");
+            return ToolResult.Fail($"命令超时（{limits.TimeoutSeconds}s），已连同子孙进程终止（沙箱 {backend.Name}）");
         }
 
         var report = new StringBuilder();
-        report.Append("exit=").Append(process.ExitCode).Append('\n');
-        report.Append("--- stdout ---\n").Append(Truncate(stdout.ToString()));
+        report.Append("exit=").Append(outcome.ExitCode).Append('\n');
+        report.Append("sandbox=").Append(backend.Name);
 
-        var errText = stderr.ToString();
+        // 只在「发生了回落/降级」时才展开细节 —— 正常路径上这行必须够短。
+        // 否则每跑一条命令都要在上下文里塞一段沙箱说明书。
+        var resolveNote = sandbox.ResolveNote;
+        var degraded = ClassifyDegradedNotes(outcome, backend.Describe());
+        if (!string.IsNullOrWhiteSpace(resolveNote) || degraded.Count > 0)
+        {
+            report.Append("（");
+            if (!string.IsNullOrWhiteSpace(resolveNote))
+            {
+                // 注册表回落本身也是降级 —— 打上同一套稳定前缀，便于下游统一解析
+                report.Append(HasStableNotePrefix(resolveNote) ? resolveNote : NoteDegradePrefix + resolveNote);
+            }
+
+            if (degraded.Count > 0)
+            {
+                if (!string.IsNullOrWhiteSpace(resolveNote))
+                {
+                    report.Append('；');
+                }
+
+                report.Append(string.Join("；", degraded));
+            }
+
+            report.Append('）');
+        }
+
+        report.Append("\n--- stdout ---\n").Append(Truncate(outcome.StdOut));
+
+        var errText = outcome.StdErr;
         if (errText.Length > 0)
         {
             report.Append("\n--- stderr ---\n").Append(Truncate(errText));
         }
 
-        if (truncated)
+        if (outcome.OutputTruncated)
         {
             report.Append("\n...[输出超过上限，执行过程中已截断]");
         }
 
         // L2：命令回显是长任务里的另一个大头（构建日志、测试输出尤其）
         var text = options.ShrinkResult("run_command", report.ToString());
-        return process.ExitCode == 0 ? ToolResult.Ok(text) : ToolResult.Fail(text);
+        return outcome.ExitCode == 0 ? ToolResult.Ok(text) : ToolResult.Fail(text);
     }
 
-    private static void KillQuietly(Process process)
+    /// <summary>
+    /// 把沙箱返回的备注整理成「带稳定前缀的降级备注」。
+    ///
+    /// <para>
+    /// <b>ProcessRunner 的备注文案可变，筛选只看前缀</b> —— 不做中文魔法子串匹配
+    /// （"失败"/"退化"/"未能启动" 这类文案一改，旧筛选就静默失效，降级信息直接消失）。
+    /// 稳定前缀约定：
+    ///   <c>sandbox-degrade:</c>（护栏回落/降级）与 <c>sandbox-start-fail:</c>（命令未能启动）。
+    /// </para>
+    /// <para>
+    /// 若 ProcessRunner / 后端的 notes 不含前缀，就在本包装层补上前缀分类：
+    ///   1. 已带前缀的备注原样保留；
+    ///   2. 与后端 <see cref="ISandboxBackend.Describe"/> 相同的是档位自述，属信息性备注，不进降级摘要；
+    ///   3. 其余动态备注一律打上稳定前缀。启动失败 vs其它降级用**结构信号**判断
+    ///      （exit=-1 且无输出 = ProcessRunner 启动失败的固定返回形状），不匹配文案。
+    /// </para>
+    /// </summary>
+    private static List<string> ClassifyDegradedNotes(SandboxOutcome outcome, string backendDescribe)
     {
-        try
+        var result = new List<string>();
+
+        // 结构信号：ProcessRunner 在命令未能启动时以 exit=-1 且零输出返回。
+        // 用返回形状而不是备注文案分类 —— 文案可变，形状是接口的一部分。
+        var startFailed = outcome.ExitCode == -1
+            && outcome.StdOut.Length == 0
+            && outcome.StdErr.Length == 0
+            && !outcome.TimedOut
+            && !outcome.Cancelled;
+
+        foreach (var note in outcome.Notes)
         {
-            process.Kill(entireProcessTree: true);
+            if (HasStableNotePrefix(note))
+            {
+                result.Add(note);
+                continue;
+            }
+
+            // 后端自述是档位说明，不是降级
+            if (string.Equals(note, backendDescribe, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            result.Add((startFailed ? NoteStartFailPrefix : NoteDegradePrefix) + note);
         }
-        catch
-        {
-            // 进程可能已经退出 —— 忽略
-        }
+
+        return result;
     }
+
+    private static bool HasStableNotePrefix(string note)
+        => note.StartsWith(NoteDegradePrefix, StringComparison.Ordinal)
+        || note.StartsWith(NoteStartFailPrefix, StringComparison.Ordinal);
 
     private string Truncate(string value)
         => value.Length <= options.MaxCommandOutputChars

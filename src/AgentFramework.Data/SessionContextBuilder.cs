@@ -97,11 +97,15 @@ public static class SessionContextBuilder
             }
         }
 
-        // ── 0.5) 悬空工具调用检测（P0-2）──────────────────────
+        // ── 0.5) 悬空 / 孤儿工具调用检测（P0-2）──────────────────
         // 「requested 已落盘、completed 未落盘」= 回合中途被杀或崩了
         // （审批等待窗口最长 5 分钟，是高发点）。直接投影会产出
         // assistant(tool_calls) → user 的**协议非法**序列，端点以 400 拒绝；
         // 又因为上下文每轮重建，会话会从此每轮都 400 —— 必须在投影层兜住。
+        //
+        // 反过来的「孤儿 completed」（只有 completed、没有 requested）同样非法：
+        // role=tool 消息必须对应上一条 assistant 的 tool_calls，否则端点也 400。
+        // 丢弃孤儿结果 —— 等价于「这一次调用没发生过」，序列才合法。
         var completedCallIds = new HashSet<string>(StringComparer.Ordinal);
         foreach (var sessionEvent in all)
         {
@@ -111,12 +115,17 @@ public static class SessionContextBuilder
             }
         }
 
+        var requestedCallIds = new HashSet<string>(StringComparer.Ordinal);
         var danglingCallIds = new HashSet<string>(StringComparer.Ordinal);
         foreach (var sessionEvent in all)
         {
-            if (sessionEvent is ToolCallRequestedEvent req && !completedCallIds.Contains(req.CallId))
+            if (sessionEvent is ToolCallRequestedEvent req)
             {
-                danglingCallIds.Add(req.CallId);
+                requestedCallIds.Add(req.CallId);
+                if (!completedCallIds.Contains(req.CallId))
+                {
+                    danglingCallIds.Add(req.CallId);
+                }
             }
         }
 
@@ -240,6 +249,13 @@ public static class SessionContextBuilder
 
                 case ToolCallCompletedEvent completed:
                 {
+                    // 孤儿结果：没有对应的 requested —— 投影成 role=tool 会产出
+                    // 没有配对 tool_calls 的非法序列。直接丢弃。
+                    if (!requestedCallIds.Contains(completed.CallId))
+                    {
+                        break;
+                    }
+
                     var raw = completed.Success
                         ? completed.Output ?? string.Empty
                         : $"ERROR: {completed.Error}";

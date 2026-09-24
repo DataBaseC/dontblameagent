@@ -5,6 +5,7 @@ using AgentFramework.Data;
 using AgentFramework.Index;
 using AgentFramework.Kernel;
 using AgentFramework.Llm;
+using AgentFramework.Sandbox;
 using AgentFramework.Tools;
 
 namespace AgentFramework.Host.Hosting;
@@ -62,7 +63,7 @@ public static class HostBuilder
 }
 
 // ═══════════════════════════════════════════════════════════════
-//  100 · 外部插件
+//  400 · 外部插件
 // ═══════════════════════════════════════════════════════════════
 
 /// <summary>
@@ -120,6 +121,32 @@ public sealed class PluginModule : IHostModule
             }
         }
 
+        // ── 自写插件仓库：agent 自己写的插件也在这里装上 ──
+        // 不过 profile 过滤：那个开关是给"随包插件"用的；自写插件是主人/agent 主动装上的，
+        // 再多过滤一道，只会让「明明写进去了却没生效」变成一桩谜案。
+        var storeRoot = options.EffectiveWorkspacePluginsDir;
+        if (Directory.Exists(storeRoot))
+        {
+            foreach (var dir in Directory.EnumerateDirectories(storeRoot).OrderBy(d => d, StringComparer.Ordinal))
+            {
+                var manifestPath = Path.Combine(dir, "plugin.json");
+                if (!File.Exists(manifestPath))
+                {
+                    continue;   // 含写入过程中的 *.staging-* 残留
+                }
+
+                var pluginId = TryReadPluginId(manifestPath);
+                try
+                {
+                    loaded.Add(await state.Kernel.LoadAsync(dir, ct).ConfigureAwait(false));
+                }
+                catch (Exception ex)
+                {
+                    failed.Add($"{pluginId ?? Path.GetFileName(dir)}：{ex.Message}");
+                }
+            }
+        }
+
         state.LoadedPlugins = loaded;
         state.SkippedPlugins = skipped;
         state.FailedPlugins = failed;
@@ -142,7 +169,7 @@ public sealed class PluginModule : IHostModule
 }
 
 // ═══════════════════════════════════════════════════════════════
-//  200 · 模型接入
+//  100 · 模型接入
 // ═══════════════════════════════════════════════════════════════
 
 /// <summary>
@@ -356,7 +383,7 @@ public sealed class ModelModule : IHostModule
 }
 
 // ═══════════════════════════════════════════════════════════════
-//  300 · 数据平面（日志 / 索引 / 记忆）
+//  200 · 数据平面（日志 / 索引 / 记忆）
 // ═══════════════════════════════════════════════════════════════
 
 /// <summary>
@@ -384,16 +411,23 @@ public sealed class StorageModule : IHostModule
                 : NullSessionIndex.Instance);
 
         // 索引落后于日志就重建（用户删过 db、上次写索引失败、或换了实现）
+        // 判落后用 **seq 水位** 而不是 Count：空文本事件不进索引，Count 永远对不齐。
         if (index.IsAvailable)
         {
             try
             {
                 var logged = JsonlEventLog.Read(logPath).ToList();
-                var indexedCount = await index.CountAsync(options.SessionId, ct).ConfigureAwait(false);
-
-                if (logged.Count > 0 && indexedCount < logged.Count)
+                if (logged.Count > 0)
                 {
-                    await index.RebuildAsync(options.SessionId, logged, ct).ConfigureAwait(false);
+                    var lastSeq = logged[^1].Seq;
+                    var watermark = await index
+                        .GetIndexedWatermarkAsync(options.SessionId, ct)
+                        .ConfigureAwait(false);
+
+                    if (watermark < lastSeq)
+                    {
+                        await index.RebuildAsync(options.SessionId, logged, ct).ConfigureAwait(false);
+                    }
                 }
             }
             catch
@@ -431,7 +465,7 @@ public sealed class StorageModule : IHostModule
 }
 
 // ═══════════════════════════════════════════════════════════════
-//  400 · 工具集
+//  300 · 工具集
 // ═══════════════════════════════════════════════════════════════
 
 /// <summary>
@@ -498,8 +532,15 @@ public sealed class ToolModule : IHostModule
             Context = options.Context,
             SearchBackends = options.SearchBackends ?? "bing,baidu,searxng",
             SearxngBaseUrl = options.SearxngBaseUrl,
+            // 命令沙箱档位（auto / off / process / job / 插件注册的后端名）
+            SandboxName = options.Sandbox,
         };
         state.Toolkit = toolkit;
+
+        // 命令沙箱：内置三档（off / process / job），插件可注册新后端 ——
+        // 于是「换一种沙箱」是加一个插件，而不是改宿主里任何 switch。
+        var sandbox = new SandboxRegistry();
+        state.Sandbox = sandbox;
 
         // 摘要器接到「本地」端点上：网页正文先在本机压缩，只有摘要会进入云端上下文。
         // 必须用本地模型 —— 若挂到云端，原文照样出网，这个设计就白做了。
@@ -509,6 +550,16 @@ public sealed class ToolModule : IHostModule
         // 目录约定：工作区根/skills/{name}/skill.json —— 与项目记忆同属工作区，拷走即带走。
         state.Skills = SkillLoader.ScanWorkspace(options.WorkspaceRoot);
 
+        // 自写插件仓库（agent 自己写的插件落这里）+ 快照区。
+        // 放在工具模块而不是插件模块：工具模块先跑（300 < 400），
+        // 于是插件模块装载时仓库已经就绪，能把仓库里的插件一并装上；
+        // 四个自管理工具也在这里注册，用的是同一个 store 实例。
+        var pluginStore = new PluginStore(
+            options.EffectiveWorkspacePluginsDir,
+            Path.Combine(options.SessionsDir, "plugin-backups"));
+        Directory.CreateDirectory(pluginStore.Root);
+        state.PluginStore = pluginStore;
+
         // 多项目：工具沙箱按回合所属会话的项目目录解析（AsyncLocal 回合作用域）
         toolkit.WorkspaceRootResolver = () => state.TurnWorkspaceDir;
 
@@ -516,9 +567,17 @@ public sealed class ToolModule : IHostModule
         tools.Add(new ReadFileTool(toolkit));
         tools.Add(new WriteFileTool(toolkit));
         tools.Add(new ListDirTool(toolkit));
-        tools.Add(new RunCommandTool(toolkit));
+        tools.Add(new RunCommandTool(toolkit, sandbox));
         tools.Add(new WebSearchTool(toolkit, BuildSearchProvider(toolkit)));
         tools.Add(new WebFetchTool(toolkit, http: null, summarizer: summarizer));
+
+        // ── 自我升级入口 ───────────────────────────────────────
+        // agent 用这四个工具给自己长能力：写插件 → 热重装（含自测与回滚）→ 下一轮就能用；
+        // 不想要了就卸掉。它们只碰「自写插件仓库」，与随包分发的官方插件互不干扰。
+        tools.Add(new PluginWriteTool(pluginStore));
+        tools.Add(new PluginReloadTool(pluginStore, state.Kernel));
+        tools.Add(new PluginUninstallTool(pluginStore, state.Kernel));
+        tools.Add(new PluginListTool(pluginStore, state.Kernel));
 
         // 历史检索：把被上下文折叠掉的内容捞回来。
         // 它与 L3 遮蔽是一对 —— 没有它，折叠就是「丢失」；有了它，折叠才是「卸载」。
@@ -554,6 +613,13 @@ public sealed class ToolModule : IHostModule
         // 问用户：给「猜」留一条正当出口（把猜当成答，是模型最常见也最贵的错）。
         tools.Add(new AskUserTool(() => state.InteractionProvider?.Invoke() ?? NullUserInteraction.Instance));
 
+        // 工具包管理（meta 包，不可关）：让 agent 自己把这段活用不上的包收起来。
+        // 「真实工作时有的选择地开」最该由模型自己判断 —— 它最清楚眼前这段活需要什么。
+        tools.Add(new ToolsetsTool(() => state.ToolsetViewProvider?.Invoke() ?? []));
+        tools.Add(new UseToolsetTool(
+            () => state.ToolsetViewProvider?.Invoke() ?? [],
+            (id, enabled) => state.ToolsetToggle?.Invoke(id, enabled) ?? false));
+
         // G1 子 Agent：主模型自己决定派工。runner 由宿主回填（需要 AgentHost 的 OpenSession/SendAsync，
         // 装配期还没有宿主 —— 与 InteractionProvider 同一手法：留委托，运行期解引用）。
         // v3.4 原接线多传了一个 LastSeqOf（签名里没有这个位置）—— 子会话 id 由 runner 自造，分叉点参数已无用，删。
@@ -578,12 +644,100 @@ public sealed class ToolModule : IHostModule
         // 主循环、InvokeToolAsync、诊断面看到的都是同一份名单，
         // 而且运行期挂上来的工具下一轮就可见（技能 / 子 agent / 模型自写插件都靠这条）。
         var scope = state.Kernel.CreateKernelScope("official-tools");
+
+        // ── 官方工具的包归属 ─────────────────────────────────────
+        // 集中在这里而不是让每个工具自报：包是**装配决策**（跟可见性同层），
+        // 一处写全、一眼能审；工具本身只负责回答"我是什么"。
+        var toolsetOf = OfficialToolsetMap();
+
         foreach (var tool in tools)
         {
-            scope.RegisterTool(tool);
+            scope.RegisterTool(tool, toolsetOf.GetValueOrDefault(tool.Name));
         }
 
+        // 内置包的说明 —— 自动生成的朴素描述只有 id，界面上那一排开关得有话说
+        foreach (var descriptor in BuiltinToolsetDescriptors())
+        {
+            state.Kernel.DescribeToolset(descriptor);
+        }
+
+        // ── 启动配置里就关掉的包 ─────────────────────────────────
+        // 保留包（core / meta）写了也不生效：关掉它们不是「省负担」，是「把 agent 关成残废」。
+        if (options.DisabledToolsets is { Count: > 0 })
+        {
+            foreach (var id in options.DisabledToolsets)
+            {
+                if (!BuiltinToolsets.Protected.Contains(id))
+                {
+                    state.DisabledToolsets.Add(id);
+                }
+            }
+        }
+
+        // ── 给插件用的工作区 seam ─────────────────────────────────
+        // 插件跑在独立 ALC 里，只有契约程序集共享 —— 官方工具手里那个 toolkit 实例
+        // 它够不着。所以把「工作区在哪 / 能写到哪 / 输出多大」以契约接口提供出去，
+        // 基石插件（devkit 之类）才能既干文件活儿、又走同一份边界检查。
+        // 与工具注册挂在同一个作用域上：宿主关停时一起撤销。
+        scope.Provide<IWorkspaceService>(new WorkspaceService(toolkit));
+
+        // 沙箱后端注册表也交给内核：插件想加一档沙箱（容器 / 远程 / 带审计的包装）
+        // 就 ctx.Effect(() => registry.Register(backend))，卸载时自动摘掉。
+        scope.Provide<ISandboxRegistry>(sandbox);
+
         return ValueTask.CompletedTask;
+    }
+
+    /// <summary>
+    /// 官方工具 → 工具包。
+    /// 表里没有的工具会落进与注册来源同名的包（<c>official-tools</c>）。
+    /// </summary>
+    private static Dictionary<string, string> OfficialToolsetMap() => new(StringComparer.Ordinal)
+    {
+        // core（不可关）：读、写、列目录、问用户 —— 少了这些，agent 就不再是 agent
+        ["read_file"] = BuiltinToolsets.Core,
+        ["write_file"] = BuiltinToolsets.Core,
+        ["list_dir"] = BuiltinToolsets.Core,
+        ["ask_user"] = BuiltinToolsets.Core,
+
+        // exec（可关）：跑命令单独成包 ——「这次不许它跑命令」得有出口
+        ["run_command"] = BuiltinToolsets.Exec,
+
+        // 其余按能力域分包
+        ["remember"] = BuiltinToolsets.Memory,
+        ["forget"] = BuiltinToolsets.Memory,
+        ["recall_memory"] = BuiltinToolsets.Memory,
+
+        ["search_history"] = BuiltinToolsets.Search,
+
+        ["update_plan"] = BuiltinToolsets.Plan,
+        ["update_notes"] = BuiltinToolsets.Plan,
+        ["spawn_subagent"] = BuiltinToolsets.Plan,
+
+        ["web_search"] = BuiltinToolsets.Web,
+        ["web_fetch"] = BuiltinToolsets.Web,
+
+        ["plugin_write"] = BuiltinToolsets.Self,
+        ["plugin_reload"] = BuiltinToolsets.Self,
+        ["plugin_uninstall"] = BuiltinToolsets.Self,
+        ["plugin_list"] = BuiltinToolsets.Self,
+
+        // meta（不可关）：看/开关工具包本身 —— 关了就再也开不回来
+        ["toolsets"] = BuiltinToolsets.Meta,
+        ["use_toolset"] = BuiltinToolsets.Meta,
+    };
+
+    /// <summary>内置包的显示名与说明（界面开关与诊断面都读它）。</summary>
+    private static IEnumerable<ToolsetDescriptor> BuiltinToolsetDescriptors()
+    {
+        yield return new() { Id = BuiltinToolsets.Core, Name = "核心", Description = "读文件、写文件、列目录、问用户（不可关闭）", Protected = true, Source = "core" };
+        yield return new() { Id = BuiltinToolsets.Meta, Name = "工具包管理", Description = "查看与开关工具包（不可关闭）", Protected = true, Source = "core" };
+        yield return new() { Id = BuiltinToolsets.Exec, Name = "执行命令", Description = "在工作区里跑 shell 命令（受命令沙箱保护）", Source = "core" };
+        yield return new() { Id = BuiltinToolsets.Memory, Name = "记忆", Description = "记住 / 遗忘 / 检索长期记忆", Source = "core" };
+        yield return new() { Id = BuiltinToolsets.Search, Name = "历史检索", Description = "把被上下文折叠掉的旧内容捞回来", Source = "core" };
+        yield return new() { Id = BuiltinToolsets.Plan, Name = "计划与派活", Description = "计划、小本本、派子 Agent", Source = "core" };
+        yield return new() { Id = BuiltinToolsets.Web, Name = "联网", Description = "网页搜索与抓取", Source = "core" };
+        yield return new() { Id = BuiltinToolsets.Self, Name = "自我升级", Description = "写插件、热重装、卸载、列插件", Source = "core" };
     }
 }
 

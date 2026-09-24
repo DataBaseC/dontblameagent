@@ -27,7 +27,7 @@ if not errorlevel 1 (
     exit /b 1
 )
 
-echo [1/2] 构建中（只构建宿主及其依赖，比全量快）……
+echo [1/3] 构建中（只构建宿主及其依赖，比全量快）……
 dotnet build src\AgentFramework.Host --nologo -v quiet
 if errorlevel 1 (
     echo.
@@ -39,7 +39,24 @@ if errorlevel 1 (
     exit /b 1
 )
 
-echo [2/2] 启动对话界面（Ctrl+C 退出）……
+rem ── 基石插件 ──────────────────────────────────────────────
+rem 插件是独立工程，不随宿主构建。它们必须出现在插件目录里才会被装载，
+rem 而插件的加载路径就是 cwd 下的 plugins\（启动器里也一样）。
+rem 少了这一步，「插件写好了但界面上一个都没有」会让人以为是加载坏了。
+echo [2/3] 同步基石插件到 plugins\ ……
+if not exist "plugins" mkdir "plugins"
+dotnet build src\AgentFramework.Plugins.DevKit --nologo -v quiet
+dotnet build src\AgentFramework.Plugins.WritingKit --nologo -v quiet
+dotnet build src\AgentFramework.Plugins.ConsoleKit --nologo -v quiet
+
+if not exist "plugins\devkit" mkdir "plugins\devkit"
+if not exist "plugins\writing-kit" mkdir "plugins\writing-kit"
+if not exist "plugins\console-kit" mkdir "plugins\console-kit"
+xcopy /y /q "src\AgentFramework.Plugins.DevKit\bin\Debug\net10.0\*" "plugins\devkit\" >nul
+xcopy /y /q "src\AgentFramework.Plugins.WritingKit\bin\Debug\net10.0\*" "plugins\writing-kit\" >nul
+xcopy /y /q "src\AgentFramework.Plugins.ConsoleKit\bin\Debug\net10.0\*" "plugins\console-kit\" >nul
+
+echo [3/3] 启动对话界面（Ctrl+C 退出）……
 dotnet run --project src\AgentFramework.Host --no-build -- --web %*
 
 endlocal

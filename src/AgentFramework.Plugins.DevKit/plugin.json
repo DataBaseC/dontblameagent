@@ -1,0 +1,10 @@
+{
+  "id": "devkit",
+  "name": "编程扩展工具包",
+  "version": "1.0.0",
+  "apiVersion": "1",
+  "assembly": "AgentFramework.Plugins.DevKit.dll",
+  "entry": "AgentFramework.Plugins.DevKit.DevKitPlugin",
+  "description": "基石插件：精确编辑（edit_file）、内容检索（grep_files）、文件名查找（find_files）、按行读取（read_lines）、目录与文件搬移。把 agent 从「整篇覆盖」升级为「局部改」。",
+  "injects": [ "IWorkspaceService" ]
+}

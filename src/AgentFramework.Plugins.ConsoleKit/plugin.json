@@ -1,0 +1,14 @@
+{
+  "id": "console-kit",
+  "name": "基础 UI 美化控制台",
+  "version": "1.0.0",
+  "apiVersion": "1",
+  "assembly": "AgentFramework.Plugins.ConsoleKit.dll",
+  "entry": "AgentFramework.Plugins.ConsoleKit.ConsoleKitPlugin",
+  "description": "基石插件：给主界面注入可调外观 —— 主题色板（深色/浅色/墨黑/护眼绿）、阅读模式、细节美化（滚动条/选区/焦点环）。设置存本机，面板里实时切换，不注册任何工具。",
+  "ui": {
+    "styles": [ "theme.css" ],
+    "scripts": [ "theme.js" ]
+  },
+  "injects": []
+}

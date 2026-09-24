@@ -107,7 +107,7 @@ public static class SubAgentRunner
     /// <summary>
     /// 按 UTF-16 code unit 截断，但不切断代理对（emoji 等）——
     /// 切在中间会产生非法 UTF-16 字符串，写进 JSONL 就是一个「坏行」。
-    /// 与 AgentRunner 的思考截断同一条纪律，抽出来共用。
+    /// 与 AgentRunner 的思考截断同一条纪律；本文件私有，不跨工程抽公共。
     /// </summary>
     internal static string TruncateSafe(string text, int maxChars, string suffix)
     {

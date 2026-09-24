@@ -8,6 +8,8 @@
   <ItemGroup>
     <ProjectReference Include="../AgentFramework.Contracts/AgentFramework.Contracts.csproj" />
     <ProjectReference Include="../AgentFramework.Data/AgentFramework.Data.csproj" />
+    <!-- 沙箱契约（ISandbox* / SandboxLimits）在 Contracts 里；Sandbox 工程只被 Host 引用，
+         这里引它是死依赖 —— 删掉，避免把实现程序集拖进工具层。 -->
   </ItemGroup>
 
 </Project>

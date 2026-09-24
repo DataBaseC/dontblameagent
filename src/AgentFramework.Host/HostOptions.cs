@@ -24,6 +24,39 @@ public sealed class HostOptions
     /// <summary>插件目录（其下每个子目录是一个插件）。留空则不加载插件。</summary>
     public string? PluginsDir { get; set; }
 
+    /// <summary>
+    /// 命令沙箱档位：<c>auto</c>（默认）/ <c>off</c> / <c>process</c> / <c>job</c>，
+    /// 或插件注册的后端名。名字不认识或平台不可用时回落到可用档。
+    /// </summary>
+    public string? Sandbox { get; set; }
+
+    /// <summary>
+    /// 启动时就关掉的<b>工具包</b>。默认空 = 全部开启。
+    ///
+    /// <para>
+    /// 保留包（<c>core</c> / <c>meta</c>）写了也不生效 —— 关掉「读文件 + 写文件 + 列目录 + 问用户」
+    /// 会把 agent 关成残废，关掉「工具包开关」就再也开不回来了。
+    /// </para>
+    /// </summary>
+    public IReadOnlyCollection<string>? DisabledToolsets { get; set; }
+
+    /// <summary>
+    /// <b>自写插件仓库</b>（agent 自己写的插件落这里）。留空 = <c>&lt;工作区&gt;/plugins</c>。
+    ///
+    /// <para>
+    /// 为什么不复用 <see cref="PluginsDir"/>：那是"随包分发"的插件目录，
+    /// 可能落在 Program Files 这类只读位置；而 agent 得能往里写。
+    /// 两者来源不同、权限不同，混在一起必然出现"装得上但存不下"的怪状。
+    /// </para>
+    /// </summary>
+    public string? WorkspacePluginsDir { get; set; }
+
+    /// <summary>本次生效的自写插件仓库（没显式指定就落在工作区里，跟着工作区走）。</summary>
+    public string EffectiveWorkspacePluginsDir =>
+        string.IsNullOrWhiteSpace(WorkspacePluginsDir)
+            ? Path.Combine(WorkspaceRoot, "plugins")
+            : WorkspacePluginsDir!;
+
     public string SessionId { get; set; } = "default";
 
     /// <summary>云端端点（负责复杂任务）。</summary>
@@ -145,6 +178,10 @@ public sealed class HostOptions
         WorkspaceRoot = WorkspaceRoot,
         SessionsDir = SessionsDir,
         PluginsDir = PluginsDir,
+        // 沙箱档位是「这台机器的安全边界」，切会话不该把它悄悄换回默认。
+        Sandbox = Sandbox,
+        // 关掉的工具包同理：它是「这次干活要背着多少东西」，不该随会话漂移。
+        DisabledToolsets = DisabledToolsets,
         SessionId = sessionId,
         Cloud = Cloud,
         Local = Local,

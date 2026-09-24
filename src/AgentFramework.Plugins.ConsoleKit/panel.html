@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>控制台 · 界面</title>
+<style>
+  :root {
+    --bg: #12151b; --panel: #171b23; --line: #242a35;
+    --text: #e6e8ec; --dim: #8b93a1; --accent: #2f6bff; --accent-2: #7aa2f7;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0; padding: 16px 18px 24px;
+    background: var(--bg); color: var(--text);
+    font: 13px/1.6 "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+  }
+  h1 { font-size: 14px; margin: 0 0 4px; letter-spacing: .02em; }
+  .sub { color: var(--dim); font-size: 12px; margin-bottom: 16px; }
+  .section { margin-bottom: 18px; }
+  .section > .label { font-size: 12px; color: var(--dim); margin-bottom: 8px; }
+  .themes { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; }
+  .theme {
+    display: flex; align-items: center; gap: 10px; cursor: pointer;
+    padding: 9px 11px; border: 1px solid var(--line); border-radius: 9px;
+    background: var(--panel); color: var(--text); text-align: left; font: inherit;
+  }
+  .theme:hover { border-color: #37404f; }
+  .theme[aria-pressed="true"] { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset; }
+  .swatch { width: 22px; height: 22px; border-radius: 6px; border: 1px solid rgba(255,255,255,.14); flex: 0 0 auto; }
+  .name { font-size: 12px; }
+  .row { display: flex; align-items: center; justify-content: space-between; gap: 12px;
+         padding: 10px 12px; border: 1px solid var(--line); border-radius: 9px; background: var(--panel); }
+  .hint { color: var(--dim); font-size: 11.5px; margin-top: 6px; }
+  code { background: #0d1017; border: 1px solid var(--line); border-radius: 4px; padding: 1px 5px; font-size: 11.5px; }
+  .foot { margin-top: 20px; padding-top: 12px; border-top: 1px solid var(--line); color: var(--dim); font-size: 11.5px; }
+  .warn { color: #e8c07a; }
+</style>
+</head>
+<body>
+  <h1>界面控制台</h1>
+  <div class="sub">console-kit · 改动立刻生效，设置存在本机（刷新后仍在）</div>
+
+  <div class="section">
+    <div class="label">主题</div>
+    <div class="themes" id="themes"></div>
+  </div>
+
+  <div class="section">
+    <div class="label">阅读</div>
+    <div class="row">
+      <span>宽松阅读模式（行距与行长都放大，适合长文）</span>
+      <input type="checkbox" id="reading" style="width:16px;height:16px;accent-color:var(--accent)">
+    </div>
+    <div class="hint">只影响消息气泡，其余布局不动。</div>
+  </div>
+
+  <div class="foot">
+    当前设置：<code id="dump">—</code>
+    <div id="scope" style="margin-top:6px"></div>
+  </div>
+
+<script>
+// 面板跑在 iframe 里：真正的界面在父窗口，偏好也必须存在父窗口那一侧。
+// 同源，所以可以直接借用父窗口暴露的 ConsoleKit（它只暴露读/写这两件事）。
+const host = (() => {
+  try {
+    return window.parent && window.parent !== window && window.parent.ConsoleKit
+      ? window.parent.ConsoleKit
+      : null;
+  } catch (e) {
+    return null;   // 跨源或被单独打开
+  }
+})();
+
+const PRESETS = [
+  { id: 'default', name: '深色（内置）', swatch: 'linear-gradient(135deg,#161a21,#2f3542)' },
+  { id: 'light',   name: '浅色',         swatch: 'linear-gradient(135deg,#ffffff,#dfe4ee)' },
+  { id: 'ink',     name: '墨黑',         swatch: 'linear-gradient(135deg,#000000,#20242c)' },
+  { id: 'forest',  name: '护眼绿',       swatch: 'linear-gradient(135deg,#16201b,#3fa06a)' }
+];
+
+const themesEl = document.getElementById('themes');
+const readingEl = document.getElementById('reading');
+const dumpEl = document.getElementById('dump');
+const scopeEl = document.getElementById('scope');
+
+if (!host) {
+  scopeEl.className = 'warn';
+  scopeEl.textContent = '⚠ 没有连到主界面（这个面板需要从对话界面的「插件」里打开）。';
+}
+
+function current() {
+  return host ? host.read() : { theme: 'default', reading: false };
+}
+
+function render() {
+  const state = current();
+
+  themesEl.innerHTML = '';
+  PRESETS.forEach((preset) => {
+    const btn = document.createElement('button');
+    btn.className = 'theme';
+    btn.setAttribute('aria-pressed', String(state.theme === preset.id));
+
+    const swatch = document.createElement('span');
+    swatch.className = 'swatch';
+    swatch.style.background = preset.swatch;
+
+    const name = document.createElement('span');
+    name.className = 'name';
+    name.textContent = preset.name;
+
+    btn.appendChild(swatch);
+    btn.appendChild(name);
+    btn.onclick = () => {
+      if (!host) { return; }
+      host.save({ theme: preset.id });
+      render();
+    };
+
+    themesEl.appendChild(btn);
+  });
+
+  readingEl.checked = state.reading;
+  dumpEl.textContent = 'theme=' + state.theme + ' · reading=' + (state.reading ? 'on' : 'off');
+}
+
+readingEl.onchange = () => {
+  if (!host) { return; }
+  host.save({ reading: readingEl.checked });
+  render();
+};
+
+render();
+</script>
+</body>
+</html>

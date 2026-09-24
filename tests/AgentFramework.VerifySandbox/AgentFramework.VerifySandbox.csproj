@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <RootNamespace>AgentFramework.VerifySandbox</RootNamespace>
+    <AssemblyName>AgentFramework.VerifySandbox</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../../src/AgentFramework.Host/AgentFramework.Host.csproj" />
+    <ProjectReference Include="../../src/AgentFramework.Sandbox/AgentFramework.Sandbox.csproj" />
+  </ItemGroup>
+
+</Project>

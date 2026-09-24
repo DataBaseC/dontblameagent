@@ -58,6 +58,15 @@ public sealed class LauncherState
     /// </summary>
     public FixedSizeLog HostOutput { get; } = new(200);
 
+    /// <summary>
+    /// 启动器自己的设置（目前只有「启动时要不要自动打开浏览器」）。
+    /// 默认实例 = 默认值；Program 启动时用磁盘上的文件覆盖，页面上的开关改它并回写。
+    /// </summary>
+    public LauncherSettings Settings { get; set; } = new();
+
+    /// <summary>设置文件的落点（页面改开关后保存到这里）。空 = 只改内存、不落盘。</summary>
+    public string SettingsPath { get; set; } = "";
+
     // ── 内置载荷解压状态（仅单文件形态非默认）──────────────
     // Program.cs 的后台解压任务写，HTTP 线程读 —— 三个都是简单赋值/读，
     // 用 volatile 语义的属性足够（进度字符串替换是原子的）。
@@ -183,7 +192,7 @@ public sealed class LauncherServer
 
         // 状态变更端点：只按 POST（页面 JS 提交）；GET 一律 405。
         // 页面渲染仍走 GET（/、/debug、/api/state）—— 它们只读不写。
-        var isStateChange = path is "/toggle" or "/move" or "/save" or "/launch" or "/stop";
+        var isStateChange = path is "/toggle" or "/move" or "/save" or "/launch" or "/stop" or "/toggle-open";
         if (isStateChange && !string.Equals(context.Request.HttpMethod, "POST", StringComparison.OrdinalIgnoreCase))
         {
             try
@@ -264,6 +273,28 @@ public sealed class LauncherServer
             {
                 KillHost();
                 _state.Log.Add("已停止宿主进程");
+                TryRedirect(context, "/");
+                return;
+            }
+
+            // ④：切换「启动时自动打开浏览器」。持久化 —— 下次运行才起作用，
+            //     本次已经开着的页面不受影响（所以它是"设置"，不是"动作"）。
+            case "/toggle-open":
+            {
+                _state.Settings.OpenBrowserOnStart = !_state.Settings.OpenBrowserOnStart;
+                if (!string.IsNullOrWhiteSpace(_state.SettingsPath))
+                {
+                    try
+                    {
+                        _state.Settings.Save(_state.SettingsPath);
+                    }
+                    catch (Exception ex)
+                    {
+                        _state.Log.Add($"设置保存失败（本次内存里仍生效）：{ex.Message}");
+                    }
+                }
+
+                _state.Log.Add("启动时自动打开浏览器：" + (_state.Settings.OpenBrowserOnStart ? "开" : "关"));
                 TryRedirect(context, "/");
                 return;
             }
@@ -625,6 +656,11 @@ public sealed class LauncherServer
               插件目录：<code>{Escape(_state.PluginsDir)}</code><br>
               装配档案：<code>{Escape(_state.ProfilePath)}</code>（LoadOrder 字段 = 手动排序）<br>
               已启用 {_state.Profile.EnabledPlugins.Count} / {_state.Catalog.Count} 个 · 装配顺序见列表序号
+            </div>
+            <div class="meta">
+              启动时自动打开浏览器：<b>{(_state.Settings.OpenBrowserOnStart ? "开" : "关")}</b>
+              · <a href="#" onclick="return post('/toggle-open', '已切换')">{(_state.Settings.OpenBrowserOnStart ? "关掉它" : "打开它")}</a>
+              （关掉后本页仍可随时在浏览器打开；想只对本次强制打开，启动时加 <code>--open</code>）
             </div>
             """);
 
