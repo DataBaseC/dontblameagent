@@ -40,6 +40,12 @@ public sealed class AgentConfig
     /// <summary>只加载这些插件 id；省略 = 全部加载。</summary>
     public List<string>? EnabledPlugins { get; set; }
 
+    /// <summary>
+    /// 外部 MCP server 列表（子进程 + stdio JSON-RPC）。
+    /// 每个 server 成一个 <c>mcp:&lt;id&gt;</c> 工具包，<b>默认延迟</b>（注册但不进 schema），用到再开。
+    /// </summary>
+    public List<Mcp.McpServerConfig>? McpServers { get; set; }
+
     /// <summary>会话 id。</summary>
     public string? SessionId { get; set; }
 
@@ -117,10 +123,23 @@ public sealed class AgentConfig
         }
     }
 
-    /// <summary>把默认值写成一份带注释的配置单样例（供人照抄）。</summary>
+    /// <summary>
+    /// 把默认值写成一份带注释的<strong>标准配置单</strong>样例（供人照抄）。
+    /// 覆盖：人设、端点、目录、上下文、工具面、MCP —— 字段名与 <see cref="AgentConfig"/> 一一对应。
+    /// </summary>
     public static string Sample() => """
         {
-          // ── 端点：填「地址 + 模型名」就算配好 ──────────────────
+          // ═══════════════════════════════════════════════════════
+          //  agent.json —— AgentFramework 配置单（标准格式）
+          //  规则：字段全部可选；没写的走默认。允许 // 注释与尾逗号。
+          //  优先级：命令行 > 环境变量 > 本文件。
+          // ═══════════════════════════════════════════════════════
+
+          // ── 1. 角色 / 系统提示词（agent 的人设）──────────────
+          // 写在最前，改人设只动这一段。不写则用内置默认提示词。
+          "systemPrompt": "你是「dba助手」，可靠的桌面 AI 助理。\n人设：冷静、口语化、先结论后细节。\n硬约束：\n- 不编造；不确定就说不确定\n- 引用网页用 markdown 链接\n- 涉及写文件/执行命令时先说明要做什么\n- 回答尽量短，除非我要求展开",
+
+          // ── 2. 端点：填「地址 + 模型名」就算配好 ──────────────
           // 云端（负责复杂任务、要用工具的活）
           "cloud": {
             "baseUrl": "https://api.deepseek.com/v1",
@@ -134,19 +153,53 @@ public sealed class AgentConfig
             "model": "你加载的模型名"
           },
 
-          // ── 目录与界面 ────────────────────────────────────────
+          // 多端点（不填则自动从上面的 cloud / local 迁移）。
+          // 界面「模型管理」写回的也是这个结构。
+          // "providers": [
+          //   {
+          //     "id": "deepseek",
+          //     "name": "DeepSeek",
+          //     "baseUrl": "https://api.deepseek.com/v1",
+          //     "apiKey": "sk-...",
+          //     "reasoningStyle": "openai",   // none / openai / qwen
+          //     "reasoningEffort": "",        // 空 = 端点默认；off / low / medium / high
+          //     "models": [ { "id": "deepseek-reasoner" }, { "id": "deepseek-chat" } ]
+          //   }
+          // ],
+          // "active": { "providerId": "deepseek", "modelId": "deepseek-reasoner" },
+
+          // ── 3. 目录与界面 ────────────────────────────────────
           "workspace": "agent-workspace",
           "sessions": "agent-sessions",
+          "plugins": "plugins",
           "webPort": 8090,
-          "mode": "work",                     // work = 干活；chat = 闲聊（不挂工具、少花钱）
+          "sessionId": "default",
+          "mode": "work",                     // work = 干活；chat = 闲聊（不挂工具、少花钱）；design = 设计对话
 
-          // ── 其它开关（都可以省略）──────────────────────────────
-          // "includeUsage": true,             // 端点不认 stream_options 时设为 false
-          // "maxSteps": 12,
-          // "temperature": 0.7,
-          // "context": { "tokenBudget": 24000, "compressionTriggerRatio": 0.8 },
-          // "sandbox": "auto",                // 命令沙箱：auto / off / process / job（Windows）
-          // "disabledToolsets": ["writing-kit", "web"]   // 启动就收起的工具包（core/meta 不可关）
+          // ── 4. 对话与上下文治理 ──────────────────────────────
+          "temperature": 0.7,
+          "maxSteps": 12,                     // 一轮里最多几步工具调用
+          "includeUsage": true,               // 端点不认 stream_options 时设为 false
+          "context": {
+            "tokenBudget": 24000,             // 上下文预算（约 token）
+            "compressionTriggerRatio": 0.8,   // 超过预算×此值 → 自动压缩
+            "recentTurnsKeptVerbatim": 2,     // 最近几轮原文保留
+            "injectTaskCard": true            // 是否注入任务卡
+          },
+
+          // ── 5. 工具面与沙箱 ──────────────────────────────────
+          // "disabledToolsets": ["web", "exec"],   // 启动就收起的工具包（core/meta 不可关）
+          // "enabledPlugins": ["devkit", "writing-kit"],  // 只加载这些插件；省略 = 全部
+          "sandbox": "auto"                   // auto / off / process / job（Windows）
+
+          // ── 6. 搜索 ─────────────────────────────────────────
+          // ,"searchBackends": "bing,baidu,searxng"
+          // ,"searxngBaseUrl": "http://localhost:8888"
+
+          // ── 7. 外部 MCP server（可选，子进程 + stdio）────────
+          // ,"mcpServers": [
+          //   { "id": "echo", "command": "python", "args": ["samples/mcp/echo-server.py"], "env": {}, "enabled": true }
+          // ]
         }
         """;
 }

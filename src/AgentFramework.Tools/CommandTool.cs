@@ -176,8 +176,26 @@ public sealed class RunCommandTool(ToolkitOptions options, ISandboxRegistry sand
         => note.StartsWith(NoteDegradePrefix, StringComparison.Ordinal)
         || note.StartsWith(NoteStartFailPrefix, StringComparison.Ordinal);
 
+    /// <summary>
+    /// 输出超限时保留 <b>头部 + 尾部</b>，而不是只留头部。
+    ///
+    /// <para>
+    /// 结论常在尾部：测试失败的 summary、构建报错的最后一行、异常堆栈的末行 ——
+    /// 只砍尾部就等于把最要紧的一段丢掉，模型于是只能重跑或加管道去捞。
+    /// 头 60% 给上下文，尾 40% 给结论。
+    /// </para>
+    /// </summary>
     private string Truncate(string value)
-        => value.Length <= options.MaxCommandOutputChars
-            ? value
-            : string.Concat(value.AsSpan(0, options.MaxCommandOutputChars), "\n...[输出已截断]");
+    {
+        var max = options.MaxCommandOutputChars;
+        if (value.Length <= max)
+        {
+            return value;
+        }
+
+        var head = max * 3 / 5;
+        var tail = max - head;
+        var omitted = value.Length - head - tail;
+        return value[..head] + $"\n...[中间省略 {omitted} 字符；已保留头尾]...\n" + value[^tail..];
+    }
 }

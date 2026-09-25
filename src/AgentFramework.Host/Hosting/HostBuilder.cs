@@ -27,6 +27,7 @@ public static class HostBuilder
         new StorageModule(),   // 200 日志 / 索引 / 记忆
         new ToolModule(),      // 300 工具集（官方工具先占名字）
         new PluginModule(),    // 400 外部插件（重名即插件加载失败 —— 明确优于静默）
+        new Mcp.McpModule(),   // 450 外部 MCP server（子进程 + stdio JSON-RPC，默认延迟）
         new LoopModule(),      // 500 主循环
     ];
 
@@ -58,6 +59,20 @@ public static class HostBuilder
             foreach (var module in modules.OrderBy(m => m.Order))
             {
                 await module.ConfigureAsync(state, ct).ConfigureAwait(false);
+            }
+
+            // ── 延迟包（Eager=false，如 mcp:<server>）：默认不进上下文 ──────────
+            // 必须放在**所有模块装配完之后**：MCP 包是 McpModule(450) 才注册的，
+            // 若放在 ToolModule 里就会漏掉它们。工具仍注册着、只是这一轮不发放给模型；
+            // 模型可经 tool_catalog 发现这些包，再 use_toolset 把它们拉进来。
+            // 这里复用「关闭包」这套现成机制 —— 于是「延迟」不另开第二条通路，
+            // 也就不会与包开关分叉成两套语义。
+            foreach (var descriptor in kernel.Toolsets.Values)
+            {
+                if (!descriptor.Eager && !descriptor.Protected)
+                {
+                    state.DisabledToolsets.Add(descriptor.Id);
+                }
             }
         }
         catch
@@ -216,6 +231,11 @@ public sealed class ModelModule : IHostModule
         // 转述设置来自「用户偏好」文件 —— 它不进 JSONL，那是「会话发生了什么」的地盘
         options.Rephrase = RephraseSettingsStore.Load(options.SessionsDir, options.Rephrase);
 
+        // 上下文治理 / 写盘设置同样是「用户偏好」：从 context.json 读回，覆盖默认值（任务 1）。
+        var contextSettings = ContextSettingsStore.Load(options.SessionsDir, options.Context, options.Checkpoint);
+        options.Context = contextSettings.Context;
+        options.Checkpoint = contextSettings.Checkpoint;
+
         // 转述器直接持有端点客户端，**绕过路由器**：
         // 路由规则是「长上下文 + 无工具 → 本地」，而转述请求恰好长这样，
         // 但它必须去用户指定的那个端点。
@@ -276,6 +296,9 @@ public sealed class ModelModule : IHostModule
                         DefaultModel = modelId,
                         ReasoningStyle = string.IsNullOrWhiteSpace(provider.ReasoningStyle) ? ReasoningStyles.None : provider.ReasoningStyle,
                         ReasoningEffort = provider.ReasoningEffort ?? string.Empty,
+                        // 任务 6：把模型级能力带给客户端，发送侧据此门禁（false 不发思考参数）。
+                        SupportsReasoning = provider.Models
+                            .FirstOrDefault(mm => string.Equals(mm.Id, modelId, StringComparison.OrdinalIgnoreCase))?.SupportsReasoning,
                     });
                     adHocTargets[cacheKey] = created;
                     return created;
@@ -429,6 +452,8 @@ public sealed class ModelModule : IHostModule
             DefaultModel = model.Id,
             ReasoningStyle = string.IsNullOrWhiteSpace(provider.ReasoningStyle) ? ReasoningStyles.None : provider.ReasoningStyle,
             ReasoningEffort = provider.ReasoningEffort ?? string.Empty,
+            // 任务 6：把当前模型的能力带给客户端，发送侧据此门禁。
+            SupportsReasoning = model.SupportsReasoning,
         });
 
         return true;
@@ -693,6 +718,29 @@ public sealed class ToolModule : IHostModule
                 return state.EmitToSession?.Invoke(sessionId, mutation, default) ?? ValueTask.CompletedTask;
             }));
 
+        // ── 技能工坊（任务 2）：生成 / 校验 / 提炼技能包 ────────────────
+        // 从前「技能」偏声明包，得人手写 skill.json；这三个工具让 agent 自助产出与自检。
+        // 校验复用同一套规则（SkillValidator），与界面导入路由同源。
+        // 写盘后必须 SkillsReloader：否则界面列表与下一轮提示仍用启动时那份旧清单。
+        tools.Add(new SkillScaffoldTool(toolkit, () => state.SkillsReloader?.Invoke()));
+        tools.Add(new SkillValidateTool(
+            toolkit,
+            () => state.Kernel.ToolNames,
+            () => state.Skills));
+        tools.Add(new SkillExtractTool(() => state.Kernel.ToolNames));
+        tools.Add(new SkillFromToolsetTool(
+            toolkit,
+            () => state.ToolsetViewProvider?.Invoke() ?? [],
+            () => state.SkillsReloader?.Invoke()));
+
+        // 工具目录查询：按包/关键词看已注册工具与参数摘要（meta 包）。
+        tools.Add(new ToolCatalogTool(
+            () => state.ToolsetViewProvider?.Invoke() ?? [],
+            state.OfficialTools));
+
+        // 结构化输出工具样例（lab 包）：扩展「工具类型」注册面。
+        tools.Add(new CsvToJsonTool());
+
         // 官方工具注册进内核注册表 —— 于是「官方工具」与「插件工具」不再有双轨：
         // 主循环、InvokeToolAsync、诊断面看到的都是同一份名单，
         // 而且运行期挂上来的工具下一轮就可见（技能 / 子 agent / 模型自写插件都靠这条）。
@@ -775,9 +823,19 @@ public sealed class ToolModule : IHostModule
         ["plugin_uninstall"] = BuiltinToolsets.Self,
         ["plugin_list"] = BuiltinToolsets.Self,
 
+        // 技能工坊（可关）：生成 / 校验 / 提炼 / 由工具包转化技能
+        ["skill_scaffold"] = BuiltinToolsets.Skill,
+        ["skill_validate"] = BuiltinToolsets.Skill,
+        ["skill_extract"] = BuiltinToolsets.Skill,
+        ["skill_from_toolset"] = BuiltinToolsets.Skill,
+
+        // 实验包（可关）：新工具类型的官方样例
+        ["csv_to_json"] = BuiltinToolsets.Lab,
+
         // meta（不可关）：看/开关工具包本身 —— 关了就再也开不回来
         ["toolsets"] = BuiltinToolsets.Meta,
         ["use_toolset"] = BuiltinToolsets.Meta,
+        ["tool_catalog"] = BuiltinToolsets.Meta,
     };
 
     /// <summary>内置包的显示名与说明（界面开关与诊断面都读它）。</summary>
@@ -791,6 +849,8 @@ public sealed class ToolModule : IHostModule
         yield return new() { Id = BuiltinToolsets.Plan, Name = "计划与派活", Description = "计划、小本本、派子 Agent", Source = "core" };
         yield return new() { Id = BuiltinToolsets.Web, Name = "联网", Description = "网页搜索与抓取", Source = "core" };
         yield return new() { Id = BuiltinToolsets.Self, Name = "自我升级", Description = "写插件、热重装、卸载、列插件", Source = "core" };
+        yield return new() { Id = BuiltinToolsets.Skill, Name = "技能工坊", Description = "生成 / 校验 / 提炼技能包", Source = "core" };
+        yield return new() { Id = BuiltinToolsets.Lab, Name = "实验工具", Description = "新工具类型的官方样例（结构化输出等）", Source = "core" };
     }
 }
 
@@ -815,7 +875,9 @@ public sealed class LoopModule : IHostModule
         var sink = new HostEventSink(
             state.Log!,
             state.Kernel,
-            options.ApprovalPolicy,
+            // 任务 5：包一层**动态读取** —— 运行期切档（替换 options.ApprovalPolicy）立即生效，
+            // 不再是「装配时按值捕获、切了也不动」。这正是审查发现的那个坑。
+            e => options.ApprovalPolicy(e),
             () => state.InteractionProvider?.Invoke() ?? NullUserInteraction.Instance,
             e =>
             {
@@ -827,7 +889,9 @@ public sealed class LoopModule : IHostModule
             state.Index,
             options.SessionId,
             // P6：会话级审批放行集 —— 同样运行期才解引用
-            toolName => state.MainSession?.IsToolAllowed(toolName) ?? false);
+            toolName => state.MainSession?.IsToolAllowed(toolName) ?? false,
+            // 任务 5：Plan 档的「本回合放行集」按当前档位判定
+            () => options.ApprovalTier);
 
         var runner = new AgentRunner(
             state.Switchable!,

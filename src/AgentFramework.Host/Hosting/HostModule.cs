@@ -105,6 +105,12 @@ public sealed class HostState
     /// <summary>扫描到的技能清单（StorageModule 或 ToolModule 填）。</summary>
     public IReadOnlyList<SkillDefinition> Skills { get; set; } = [];
 
+    /// <summary>
+    /// 技能清单落盘后重扫（由 <see cref="AgentHost.ReloadSkills"/> 回填）。
+    /// 工具写完 skill.json 必须调它 —— 否则界面/下一轮提示仍用启动时那份旧清单。
+    /// </summary>
+    public Action? SkillsReloader { get; set; }
+
     /// <summary>已启用技能名集合（回合边界生效；AgentHost 持有，运行期可变）。</summary>
     public HashSet<string> EnabledSkills { get; } = new(StringComparer.Ordinal);
 
@@ -123,6 +129,9 @@ public sealed class HostState
     /// </para>
     /// </summary>
     public HashSet<string> DisabledToolsets { get; } = new(StringComparer.Ordinal);
+
+    /// <summary>MCP server 启动失败的记录（诊断用；空 = 全部就绪或未配置）。</summary>
+    public List<string> McpFailures { get; set; } = [];
 
     /// <summary>子 Agent 编排入口（G1）。AgentHost 回填（需要 OpenSession/SendAsync，装配期还没有）。</summary>
     public Func<string, string, CancellationToken, Task<(string ChildId, bool Success, string Summary)>>? SubAgentRunner { get; set; }
@@ -179,6 +188,12 @@ public sealed class HostState
 
     /// <summary>当前模式。工具可见性、记忆层级都靠它查询。</summary>
     public Func<AgentMode>? ModeProvider { get; set; }
+
+    /// <summary>
+    /// 当前会话钉住的模式 id（任务 4）。回合外（如 /api/status）取可见面时用它回退 ——
+    /// 否则「会话选了写作模式、status 的工具面却还按宿主默认模式算」，两处口径打架。
+    /// </summary>
+    public Func<string?>? ModeIdProvider { get; set; }
 
     /// <summary>
     /// 用户交互 seam（UI 启动后注入）。没界面时由取用处降级为
@@ -249,9 +264,12 @@ public sealed class HostState
     public IReadOnlyList<string> TurnMemoryScopes(IReadOnlyList<string> abstractScopes)
         => [.. abstractScopes.Select(s => s == MemoryScope.Project ? TurnProjectScope() : s)];
 
-    /// <summary>取当前生效档位：回合中优先用回合所属会话的模式，否则宿主默认。</summary>
+    /// <summary>
+    /// 取当前生效档位：回合中优先用回合所属会话的模式；回合外回退到**当前会话钉住的模式 id**；
+    /// 都没有才用宿主默认。三者同源，避免「status 说的模式」与「实际工具面」两套口径打架。
+    /// </summary>
     public ModeProfile CurrentProfile
-        => AgentModes.Resolve(TurnMode.Value ?? AgentModes.IdOf(CurrentMode));
+        => AgentModes.Resolve(TurnMode.Value ?? ModeIdProvider?.Invoke() ?? AgentModes.IdOf(CurrentMode));
 
     /// <summary>
     /// 这一轮该给模型看哪些工具：从内核注册表**现取**，再按模式收窄。
@@ -373,7 +391,8 @@ public sealed class HostState
         var sink = new HostEventSink(
             sessionLog,
             Kernel,
-            Options.ApprovalPolicy,
+            // 任务 5：动态读取 —— 切档后下一次审批立即按新档判定。
+            e => Options.ApprovalPolicy(e),
             () => InteractionProvider?.Invoke() ?? NullUserInteraction.Instance,
             e =>
             {
@@ -384,7 +403,9 @@ public sealed class HostState
             Index,
             sessionId,
             // P6：会话级审批放行集（运行期才解引用，那时 runtime 已赋好）
-            toolName => runtime?.IsToolAllowed(toolName) ?? false);
+            toolName => runtime?.IsToolAllowed(toolName) ?? false,
+            // 任务 5：Plan 档的「本回合放行集」按当前档位判定
+            () => Options.ApprovalTier);
 
         var runner = new AgentRunner(
             Switchable,

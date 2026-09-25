@@ -39,7 +39,10 @@ public sealed class SessionRuntime : IAsyncDisposable
     /// 本会话钉住的模式 id（创建时选定；null = 未钉，跟随宿主默认 —— 向后兼容旧装配路径）。
     /// 「工作模式在创建会话时选定」就落在这一字段：模式是会话的属性，不是宿主的全局开关。
     /// </summary>
-    public string? ModeId { get; }
+    public string? ModeId { get; private set; }
+
+    /// <summary>切换本会话的模式 id（任务 4：in-session 切换、无需重启；下一轮生效）。</summary>
+    public void SetModeId(string? modeId) => ModeId = modeId;
 
     /// <summary>
     /// 本会话钉住的项目目录（创建时选定；null = 宿主工作区）。

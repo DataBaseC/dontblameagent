@@ -41,6 +41,21 @@ public interface IPluginContext
     /// </summary>
     IDisposable RegisterTool(ITool tool, string? toolset) => RegisterTool(tool);
 
+    /// <summary>
+    /// 注册一个自定义工作模式（任务 4）。撤销时自动从 <see cref="AgentModes"/> 注销。
+    ///
+    /// <para>
+    /// 默认实现直接落 <see cref="AgentModes.Register"/> —— 模式注册是纯契约层的事，不需要内核配合；
+    /// 内核作用域会覆写它，把撤销句柄纳入「后注册先撤销」的收集，于是插件卸载 / 热重载时自动清理
+    /// （否则静态档位表会串档与泄漏）。
+    /// </para>
+    /// </summary>
+    IDisposable RegisterMode(ModeProfile profile)
+    {
+        AgentModes.Register(profile);
+        return new ModeRegistration(profile.CustomId ?? string.Empty);
+    }
+
     /// <summary>托管外部资源（定时器、网络连接等）。setup 内创建资源并返回其撤销函数。</summary>
     IDisposable Effect(Func<IDisposable> setup);
 
@@ -87,6 +102,21 @@ public interface IToolWithSchema : ITool
 {
     /// <summary>参数的 JSON Schema，直接交给模型做 function calling。</summary>
     string ParametersJsonSchema { get; }
+}
+
+/// <summary>
+/// 会声明<b>输出</b>结构的“结构化输出工具”（任务 2 的「扩展工具类型」样例）。
+///
+/// <para>
+/// 与 <see cref="IToolWithSchema"/> 对称：那个描述<b>输入</b>，这个描述<b>输出</b> ——
+/// 上层（界面 / 编排）据此知道该怎么解析或展示它的结果，而不必靠猜。
+/// 同样遵循「契约可加不可改」：不实现它的工具不受任何影响。
+/// </para>
+/// </summary>
+public interface IToolWithStructuredOutput : ITool
+{
+    /// <summary>输出结构（JSON Schema）。</summary>
+    string OutputJsonSchema { get; }
 }
 
 /// <summary>工具未声明 schema 时使用的空参数表。</summary>

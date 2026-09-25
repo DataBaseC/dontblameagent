@@ -54,6 +54,10 @@ public sealed class SkillDefinition
 ///   · <c>{workspace}/workshop/</c> —— 导入的工坊技能（Source = workshop）
 /// 两个目录同名时 **builtin 优先**：外来内容永远不覆盖本地创作；
 /// 工坊条目想顶掉内置版，请先删内置或改名 —— 显式操作好过隐式覆盖。
+///
+/// 此外还有第三来源：宿主<b>代码内置</b>技能（<see cref="Builtins"/>），
+/// 随宿主分发、不依赖工作区目录，优先级最低 —— 工作区里出现同名技能即覆盖它，
+/// 于是「内置的知识」可以随时被用户改写，而不必改宿主代码。
 /// </summary>
 public static class SkillLoader
 {
@@ -67,12 +71,67 @@ public static class SkillLoader
         AllowTrailingCommas = true,
     };
 
-    /// <summary>扫描工作区的两个技能来源（skills/ 自写 + workshop/ 导入），同名时内置优先。</summary>
+    /// <summary>
+    /// 宿主<b>代码内置</b>的技能：不落工作区目录、随宿主一起分发。
+    ///
+    /// <para>
+    /// 首个内置技能是 <c>skill-creator</c>（创建技能的技能）：
+    /// 它本身是「提示词 + 工具白名单」的纯声明包 —— 让 agent 手里随时有一套
+    /// 「怎么把做法沉淀成可复用技能」的方法论，而不是每次现编。
+    /// </para>
+    /// </summary>
+    public static IReadOnlyList<SkillDefinition> Builtins { get; } =
+    [
+        new SkillDefinition
+        {
+            Id = "skill-creator",
+            Name = "skill-creator",
+            Description = "创建技能的技能：把一套做法（连同它要用的工具）打包成可复用、可分享的 skill。",
+            Tools =
+            [
+                "skill_scaffold", "skill_validate", "skill_extract",
+                "skill_from_toolset", "tool_catalog",
+                "read_file", "write_file", "list_dir",
+            ],
+            PromptSuffix = SkillCreatorPrompt,
+            Tags = ["meta", "skill", "builtin"],
+            Source = "builtin",
+            Version = "1.0.0",
+            Author = "AgentFramework",
+        },
+    ];
+
+    private const string SkillCreatorPrompt = """
+        # 技能工坊（skill-creator）
+
+        你现在带着「创建技能」的能力。技能（skill）是**纯声明式**的复用单元：
+        一份 skill.json = 一句话说明 + 工具白名单 + 一段提示词后缀，不含任何可执行代码。
+
+        ## 什么时候该建一个技能
+        - 同一套「先做什么、再做什么」的做法已经重复出现两次以上；
+        - 某类任务总是只需要某一小撮工具（用白名单收窄，降低模型负担）；
+        - 你希望把一套经验沉淀下来，之后一句话就能召回。
+
+        ## 标准流程
+        1) 想清楚三件事：**叫什么**（id：字母数字与 - _）、**解决什么**（description 一句话）、**要用哪些工具**（tools 白名单）。
+        2) 若工具来自某个现成的工具包，优先用 `skill_from_toolset` 直接把整包工具转成技能草稿；
+           否则用 `skill_scaffold` 手写白名单。
+        3) 提示词后缀（promptSuffix）写「怎么做」：步骤、判据、常见坑。它是技能的灵魂，别写成空话。
+        4) 用 `skill_validate` 自检：白名单里的工具必须都已注册，id 不得与已有技能冲突。
+        5) 需要从材料里提炼时用 `skill_extract` 起草，再人工补全。
+
+        ## 纪律
+        - 一个技能只解决一类问题；贪多会让白名单与提示词双双失焦。
+        - 白名单**宁窄勿宽**：技能的价值一半在于「该收的时候收得回来」。
+        - 技能不执行代码；要执行逻辑那是插件（plugin_write）的事，别混为一谈。
+        """;
+
+    /// <summary>扫描工作区的两个技能来源（skills/ 自写 + workshop/ 导入），再兜底代码内置技能。</summary>
     public static IReadOnlyList<SkillDefinition> ScanWorkspace(string? workspaceRoot)
     {
         if (string.IsNullOrWhiteSpace(workspaceRoot))
         {
-            return [];
+            return Builtins;
         }
 
         var builtin = ScanDirectory(Path.Combine(workspaceRoot, BuiltinDirName), "builtin");
@@ -81,6 +140,15 @@ public static class SkillLoader
         var merged = new List<SkillDefinition>(builtin);
         var seen = builtin.Select(s => s.Name).ToHashSet(StringComparer.Ordinal);
         foreach (var skill in workshop)
+        {
+            if (seen.Add(skill.Name))
+            {
+                merged.Add(skill);
+            }
+        }
+
+        // 代码内置技能兜底：同名者不覆盖工作区来源 —— 用户可显式改写/顶掉内置技能。
+        foreach (var skill in Builtins)
         {
             if (seen.Add(skill.Name))
             {

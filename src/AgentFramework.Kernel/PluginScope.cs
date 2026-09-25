@@ -78,6 +78,16 @@ internal sealed class PluginScope : IKernelScope
     /// </summary>
     public IDisposable RegisterTool(ITool tool, string? toolset) => Track(_tools.Register(tool, PluginId, toolset));
 
+    /// <summary>
+    /// 注册一个自定义工作模式（任务 4）。纳入效应收集：插件卸载 / 热重载时自动从
+    /// <see cref="AgentModes"/> 注销，避免静态档位表串档与泄漏。
+    /// </summary>
+    public IDisposable RegisterMode(ModeProfile profile)
+    {
+        AgentModes.Register(profile);   // 内置 id 冲突 / 缺 CustomId → 抛异常（fail-fast）
+        return Track(new ModeRegistration(profile.CustomId!));
+    }
+
     public IDisposable Effect(Func<IDisposable> setup) => Track(setup());
 
     private IDisposable Track(IDisposable effect)

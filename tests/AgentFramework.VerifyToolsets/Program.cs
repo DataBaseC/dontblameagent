@@ -73,8 +73,8 @@ await using var host = await AgentHost.CreateAsync(options);
 // ═══ 1. 包归属 ═══
 Console.WriteLine("\n── 1. 工具包与归属 ──");
 var ids = host.Toolsets.Select(t => t.Id).ToList();
-string[] expected = ["core", "meta", "exec", "memory", "search", "plan", "web", "self", "devkit", "writing-kit"];
-Check("★ 内置 8 个包 + 基石插件 2 个包都在",
+string[] expected = ["core", "meta", "exec", "memory", "search", "plan", "web", "self", "skill", "lab", "devkit", "writing-kit"];
+Check("★ 内置 10 个包 + 基石插件 2 个包都在",
     expected.All(ids.Contains),
     string.Join(",", ids));
 
@@ -91,6 +91,11 @@ Check("★ 内置 8 个包 + 基石插件 2 个包都在",
     ("plugin_write", "self"),
     ("toolsets", "meta"),
     ("use_toolset", "meta"),
+    ("skill_scaffold", "skill"),
+    ("skill_validate", "skill"),
+    ("skill_extract", "skill"),
+    ("tool_catalog", "meta"),
+    ("csv_to_json", "lab"),
     ("edit_file", "devkit"),
     ("word_count", "writing-kit"),
 ];
@@ -204,6 +209,30 @@ var unknown = await host.Plugins.InvokeToolAsync("use_toolset", Args(("toolset",
 Check("未知包被拒并列出可选项",
     !unknown.Success && unknown.Error!.Contains("core"),
     unknown.Error);
+
+// ═══ 6.5 技能工坊工具（任务 2）═══
+Console.WriteLine("\n── 6.5 技能工坊：scaffold / validate / catalog ──");
+
+var scaffold = await host.Plugins.InvokeToolAsync("skill_scaffold",
+    Args(("id", "demo"), ("description", "演示技能")));
+Check("★ skill_scaffold 生成技能骨架", scaffold.Success, scaffold.Error);
+
+// 写盘后清单必须自己刷新（SkillsReloader）—— 否则界面/下一轮还用启动时旧列表。
+Check("★ skill_scaffold 后技能清单已刷新",
+    host.Skills.Any(s => s.Name == "demo"),
+    string.Join(",", host.Skills.Select(s => s.Name)));
+
+var validateOk = await host.Plugins.InvokeToolAsync("skill_validate", Args(("id", "demo")));
+Check("★ skill_scaffold → skill_validate 闭环通过", validateOk.Success, validateOk.Error);
+
+var validateBad = await host.Plugins.InvokeToolAsync("skill_validate", Args(("id", "no-such-skill")));
+Check("skill_validate 对不存在的技能报错", !validateBad.Success && validateBad.Error!.Contains("没找到"));
+
+var catalog = await host.Plugins.InvokeToolAsync("tool_catalog", Args(("toolset", "skill")));
+Check("tool_catalog 按包列出工具", catalog.Success && catalog.Output.Contains("skill_scaffold"), catalog.Output.Split('\n')[0]);
+
+var lab = await host.Plugins.InvokeToolAsync("csv_to_json", Args(("csv", "a,b\n1,2")));
+Check("★ csv_to_json（结构化输出样例）解析成功", lab.Success && lab.Output.Contains("\"a\""), lab.Output.Replace("\n", " "));
 
 // ═══ 7. 配置层面 ═══
 Console.WriteLine("\n── 7. 配置层面（启动即收起）──");

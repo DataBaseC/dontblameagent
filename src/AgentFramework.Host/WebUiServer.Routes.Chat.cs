@@ -171,18 +171,17 @@ public sealed partial class WebUiServer
                 return;
             }
 
-            var mode = name.Trim().ToLowerInvariant() switch
+            // 任务 4：支持任意已注册模式 id（内置五档 work/chat/design/code/write + 插件注册）。
+            // in-session 切换：只改「这一轮给模型看什么」，不重装配、不重启。
+            var id = name.Trim().ToLowerInvariant();
+            if (!_host.SetCurrentMode(id))
             {
-                "chat" => AgentMode.Chat,
-                "design" => AgentMode.Design,
-                _ => AgentMode.Work,
-            };
-
-            // 切换不需要重启：工具照常注册，换的只是「这一轮暴露什么」
-            _host.SetMode(mode);
+                request.Json(new { ok = false, error = $"未知模式：{id}（用 /api/modes 看可用档位）" }, 400);
+                return;
+            }
 
             Broadcast(JsonSerializer.SerializeToElement(
-                new { type = "mode-changed", mode = mode switch { AgentMode.Chat => "chat", AgentMode.Design => "design", _ => "work" } },
+                new { type = "mode-changed", mode = id },
                 WebUiJson.Options));
 
             request.Json(new { ok = true, mode = ModeStatus() });
@@ -209,6 +208,9 @@ public sealed partial class WebUiServer
         // ── G2 技能系统：列表与启停（回合边界生效）──────────────
         Map(new DelegateRoute("GET", "/api/skills", (request, ct) =>
         {
+            // 每次重扫：技能目录很小，扫描代价可忽略；换来的是一直新鲜 ——
+            // 手动往 skills/、workshop/ 丢包，或 skill_scaffold 落盘，列表立刻能看到。
+            _host.ReloadSkills();
             request.Json(new
             {
                 ok = true,
@@ -237,6 +239,9 @@ public sealed partial class WebUiServer
             var enabled = body is not null
                 && body.Value.TryGetProperty("enabled", out var en)
                 && en.ValueKind == System.Text.Json.JsonValueKind.True;
+
+            // 先重扫再校验：刚落到磁盘上的技能可以直接启停，不必先点刷新。
+            _host.ReloadSkills();
 
             if (string.IsNullOrWhiteSpace(name) || _host.Skills.All(x => x.Name != name))
             {
@@ -506,17 +511,17 @@ public sealed partial class WebUiServer
                 return;
             }
 
-            // 目录名用清单 name 的安全形式（与会话 id 同一白名单）—— 工坊条目的目录身份
+            // 目录名用清单 name 的安全形式（与会话 id 同一白名单）—— 工坊条目的目录身份。
+            // 校验规则与 skill_validate 工具**共用同一份**（SkillValidator），不各写一套。
             var dirName = skill.Name.Trim();
-            if (!IsValidSessionId(dirName))
+            if (!SkillValidator.IsValidName(dirName))
             {
                 request.Json(new { ok = false, error = $"技能名「{dirName}」含不安全字符（只允许字母数字 - _ ，≤64 字符）" }, 400);
                 return;
             }
 
             // 工具白名单必须引用已注册工具 —— 工坊包无法凭空造出新工具（也不会有代码可跑）
-            var registered = _host.ToolNames.ToHashSet(StringComparer.Ordinal);
-            var unknown = skill.Tools.Where(t => !registered.Contains(t, StringComparer.Ordinal)).ToList();
+            var unknown = SkillValidator.UnknownTools(skill, _host.ToolNames);
             if (unknown.Count > 0)
             {
                 request.Json(new { ok = false, error = $"工具白名单引用了未注册工具：{string.Join(", ", unknown)}" }, 400);

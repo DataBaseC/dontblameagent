@@ -27,6 +27,14 @@ public sealed class OpenAiCompatibleOptions
 
     /// <summary>这个端点的默认思考强度（off/low/medium/high；空 = 端点默认）。</summary>
     public string ReasoningEffort { get; set; } = "";
+
+    /// <summary>
+    /// 这个端点下**当前模型**是否提供思考通道（任务 6）。
+    ///
+    /// <para><c>null</c> = 未知 —— 不拦，交给端点风格决定；<c>false</c> = 明确不支持 ——
+    /// 客户端据此在**发送侧短路**，绝不把思考参数塞给一个不认它的模型（多半回 400）。</para>
+    /// </summary>
+    public bool? SupportsReasoning { get; set; }
 }
 
 /// <summary>思考参数风格常量（配置与比较都用）。</summary>
@@ -408,9 +416,22 @@ public sealed class OpenAiCompatibleClient : ILlmClient, IDisposable
     /// <summary>
     /// 按端点风格注入思考参数。请求显式给了档位就听请求的；
     /// 否则用端点默认（options.ReasoningEffort）。off 会显式关（Qwen 风格才有「关」的语义）。
+    ///
+    /// <para><b>任务 6 · 发送侧门禁</b>：不能思考的模型/端点，一个思考参数都不许发（否则多半 400）。</para>
     /// </summary>
     private void ApplyReasoningOptions(JsonObject payload, JsonArray messages, LlmRequest request)
     {
+        // ★ 门禁（任务 6）：
+        //   ① 端点风格 == none：该端点根本没启用思考参数。旧实现把「风格未配但档位配了」
+        //      当作「保守地按 OpenAI 顶层注入 reasoning_effort」—— 这正是「假开关」的发送侧表现。
+        //   ② 模型明确标记 SupportsReasoning == false：不认就 400，不注入。
+        //   未知（null）不拦：端点风格本身已表达意图，交给下面的风格分支。
+        if (_options.ReasoningStyle.Equals(ReasoningStyles.None, StringComparison.OrdinalIgnoreCase)
+            || _options.SupportsReasoning == false)
+        {
+            return;
+        }
+
         var effort = request.ReasoningEffort ?? _options.ReasoningEffort;
         if (string.IsNullOrWhiteSpace(effort))
         {
@@ -444,11 +465,7 @@ public sealed class OpenAiCompatibleClient : ILlmClient, IDisposable
                 }
             }
         }
-        else if (effort != "off")
-        {
-            // 风格未配但档位配了：保守地按 OpenAI 风格顶层注入（最常见的兼容层都认）。
-            payload["reasoning_effort"] = effort;
-        }
+        // 风格既非 openai 也非 qwen：不再回退注入（none 已在上方挡掉；其它未知风格保守不注入）。
     }
 
     private string BuildPayload(LlmRequest request)

@@ -65,6 +65,8 @@ public sealed partial class WebUiServer : IDisposable, IApprovalPrompt
         RegisterChatRoutes();
         RegisterModelRoutes();
         RegisterRephraseRoutes();
+        RegisterContextRoutes();
+        RegisterApprovalRoutes();
         RegisterStreamRoute();
     }
 
@@ -508,6 +510,9 @@ public sealed partial class WebUiServer : IDisposable, IApprovalPrompt
                         label = m.Label,
                         // 没标注的按启发式给一个，界面据此决定要不要画思考块
                         reasoning = m.SupportsReasoning ?? ModelCapabilities.GuessSupportsReasoning(m.Id),
+                        // 任务 6：区分「显式标注」与「启发式猜的」—— 界面据此展示「已支持 / 未知 / 不支持」，
+                        // 「未知」要显示「自动/端点默认」，不能假装能调。
+                        reasoningKnown = m.SupportsReasoning is not null,
                     }).ToList(),
                 }).ToList(),
         };
@@ -623,18 +628,58 @@ public sealed partial class WebUiServer : IDisposable, IApprovalPrompt
 
         if (body.TryGetProperty("models", out var modelsNode) && modelsNode.ValueKind == JsonValueKind.Array)
         {
-            var incoming = modelsNode
-                .EnumerateArray()
-                .Where(m => m.ValueKind == JsonValueKind.String)
-                .Select(m => (m.GetString() ?? string.Empty).Trim())
-                .Where(m => m.Length > 0)
-                .Distinct(StringComparer.Ordinal)
-                .ToList();
+            // 每项可以是纯 id 字符串，也可以是 { id, supportsReasoning }（任务 6：模型级能力标注）。
+            var incoming = new List<(string Id, bool? SupportsReasoning)>();
+            foreach (var m in modelsNode.EnumerateArray())
+            {
+                if (m.ValueKind == JsonValueKind.String)
+                {
+                    var sid = (m.GetString() ?? string.Empty).Trim();
+                    if (sid.Length > 0)
+                    {
+                        incoming.Add((sid, null));
+                    }
+                }
+                else if (m.ValueKind == JsonValueKind.Object)
+                {
+                    if (!m.TryGetProperty("id", out var idNode) || idNode.ValueKind != JsonValueKind.String)
+                    {
+                        continue;
+                    }
 
-            // 保留已有模型的标注（reasoning / 上下文窗口），别因为重列一遍就丢
-            provider.Models = [.. incoming.Select(modelId =>
-                provider.Models.FirstOrDefault(existing => string.Equals(existing.Id, modelId, StringComparison.Ordinal))
-                ?? new ModelEntry { Id = modelId })];
+                    var oid = (idNode.GetString() ?? string.Empty).Trim();
+                    if (oid.Length == 0)
+                    {
+                        continue;
+                    }
+
+                    // 显式 true/false 才认；缺省/其它值 = 不改动该模型的能力标注。
+                    bool? sr = null;
+                    if (m.TryGetProperty("supportsReasoning", out var srNode)
+                        && srNode.ValueKind is JsonValueKind.True or JsonValueKind.False)
+                    {
+                        sr = srNode.GetBoolean();
+                    }
+
+                    incoming.Add((oid, sr));
+                }
+            }
+
+            // 保留已有模型的标注（reasoning / 上下文窗口），别因为重列一遍就丢；
+            // 请求里显式带了 supportsReasoning 就更新它（任务 6：模型级能力可手改）。
+            provider.Models = [.. incoming
+                .GroupBy(x => x.Id, StringComparer.Ordinal)
+                .Select(g =>
+                {
+                    var entry = provider.Models.FirstOrDefault(existing => string.Equals(existing.Id, g.Key, StringComparison.Ordinal))
+                        ?? new ModelEntry { Id = g.Key };
+                    if (g.Last().SupportsReasoning is { } sr)
+                    {
+                        entry.SupportsReasoning = sr;
+                    }
+
+                    return entry;
+                })];
         }
 
         if (settings.Active is null || settings.FindProvider(settings.Active.ProviderId) is null)

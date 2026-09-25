@@ -284,6 +284,21 @@ public sealed class AgentHost : IAsyncDisposable
     /// </summary>
     public void SetMode(AgentMode mode) => _mode = mode;
 
+    /// <summary>
+    /// 切换**当前会话**的模式（任务 4）：in-session 切换、无需重启、不重装配 ——
+    /// 只改「这一轮给模型看什么」。id 未注册（含内置五档与插件注册）则返回 false。
+    /// </summary>
+    public bool SetCurrentMode(string? modeId)
+    {
+        if (!AgentModes.TryResolve(modeId, out var profile))
+        {
+            return false;
+        }
+
+        _session.SetModeId(profile.CustomId ?? AgentModes.IdOf(profile.Mode));
+        return true;
+    }
+
     // ── 模型管理 ───────────────────────────────────────────
 
     /// <summary>
@@ -402,6 +417,7 @@ public sealed class AgentHost : IAsyncDisposable
         state.EventRelay = host.RaiseEventEmitted;
         state.TextRelay = host.RaiseTextDelta;
         state.ReasoningRelay = host.RaiseReasoningDelta;
+        state.SkillsReloader = host.ReloadSkills;
         state.LastSeqOf = sessionId =>
         {
             lock (host._sessions)
@@ -421,6 +437,7 @@ public sealed class AgentHost : IAsyncDisposable
                     : (string.Empty, false, $"子 Agent 执行失败：{t.Exception?.GetBaseException().Message ?? t.Status.ToString()}"), ct);
         state.InteractionProvider = () => host.EffectiveInteraction;
         state.ModeProvider = () => host.Mode;
+        state.ModeIdProvider = () => host.ModeId;
         // 工具包：agent 手上的 toolsets / use_toolset 两个工具走这两条委托。
         // 读的是同一份视图 —— 界面、诊断面、agent 三处永远一致。
         state.ToolsetViewProvider = () => host.Toolsets;
@@ -879,6 +896,30 @@ public sealed class AgentHost : IAsyncDisposable
 
     /// <summary>保存转述设置（写「用户偏好」文件，不进 JSONL）。</summary>
     public void SaveRephraseSettings() => RephraseSettingsStore.Save(Options.SessionsDir, Options.Rephrase);
+
+    /// <summary>保存上下文治理 / 写盘设置（同走「用户偏好」文件，不进 JSONL）。</summary>
+    public void SaveContextSettings() =>
+        ContextSettingsStore.Save(Options.SessionsDir, Options.Context, Options.Checkpoint);
+
+    /// <summary>当前审批档位（任务 5）。</summary>
+    public ApprovalTier ApprovalTier => Options.ApprovalTier;
+
+    /// <summary>
+    /// 切换审批档位（活配置）：改档位 + 据此重建策略委托 —— 下一次工具调用立即按新档判定。
+    ///
+    /// <para>
+    /// 审计：写一条日志，便于回看「什么时候、切到了哪一档」。
+    /// 「Yolo 档不静默关审计」这条纪律由工具事件链保证：自动放行照样发完整
+    /// <c>ToolPreExecute</c> / <c>ToolCallRequested/Completed</c>。
+    /// </para>
+    /// </summary>
+    public void SetApprovalTier(ApprovalTier tier)
+    {
+        Options.ApprovalTier = tier;
+        var root = Options.WorkspaceRoot;
+        Options.ApprovalPolicy = e => ApprovalTiers.Decide(tier, e, root);
+        Console.WriteLine($"[approval] 审批档位切到 {tier}（{ApprovalTiers.DisplayName(tier)}）");
+    }
 
     /// <summary>
     /// 按模式算出这一轮实际生效的上下文配置。
@@ -1643,17 +1684,30 @@ public sealed class HostEventSink(
     Action<SessionEvent>? onEvent = null,
     ISessionIndex? index = null,
     string? sessionId = null,
-    Func<string, bool>? isToolAllowed = null) : IAgentEventSink
+    Func<string, bool>? isToolAllowed = null,
+    Func<ApprovalTier>? approvalTier = null) : IAgentEventSink
 {
     // 并发安全：RequestApprovalAsync 可能被多个会话/子 agent 同时调用，
     // 无锁 List.Add 会丢条目甚至把内部数组写坏。用 ConcurrentQueue 入队，
     // 读侧每次取快照（诊断面只读，不需要跨调用的严格一致视图）。
     private readonly System.Collections.Concurrent.ConcurrentQueue<ApprovalRecord> _approvals = new();
 
+    // 任务 5 · Plan 档：本回合内「已批准过的工具」——批准一次，本回合同类不再打扰。
+    // 由回合开始（UserMessageEvent）清空；用并发字典是因为多会话可能并发跑。
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, byte> _turnApproved =
+        new(StringComparer.Ordinal);
+
     public IReadOnlyList<ApprovalRecord> Approvals => [.. _approvals];
 
     public async ValueTask EmitAsync(SessionEvent sessionEvent, CancellationToken ct)
     {
+        // 任务 5 · Plan 档：一个回合（以用户消息为界）开始时清空「本回合放行集」，
+        // 于是「一次批准」只覆盖本回合，下一回合重新问 —— 「随时能收紧」。
+        if (sessionEvent is UserMessageEvent && approvalTier?.Invoke() == ApprovalTier.Plan)
+        {
+            _turnApproved.Clear();
+        }
+
         // 真相源先落盘 —— 索引只是派生物，顺序不能反（反了就会出现"索引里有、日志里没有"）
         log.Append(sessionEvent);
         onEvent?.Invoke(sessionEvent);
@@ -1682,6 +1736,15 @@ public sealed class HostEventSink(
         {
             var decision = approvalPolicy(toolPreExecuteEvent);
 
+            // 任务 5 · Plan 档：本回合已经批准过这个工具 → 直接放行
+            //（「一次批准覆盖 N 个同类写操作」）。同样放在策略之后：策略的 Deny 翻不动。
+            if (decision == ApprovalDecision.Ask
+                && approvalTier?.Invoke() == ApprovalTier.Plan
+                && _turnApproved.ContainsKey(toolPreExecuteEvent.ToolName))
+            {
+                decision = ApprovalDecision.Allow;
+            }
+
             // ★ P6：本会话已经放行过这个工具 → 不再打扰。
             //   放在**策略之后**：策略永远保留最终否决权，
             //   放行集只能把 Ask 变成 Allow，翻不动 Deny。
@@ -1689,6 +1752,12 @@ public sealed class HostEventSink(
                 && (isToolAllowed?.Invoke(toolPreExecuteEvent.ToolName) ?? false))
             {
                 decision = ApprovalDecision.Allow;
+            }
+
+            // 任务 5 · Plan 档：把本回合已放行的工具记下来（供本回合后续同类调用短路）。
+            if (decision == ApprovalDecision.Allow && approvalTier?.Invoke() == ApprovalTier.Plan)
+            {
+                _turnApproved.TryAdd(toolPreExecuteEvent.ToolName, 0);
             }
 
             switch (decision)
@@ -1724,6 +1793,11 @@ public sealed class HostEventSink(
                         if (!allowed)
                         {
                             Deny(toolPreExecuteEvent, ct.IsCancellationRequested ? "回合已取消" : "用户拒绝");
+                        }
+                        else if (approvalTier?.Invoke() == ApprovalTier.Plan)
+                        {
+                            // 任务 5 · Plan：批准即本回合放行同类（一次批一批）
+                            _turnApproved.TryAdd(toolPreExecuteEvent.ToolName, 0);
                         }
                     }
 

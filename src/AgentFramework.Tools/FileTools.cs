@@ -5,8 +5,11 @@ namespace AgentFramework.Tools;
 /// <summary>
 /// 工作区内的路径解析与边界检查。
 /// 所有文件工具共用 —— 越界访问必须在这一层被拦死，而不是靠每个工具自觉。
+///
+/// <para>public：宿主侧工具（如技能工坊的 skill_scaffold）也要走同一份写边界，
+/// 不另起一套路径解析。</para>
 /// </summary>
-internal static class WorkspacePath
+public static class WorkspacePath
 {
     /// <summary>
     /// 路径前缀比较规则：Windows 文件系统大小写不敏感，用 OrdinalIgnoreCase；
@@ -160,10 +163,18 @@ public sealed class ReadFileTool(ToolkitOptions options) : ITool, IToolWithSchem
 {
     public string Name => "read_file";
 
-    public string Description => "读取工作区内的文本文件内容。";
+    public string Description =>
+        "读取工作区内的文本文件内容。默认整读（超过上限即截断）；" +
+        "给 offset / limit 则按行分段读、输出带行号 —— 大文件精读用这个，别一次拉全文。";
 
     public string ParametersJsonSchema =>
-        """{"type":"object","properties":{"path":{"type":"string","description":"相对工作区根目录的路径"}},"required":["path"]}""";
+        """
+        {"type":"object","properties":{
+          "path":{"type":"string","description":"相对工作区根目录的路径"},
+          "offset":{"type":"integer","description":"起始行号（从 1 开始）；与 limit 配合分段读大文件"},
+          "limit":{"type":"integer","description":"最多返回的行数（不给则读到上限为止）"}
+        },"required":["path"]}
+        """;
 
     public ValueTask<ToolResult> InvokeAsync(ToolInvocation invocation, CancellationToken ct = default)
     {
@@ -183,16 +194,98 @@ public sealed class ReadFileTool(ToolkitOptions options) : ITool, IToolWithSchem
             return ValueTask.FromResult(ToolResult.Fail($"文件不存在：{path}"));
         }
 
+        // 行模式（v3.16）：给了 offset / limit 就按行分段读。要害是让「往下翻」一击可达 ——
+        // 旧行为截断后只留一句「已截断」，模型只能盲猜，或退回 run_command 摸 sed/head。
+        var offset = ParseIntArg(invocation, "offset");
+        var limit = ParseIntArg(invocation, "limit");
+        if (offset is not null || limit is not null)
+        {
+            return ValueTask.FromResult(ReadByLine(fullPath, path!, offset, limit, options.MaxReadChars));
+        }
+
         // v3.6 审查修复：**流式读到上限即停**，不再先 ReadAllText 再截断 ——
         // 否则模型把 path 指向大二进制/大日志时会先整段读进内存 → OutOfMemory。
         var (text, truncated) = ReadCapped(fullPath, options.MaxReadChars);
         if (truncated)
         {
-            text += "\n...[内容已截断]";
+            text += "\n...[内容已截断；可带 offset/limit 分段续读]";
         }
 
         // L2：大文件不该整段躺在上下文里被反复重发 —— 落盘，只留摘要 + 路径 + 头尾
         return ValueTask.FromResult(ToolResult.Ok(options.ShrinkResult("read_file", text)));
+    }
+
+    private static int? ParseIntArg(ToolInvocation invocation, string key)
+    {
+        if (invocation.Arguments.TryGetValue(key, out var raw)
+            && !string.IsNullOrWhiteSpace(raw)
+            && int.TryParse(raw, out var value))
+        {
+            return value;
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// 行模式读取：输出 <c>行号 → 内容</c> 若干行；被截断时明说「续读请传 offset=…」。
+    /// 与 <c>grep_files</c> / <c>read_lines</c> 的行号口径一致，闭合「看到行号 → 精读 → 改」的链路。
+    /// 内容量仍受 <paramref name="maxChars"/> 约束，不会把大文件整段灌进上下文。
+    /// </summary>
+    private static ToolResult ReadByLine(string fullPath, string displayPath, int? offset, int? limit, int maxChars)
+    {
+        var start = Math.Max(1, offset ?? 1);
+        var take = limit is > 0 ? limit.Value : int.MaxValue;
+
+        var sb = new System.Text.StringBuilder();
+        var lineNo = 0;
+        var returned = 0;
+        var lastShown = start - 1;
+        var more = false;
+
+        using (var reader = new System.IO.StreamReader(fullPath, System.Text.Encoding.UTF8))
+        {
+            string? line;
+            while ((line = reader.ReadLine()) is not null)
+            {
+                lineNo++;
+                if (lineNo < start)
+                {
+                    continue;
+                }
+
+                if (returned >= take)
+                {
+                    more = true;
+                    break;
+                }
+
+                var entry = $"{lineNo,6}\t{line}\n";
+                if (sb.Length + entry.Length > maxChars)
+                {
+                    more = true;
+                    break;
+                }
+
+                sb.Append(entry);
+                returned++;
+                lastShown = lineNo;
+            }
+
+            if (!more && reader.Peek() >= 0)
+            {
+                more = true;
+            }
+        }
+
+        if (returned == 0)
+        {
+            return ToolResult.Ok($"（{displayPath} 从第 {start} 行起没有内容：文件到此为止）");
+        }
+
+        var header = $"（{displayPath} 第 {start}–{lastShown} 行）\n";
+        var footer = more ? $"\n...[已截断；续读请传 offset={lastShown + 1}]" : string.Empty;
+        return ToolResult.Ok(header + sb + footer);
     }
 
     /// <summary>

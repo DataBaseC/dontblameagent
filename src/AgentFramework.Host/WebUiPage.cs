@@ -118,6 +118,7 @@ internal static class WebUiPage
   .session-ops a { font-size:10.5px; color:#565f89; cursor:pointer; text-decoration:none;
                    transition: color var(--anim); }
   .session-ops a:hover { color:var(--accent-2); }
+  .session-ops a.danger:hover { color:#ff8f9d; }
   .session-meta { font-size: 11px; color: var(--faint); margin-top: 3px; }
   /* 后台会话的"进行中"呼吸点 —— 一眼看出谁在干活 */
   .busy-dot { display: inline-block; animation: pulse 1.2s ease-in-out infinite; }
@@ -368,6 +369,82 @@ internal static class WebUiPage
   @media (prefers-reduced-motion: reduce) {
     *, *::before, *::after { animation: none !important; transition: none !important; }
   }
+
+  /* ── 底部面板可达性（任务 3）────────────────────────────
+     病灶：所有 .settings 面板内联堆叠在 footer 里，footer 没有高度上限，
+     而 body{overflow:hidden} —— 面板一开多就把 footer 撑高，发送键 / 保存键被推出视口，点不到。
+     修法：footer 限高并自身滚动，输入区（.composer）吸顶常驻；面板再多也始终能点发送与保存。
+     窄窗口（≤700px）进一步收紧 —— 「点得到」优先于「看得全」。 */
+  main { min-height: 0; }
+  #stream { min-height: 0; }
+  footer { max-height: 76vh; overflow-y: auto; overscroll-behavior: contain; }
+  .composer { position: sticky; top: 0; z-index: 3; background: var(--bg2); padding-bottom: 6px; }
+  .settings { max-height: 62vh; overflow-y: auto; }
+  @media (max-height: 700px) {
+    footer { max-height: 84vh; }
+    .settings { max-height: 66vh; }
+  }
+
+  /* ════════════════════════════════════════════════════════════
+     v3.16 打磨层（追加在所有旧规则之后，同权重「后者胜」）
+     ① 顶栏按钮「已打开」激活态   ② 长对话紧凑排版
+     ③ 视觉精修与过渡动画
+     只动观感与尺寸，不动任何语义。
+     ════════════════════════════════════════════════════════════ */
+
+  /* ── ① 可点 pill：悬停提示 + 已打开激活态 ──────────────
+     病灶：面板一开，按钮自身毫无变化，看不出是它开的。
+     修法：.active 给按钮本身一个"亮起来"的状态（描边 + 托底 + 光晕 + 圆点）。 */
+  .pill.clickable { cursor: pointer; user-select: none; }
+  .pill.clickable:hover { color: #c9d2df; border-color: var(--border2); background: rgba(255, 255, 255, .03); }
+  .pill.active {
+    color: #d6e2ff; border-color: var(--accent);
+    background: linear-gradient(180deg, rgba(47, 107, 255, .24), rgba(47, 107, 255, .09));
+    box-shadow: 0 0 0 1px rgba(122, 162, 247, .35) inset, 0 0 14px -4px rgba(47, 107, 255, .6);
+    animation: pillPop var(--anim) ease-out;
+  }
+  .pill.active::after {
+    content: ''; display: inline-block; width: 5px; height: 5px; margin-left: 6px;
+    border-radius: 50%; background: var(--accent-2); vertical-align: middle;
+    box-shadow: 0 0 6px var(--accent-2);
+  }
+  @keyframes pillPop { from { transform: scale(.93); } to { transform: none; } }
+
+  /* ── ② 长对话：整体收紧，一屏装下更多轮 ────────────────
+     缩的是「每轮占的高度」，不是信息量 —— 长对话不再被迫频繁滚动。 */
+  #stream { padding: 16px 18px 6px; }
+  .wrap { gap: 9px; }
+  .bubble { font-size: 13.5px; line-height: 1.6; padding: 9px 13px; }
+  .row { scroll-margin: 12px; }
+  .tool { font-size: 12px; }
+  .tool .head { padding: 7px 12px; }
+  .thinking summary { padding: 7px 12px; }
+  .thinking .thinking-body { line-height: 1.55; }
+  .approval { padding: 10px 13px; }
+  .usage { font-size: 10.5px; }
+  .sys { font-size: 11.5px; }
+
+  /* ── ③ 视觉精修 + 过渡动画 ─────────────────────────── */
+  /* 面板展开：轻微下坠 + 淡入，比"啪地出现"更有打开的实感 */
+  .settings:not([hidden]) { animation: panelIn .22s cubic-bezier(.2, .7, .3, 1); }
+  @keyframes panelIn { from { opacity: 0; transform: translateY(-7px); } to { opacity: 1; transform: none; } }
+  /* 顶栏：极淡的竖向渐变，给状态条一点"悬浮"层次 */
+  header { background: linear-gradient(180deg, var(--bg2), rgba(20, 23, 29, .94)); }
+  .pill { background: rgba(255, 255, 255, .015); }
+  /* 工具卡：悬停微抬 + 投影，明确"可展开" */
+  .tool { transition: border-color var(--anim), transform var(--anim), box-shadow var(--anim); }
+  .tool:hover { transform: translateY(-1px); box-shadow: 0 4px 14px -8px rgba(0, 0, 0, .75); }
+  /* 当前会话：柔和的横向高光 */
+  .session.current { background: linear-gradient(90deg, rgba(47, 107, 255, .16), transparent 72%); }
+  .plugin-row button, .session-ops a { transition: color var(--anim), background var(--anim), border-color var(--anim); }
+  /* 输入框聚焦：外圈光晕更柔和，让输入区成为视觉落点 */
+  textarea:focus { box-shadow: 0 0 0 3px rgba(47, 107, 255, .18), 0 0 22px -10px rgba(47, 107, 255, .55); }
+  #send { box-shadow: 0 2px 12px -6px rgba(47, 107, 255, .8); }
+  /* 模态：上浮淡入 */
+  .modal { animation: modalIn .24s cubic-bezier(.2, .7, .3, 1); }
+  @keyframes modalIn { from { opacity: 0; transform: translateY(10px) scale(.98); } to { opacity: 1; transform: none; } }
+  /* 面板内容行：新增时的轻微滑入（复用 rise，仅统一时长） */
+  .mem-row, .plugin-row { animation: fadeIn var(--anim) ease-out; }
 </style>
 </head>
 <body>
@@ -391,6 +468,7 @@ internal static class WebUiPage
       <span id="pill-toolsets" class="pill clickable" title="工具包：按这段活的需要开合 —— 装得多不等于负担重，收起来才省">包</span>
       <span id="pill-memory" class="pill clickable" title="记忆管理：热度 / 置顶 / 归档 / 合并 / 清扫降级">记忆</span>
       <span id="pill-ctx" class="pill" title="上下文水位：超 80% 会触发压缩（打断前缀缓存）">ctx</span>
+      <span id="pill-approval" class="pill clickable" title="审批档位：逐项确认 / 先计划后执行 / 常规放行 / 全盘托管">审批</span>
       <span id="pill-rephrase" class="pill clickable" title="点击打开 / 收起转述设置">转述</span>
       <span id="pill-usage" class="pill" title="本次会话累计用量">用量</span>
       <span id="pill-session" class="pill"></span>
@@ -418,6 +496,64 @@ internal static class WebUiPage
           <span id="rp-state" class="state"></span>
         </div>
         <textarea id="rp-prompt" spellcheck="false" placeholder="转述模型使用的系统提示词"></textarea>
+      </div>
+
+      <!-- 上下文与压缩设置（任务 1）：两个水位是两件事 —— 写盘可以早、裁剪宁晚不频 -->
+      <div class="settings" id="context-panel" hidden>
+        <div class="row">
+          <b>上下文与压缩</b>
+          <span id="ctx-water" style="color:var(--faint)"></span>
+        </div>
+        <div class="row">
+          <label>上下文预算
+            <input id="ctx-budget" type="number" min="1000" step="1000" style="width:120px">
+            <span style="color:var(--faint)">token（约 1 token ≈ 1.5 中文字，仅示意口径）</span>
+          </label>
+        </div>
+        <div class="row">
+          <label>自动写盘水位
+            <input id="ctx-checkpoint" type="number" min="0.10" max="0.80" step="0.05" style="width:92px">
+            <span style="color:var(--faint)">0.10–0.80（写盘不动上下文，可以早）</span>
+          </label>
+          <label>自动压缩水位
+            <input id="ctx-compress" type="number" min="0.40" max="0.95" step="0.05" style="width:92px">
+            <span style="color:var(--faint)">0.40–0.95（裁剪会打断缓存，宁晚不频）</span>
+          </label>
+        </div>
+        <div class="row">
+          <label><input type="checkbox" id="ctx-mask"> 遮蔽旧工具结果（省上下文）</label>
+          <label><input type="checkbox" id="ctx-ckpt-enabled"> 启用自动写盘（checkpoint）</label>
+        </div>
+        <div class="row" id="ctx-advanced" hidden>
+          <label>遮蔽占位符上限 <input id="ctx-masked-chars" type="number" min="1" style="width:92px"></label>
+          <label>遮蔽最小节省 <input id="ctx-min-saving" type="number" min="0" style="width:92px"></label>
+        </div>
+        <div class="row" style="margin-bottom:0">
+          <button id="ctx-advanced-toggle" class="ghost small">高级</button>
+          <button id="ctx-save" class="ghost small">保存</button>
+          <button id="ctx-reset" class="ghost small">恢复默认</button>
+          <span id="ctx-state" class="state"></span>
+        </div>
+        <div class="row" style="margin-bottom:0; color:var(--faint)">
+          <span id="ctx-last"></span>
+        </div>
+      </div>
+
+      <!-- Yolo 档常驻横幅（任务 5）：有明显风险提示 + 一键收回 -->
+      <div id="yolo-banner" hidden
+           style="position:fixed; top:0; left:0; right:0; z-index:50; background:#3a1e1e; color:#ffb4b4;
+                  text-align:center; font-size:12px; padding:5px 12px; border-bottom:1px solid #6b3a3a">
+        ⚠ 已全盘托管（所有工具调用自动放行）
+        <a id="yolo-recover" style="color:#ff8f8f; margin-left:10px; cursor:pointer; text-decoration:underline">一键收回</a>
+      </div>
+
+      <!-- 审批档位（任务 5）：总有一档在生效、随时能收紧 -->
+      <div class="settings" id="approval-panel" hidden>
+        <div class="row">
+          <b>审批档位</b>
+          <span id="approval-current" style="color:var(--faint)"></span>
+        </div>
+        <div class="row" id="approval-list"></div>
       </div>
 
       <div class="settings" id="model-panel" hidden>
@@ -472,6 +608,7 @@ internal static class WebUiPage
         <div class="row">
           <b>技能 · 创意工坊</b>
           <span style="color:var(--faint)">启用后改变本轮可见工具与提示词；纯声明包，导入不引入代码</span>
+          <button id="skills-refresh" class="ghost small" title="重新扫描 skills/ 与 workshop/">刷新</button>
         </div>
         <div id="skills-list"></div>
         <div class="row" style="margin-top:10px; margin-bottom:0">
@@ -544,6 +681,20 @@ internal static class WebUiPage
             这个目录只圈「写」：会话的文件写入与项目记忆锚定在这里；「读」不受限，可读硬盘任意目录。
           </div>
           <div class="modal-acts"><button id="mode-cancel" class="ghost small">取消</button></div>
+        </div>
+      </div>
+
+      <!-- 删除会话：二次确认（破坏性操作不可逆） -->
+      <div id="confirm-del" class="modal-mask" hidden>
+        <div class="modal">
+          <div class="modal-title">确认删除会话？</div>
+          <div class="modal-sub" id="cd-text">…</div>
+          <div class="modal-sub" style="color:#ff8f9d">删除后消息与事件不可恢复。若只是想归档，可先导出。</div>
+          <div class="modal-acts">
+            <button id="cd-cancel" class="ghost small" type="button">取消</button>
+            <button id="cd-ok" class="ghost small" type="button"
+                    style="color:#ff8f9d;border-color:rgba(255,143,157,.45)">确认删除</button>
+          </div>
         </div>
       </div>
 
@@ -701,6 +852,9 @@ function maybeEmptyState() {
 function clearMessages() {
   wrap.innerHTML = '';
   currentAssistant = null;
+  currentReasoning = null;
+  liveThinking = null;
+  sawLiveReasoning = false;
   toolCards.clear();
   dotsEl = null;
 }
@@ -914,11 +1068,27 @@ function renderEvent(e) {
       loadStatus();   // 状态栏跟着刷新（一轮一次，不算频繁）
       break;
     case 'reasoning':
-      // 历史回放时的思考内容：直接落成折叠块
-      if (!currentReasoning || !currentReasoning.el.isConnected) {
-        currentReasoning = addThinkingBlock();
+      // 双通路会在这里交汇：
+      //   · 实时：SSE type=reasoning 已流式渲染（onReasoning）
+      //   · 落库：ReasoningEvent 带全文，既服务历史回放，也服务实时补全
+      // 实时已有流式块时只回填全文（并收口），避免上下两个思考过程；
+      // 历史回放没有流式块，才新建。
+      if (currentReasoning && currentReasoning.el.isConnected) {
+        currentReasoning.body.textContent = e.text || '';
+        break;
       }
+      if (sawLiveReasoning && liveThinking && liveThinking.el.isConnected) {
+        liveThinking.body.textContent = e.text || '';
+        liveThinking.el.classList.remove('live');
+        const n = (e.text || '').length;
+        liveThinking.summary.textContent = '思考过程（' + n + ' 字，点击展开）';
+        sawLiveReasoning = false;
+        liveThinking = null;
+        break;
+      }
+      currentReasoning = addThinkingBlock();
       currentReasoning.body.textContent = e.text || '';
+      sealReasoning();
       break;
   }
 }
@@ -928,6 +1098,11 @@ function renderEvent(e) {
 // 默认折叠是学 Claude —— 想看的人点开，不想看的人不被刷屏。
 
 let currentReasoning = null;
+// 实时流式思考块（onReasoning 开的那一个）。落库的 ReasoningEvent 会带着全文再走一遍
+// renderEvent —— 从前在这里另开一块，于是对话里出现「上边一个、下边一个」两个思考过程。
+// sawLiveReasoning 为真时，ReasoningEvent 只回填同一块，不再新开。
+let liveThinking = null;
+let sawLiveReasoning = false;
 
 function fmtNum(value) {
   if (value == null) return '?';
@@ -954,6 +1129,8 @@ function onReasoning(text) {
   // 自愈：清空对话后旧引用会指向已移除的节点
   if (!currentReasoning || !currentReasoning.el.isConnected) {
     currentReasoning = addThinkingBlock();
+    liveThinking = currentReasoning;
+    sawLiveReasoning = true;
   }
   currentReasoning.body.textContent += text;
   setPhase('思考中…');
@@ -1236,6 +1413,12 @@ function renderSessions(sessions, current) {
     expBtn.textContent = '导出';
     expBtn.href = '/api/sessions/export?id=' + encodeURIComponent(s.id);
     ops.appendChild(expBtn);
+    const delBtn = document.createElement('a');
+    delBtn.textContent = '删除';
+    delBtn.className = 'danger';
+    delBtn.title = '永久删除这个会话（需二次确认）';
+    delBtn.onclick = (ev) => { ev.stopPropagation(); askDeleteSession(s.id, s.preview); };
+    ops.appendChild(delBtn);
     item.appendChild(ops);
     // 重绘后恢复“后台回合进行中”标记（busySessions 是持久集合）
     if (busySessions.has(s.id)) {
@@ -1384,6 +1567,57 @@ async function renameSession(id) {
     await loadSessions();
   } catch (err) { hint.textContent = '重命名失败：' + err.message; }
 }
+
+// ── 删除会话：先弹保险框，确认才发请求（破坏性操作）────────
+let pendingDeleteId = null;
+
+function askDeleteSession(id, preview) {
+  pendingDeleteId = id;
+  const label = (preview || id) + '（' + id + '）';
+  document.getElementById('cd-text').textContent =
+    '将永久删除会话 ' + label + ' 及其全部消息、事件与派生索引。';
+  document.getElementById('confirm-del').hidden = false;
+  document.getElementById('cd-ok').focus();
+}
+
+function closeDeleteConfirm() {
+  pendingDeleteId = null;
+  document.getElementById('confirm-del').hidden = true;
+}
+
+document.getElementById('cd-cancel').onclick = closeDeleteConfirm;
+document.getElementById('confirm-del').onclick = (ev) => {
+  if (ev.target.id === 'confirm-del') closeDeleteConfirm();   // 点遮罩 = 取消
+};
+document.getElementById('cd-ok').onclick = async () => {
+  const id = pendingDeleteId;
+  closeDeleteConfirm();
+  if (!id) return;
+  try {
+    const response = await fetch('/api/sessions/delete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id })
+    });
+    const data = await response.json();
+    if (!data.ok) {
+      // 从前只写 footer 小字 hint，用户根本看不见 —— 失败用 alert，必须被看见
+      alert('删除失败：' + (data.error || response.status));
+      hint.textContent = '删除失败：' + (data.error || response.status);
+      return;
+    }
+    hint.textContent = '已删除会话 ' + id;
+    // 删的是当前会话：后端已自动切走并广播 session-switched，
+    // 那边会 afterSessionChange；这里只刷列表即可。
+    await loadSessions();
+    if (data.switchedTo && data.switchedTo !== id) {
+      await afterSessionChange();
+    }
+  } catch (err) {
+    alert('删除失败：' + err.message);
+    hint.textContent = '删除失败：' + err.message;
+  }
+};
 
 async function afterSessionChange() {
   clearMessages();
@@ -1556,6 +1790,8 @@ document.getElementById('pill-skills').onclick = () => {
   skillsPanel.hidden = !skillsPanel.hidden;
   if (!skillsPanel.hidden) loadSkills();
 };
+
+document.getElementById('skills-refresh').onclick = () => loadSkills();
 
 // ── 技能与创意工坊 ───────────────────────────────────
 async function loadSkills() {
@@ -2125,10 +2361,27 @@ function openEditor(provider) {
   mdKey.value = '';
   mdModels.value = provider ? provider.models.map(m => m.id).join('\n') : '';
 
+  // 思考风格 / 默认强度：回填已存值（从前编辑已有端点时这两项恒显示为初值）
+  mdStyle.value = provider && provider.reasoningStyle ? provider.reasoningStyle : 'none';
+  mdEffort.value = provider && provider.reasoningEffort ? provider.reasoningEffort : '';
+  applyReasoningGate();
+
   mdEditorState.textContent = provider
     ? (provider.hasKey ? '已配密钥（留空则不修改）' : '尚未配密钥')
     : '新端点：先「测试连接」把模型列表拉下来，再保存';
 }
+
+// 任务 6：思考强度是**条件可选**的 —— 端点风格为 none 时它根本不会生效，
+// 所以置灰并说明原因，不做「点得动、却发不出去」的假开关（发送侧也已同步挡住）。
+function applyReasoningGate() {
+  const off = mdStyle.value === 'none';
+  mdEffort.disabled = off;
+  mdEffort.title = off
+    ? '该端点未启用思考参数（风格 = none）：强度不会生效，故不可选'
+    : '端点默认思考强度';
+}
+
+mdStyle.onchange = applyReasoningGate;
 
 async function testEndpoint() {
   mdEditorState.textContent = '测试中…';
@@ -2244,6 +2497,161 @@ document.getElementById('md-test').onclick = testEndpoint;
 document.getElementById('md-save').onclick = saveEndpoint;
 document.getElementById('md-cancel').onclick = () => { mdEditor.hidden = true; };
 
+// ── 上下文与压缩设置（任务 1）─────────────────────────────
+// 「改完即生效、不重启」：POST 写回宿主的活实例；面板只读当前水位与最近一次压缩 / 写盘。
+const ctxPanel = document.getElementById('context-panel');
+const ctxBudget = document.getElementById('ctx-budget');
+const ctxCheckpoint = document.getElementById('ctx-checkpoint');
+const ctxCompress = document.getElementById('ctx-compress');
+const ctxMask = document.getElementById('ctx-mask');
+const ctxCkptEnabled = document.getElementById('ctx-ckpt-enabled');
+const ctxAdvanced = document.getElementById('ctx-advanced');
+const ctxMaskedChars = document.getElementById('ctx-masked-chars');
+const ctxMinSaving = document.getElementById('ctx-min-saving');
+const ctxSave = document.getElementById('ctx-save');
+const ctxReset = document.getElementById('ctx-reset');
+const ctxState = document.getElementById('ctx-state');
+const ctxWater = document.getElementById('ctx-water');
+const ctxLast = document.getElementById('ctx-last');
+let contextInfo = null;
+
+async function loadContext() {
+  try {
+    contextInfo = await (await fetch('/api/context')).json();
+  } catch (err) {
+    ctxState.textContent = '读不到上下文设置：' + err.message;
+    return;
+  }
+  renderContext();
+}
+
+function renderContext() {
+  if (!contextInfo || !contextInfo.ok) return;
+  const c = contextInfo.context, k = contextInfo.checkpoint;
+  ctxBudget.value = c.tokenBudget;
+  ctxCheckpoint.value = k.triggerRatio;
+  ctxCompress.value = c.compressionTriggerRatio;
+  ctxMask.checked = c.maskOldToolResults;
+  ctxCkptEnabled.checked = k.enabled;
+  ctxMaskedChars.value = c.maskedNoteMaxChars;
+  ctxMinSaving.value = c.minMaskSavingChars;
+  const level = contextInfo.waterLevel && typeof contextInfo.waterLevel.waterLevel === 'number'
+    ? Math.round(contextInfo.waterLevel.waterLevel * 100) : '—';
+  ctxWater.textContent = '当前水位 ' + level + '%';
+  const lc = contextInfo.lastCompaction, lk = contextInfo.lastCheckpoint;
+  ctxLast.textContent = (lc ? '最近压缩 #' + lc.seq : '尚未压缩') + ' · ' + (lk ? '最近写盘 #' + lk.seq : '尚未写盘');
+}
+
+async function saveContext() {
+  ctxState.textContent = '保存中…';
+  let data;
+  try {
+    data = await (await fetch('/api/context', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        tokenBudget: parseInt(ctxBudget.value, 10),
+        checkpointTriggerRatio: parseFloat(ctxCheckpoint.value),
+        compressionTriggerRatio: parseFloat(ctxCompress.value),
+        maskOldToolResults: ctxMask.checked,
+        checkpointEnabled: ctxCkptEnabled.checked,
+        maskedNoteMaxChars: parseInt(ctxMaskedChars.value, 10),
+        minMaskSavingChars: parseInt(ctxMinSaving.value, 10)
+      })
+    })).json();
+  } catch (err) {
+    ctxState.textContent = '✗ 请求失败：' + err.message;
+    return;
+  }
+  if (!data.ok) { ctxState.textContent = '✗ ' + data.error; return; }
+  contextInfo = data;
+  renderContext();
+  ctxState.textContent = '✓ 已保存（下一轮生效）';
+  loadStatus();
+}
+
+async function resetContext() {
+  if (!contextInfo) await loadContext();
+  const d = contextInfo && contextInfo.defaults;
+  if (!d) return;
+  ctxBudget.value = d.tokenBudget;
+  ctxCheckpoint.value = d.checkpointTriggerRatio;
+  ctxCompress.value = d.compressionTriggerRatio;
+  ctxMask.checked = d.maskOldToolResults;
+  ctxMaskedChars.value = d.maskedNoteMaxChars;
+  ctxMinSaving.value = d.minMaskSavingChars;
+  await saveContext();
+}
+
+document.getElementById('pill-ctx').classList.add('clickable');
+document.getElementById('pill-ctx').onclick = () => {
+  ctxPanel.hidden = !ctxPanel.hidden;
+  if (!ctxPanel.hidden) loadContext();
+};
+document.getElementById('ctx-advanced-toggle').onclick = () => { ctxAdvanced.hidden = !ctxAdvanced.hidden; };
+ctxSave.onclick = saveContext;
+ctxReset.onclick = resetContext;
+
+// ── 审批档位（任务 5）：徽章常显、一键切档、Yolo 有横幅与收回 ──
+const approvalPanel = document.getElementById('approval-panel');
+const approvalList = document.getElementById('approval-list');
+const approvalCurrent = document.getElementById('approval-current');
+const yoloBanner = document.getElementById('yolo-banner');
+const pillApproval = document.getElementById('pill-approval');
+let approvalInfo = null;
+
+async function loadApproval() {
+  try {
+    approvalInfo = await (await fetch('/api/approval')).json();
+  } catch (err) {
+    approvalCurrent.textContent = '读不到审批档位：' + err.message;
+    return;
+  }
+  renderApproval();
+}
+
+function renderApproval() {
+  if (!approvalInfo || !approvalInfo.ok) return;
+  pillApproval.textContent = approvalInfo.displayName;
+  approvalCurrent.textContent = '当前：' + approvalInfo.displayName;
+  yoloBanner.hidden = !approvalInfo.yolo;
+
+  approvalList.innerHTML = '';
+  approvalInfo.tiers.forEach(t => {
+    const active = t.id === approvalInfo.tier;
+    const btn = document.createElement('button');
+    btn.className = 'ghost small';
+    btn.textContent = (active ? '● ' : '') + t.name;
+    btn.title = t.desc;
+    if (active) { btn.style.borderColor = 'var(--accent)'; btn.style.color = '#dce3f0'; }
+    btn.onclick = () => setApprovalTier(t.id);
+    approvalList.appendChild(btn);
+  });
+}
+
+async function setApprovalTier(tier) {
+  let data;
+  try {
+    data = await (await fetch('/api/approval', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ tier })
+    })).json();
+  } catch (err) {
+    approvalCurrent.textContent = '✗ 请求失败：' + err.message;
+    return;
+  }
+  if (!data.ok) { approvalCurrent.textContent = '✗ ' + data.error; return; }
+  approvalInfo = data;
+  renderApproval();
+}
+
+pillApproval.onclick = () => {
+  approvalPanel.hidden = !approvalPanel.hidden;
+  if (!approvalPanel.hidden) loadApproval();
+};
+document.getElementById('yolo-recover').onclick = () => setApprovalTier('ask');
+
 rpEnabled.onchange = () => saveRephrase({ enabled: rpEnabled.checked });
 rpAuto.onchange = () => saveRephrase({ autoBeforeSend: rpAuto.checked });
 rpModel.onchange = () => saveRephrase({ model: rpModel.value });
@@ -2270,9 +2678,16 @@ input.addEventListener('keydown', (event) => {
     send();
   }
 });
-// HCI：Esc = 停止当前回合（不用去够按钮）
+// HCI：Esc = 关掉最上层保险框；没有弹框时 = 停止当前回合
 document.addEventListener('keydown', (event) => {
-  if (event.key === 'Escape' && turnRunning) {
+  if (event.key !== 'Escape') return;
+  const confirmDel = document.getElementById('confirm-del');
+  if (confirmDel && !confirmDel.hidden) {
+    event.preventDefault();
+    closeDeleteConfirm();
+    return;
+  }
+  if (turnRunning) {
     event.preventDefault();
     stopTurn();
   }
@@ -2365,6 +2780,39 @@ stream.onerror = () => setConn(false);
   await loadRephrase();
   await loadHistory();
   input.focus();
+
+  // ── 顶栏按钮「已打开」激活态（v3.16 打磨层）────────────────
+  // 原有各 pill.onclick 一律保持不动（它负责切换 hidden 并拉数据）；
+  // 这里只在一旁监听点击，把面板的开合「照」回按钮自身：
+  //   .active（视觉高亮）+ aria-expanded（屏幕阅读器可播报）。
+  // 用 queueMicrotask 等原 handler 改完 panel.hidden 之后再读最新状态。
+  (function bindPanelActiveStates() {
+    const pairs = [
+      ['pill-rephrase', 'settings'],
+      ['pill-toolsets', 'toolsets-panel'],
+      ['pill-skills', 'skills-panel'],
+      ['pill-memory', 'memory-panel'],
+      ['pill-model', 'model-panel'],
+      ['pill-plugins', 'plugins-panel'],
+      ['pill-ctx', 'context-panel'],
+      ['pill-approval', 'approval-panel'],
+    ];
+    for (const [btnId, panelId] of pairs) {
+      const btn = document.getElementById(btnId);
+      const panel = document.getElementById(panelId);
+      if (!btn || !panel) continue;
+      btn.classList.add('clickable');
+      btn.setAttribute('role', 'button');
+      btn.setAttribute('aria-expanded', String(!panel.hidden));
+      btn.addEventListener('click', () => {
+        queueMicrotask(() => {
+          const open = !panel.hidden;
+          btn.classList.toggle('active', open);
+          btn.setAttribute('aria-expanded', String(open));
+        });
+      });
+    }
+  })();
 })();
 </script>
 </body>

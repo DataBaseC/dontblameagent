@@ -171,6 +171,74 @@ var decodedHigh = capturedPayload is null ? null : System.Text.RegularExpression
 Check("qwen high 带预算", decodedHigh?.Contains("<enable_thinking>true</enable_thinking>") == true
     && decodedHigh?.Contains("<thinking_budget>16384</thinking_budget>") == true);
 
+// ── 2.2 思考能力门禁（任务 6）：不能思考的模型/端点，发送侧一个参数都不发 ──
+Console.WriteLine("\n── 2.2 思考能力门禁（任务 6）──");
+
+// ① 端点风格 none + 配了档次：旧实现会回退成「按 OpenAI 顶层注入 reasoning_effort」——
+//    这正是「假开关」的发送侧表现，修复后必须一个参数都不发。
+var noneHighClient = new OpenAiCompatibleClient("none-high", new OpenAiCompatibleOptions
+{
+    BaseUrl = $"http://127.0.0.1:{freePort}/v1",
+    DefaultModel = "plain-model",
+    ReasoningStyle = ReasoningStyles.None,
+    ReasoningEffort = "high",
+});
+capturedPayload = null;
+await DrainAsync(noneHighClient, new LlmRequest { Model = "auto", Messages = [new LlmMessage { Role = LlmRole.User, Content = "hi" }] });
+Check("★ style=none 即使配了档次也不注入（发送侧挡）", capturedPayload?.Contains("reasoning_effort") != true);
+
+// ② 模型明确不支持：即使 style=openai 也不注入
+var unsupportedClient = new OpenAiCompatibleClient("unsupported", new OpenAiCompatibleOptions
+{
+    BaseUrl = $"http://127.0.0.1:{freePort}/v1",
+    DefaultModel = "no-think-model",
+    ReasoningStyle = ReasoningStyles.OpenAi,
+    ReasoningEffort = "high",
+    SupportsReasoning = false,
+});
+capturedPayload = null;
+await DrainAsync(unsupportedClient, new LlmRequest { Model = "auto", Messages = [new LlmMessage { Role = LlmRole.User, Content = "hi" }] });
+Check("★ SupportsReasoning=false 的模型不发思考参数（style=openai 也不发）", capturedPayload?.Contains("reasoning_effort") != true);
+
+// ③ 模型明确支持：style=openai 注入 reasoning_effort
+var supportedClient = new OpenAiCompatibleClient("supported", new OpenAiCompatibleOptions
+{
+    BaseUrl = $"http://127.0.0.1:{freePort}/v1",
+    DefaultModel = "think-model",
+    ReasoningStyle = ReasoningStyles.OpenAi,
+    ReasoningEffort = "high",
+    SupportsReasoning = true,
+});
+capturedPayload = null;
+await DrainAsync(supportedClient, new LlmRequest { Model = "auto", Messages = [new LlmMessage { Role = LlmRole.User, Content = "hi" }] });
+Check("SupportsReasoning=true + style=openai 注入 reasoning_effort", capturedPayload?.Contains("\"reasoning_effort\":\"high\"") == true);
+
+// ④ 能力未知（null）不误伤：style=openai 仍按端点配置注入（未知≠不支持）
+var unknownClient = new OpenAiCompatibleClient("unknown", new OpenAiCompatibleOptions
+{
+    BaseUrl = $"http://127.0.0.1:{freePort}/v1",
+    DefaultModel = "maybe-think",
+    ReasoningStyle = ReasoningStyles.OpenAi,
+    ReasoningEffort = "medium",
+});
+capturedPayload = null;
+await DrainAsync(unknownClient, new LlmRequest { Model = "auto", Messages = [new LlmMessage { Role = LlmRole.User, Content = "hi" }] });
+Check("能力未知（null）时不误挡：style=openai 仍注入", capturedPayload?.Contains("\"reasoning_effort\":\"medium\"") == true);
+
+// ⑤ 模型明确不支持 + style=qwen：不发 Qwen 标记
+var unsupportedQwen = new OpenAiCompatibleClient("unsupported-qwen", new OpenAiCompatibleOptions
+{
+    BaseUrl = $"http://127.0.0.1:{freePort}/v1",
+    DefaultModel = "qwen3",
+    ReasoningStyle = ReasoningStyles.Qwen,
+    ReasoningEffort = "high",
+    SupportsReasoning = false,
+});
+capturedPayload = null;
+await DrainAsync(unsupportedQwen, new LlmRequest { Model = "auto", Messages = [new LlmMessage { Role = LlmRole.User, Content = "hi" }] });
+var decodedUnsupportedQwen = capturedPayload is null ? null : System.Text.RegularExpressions.Regex.Unescape(capturedPayload);
+Check("SupportsReasoning=false + style=qwen 不发思考标记", decodedUnsupportedQwen?.Contains("enable_thinking") != true);
+
 // ── 2.5 system 必须只在最前（Qwen/vLLM Jinja 硬性要求）────────
 Console.WriteLine("\n── 2.5 system 位置与工具名累积 ──");
 

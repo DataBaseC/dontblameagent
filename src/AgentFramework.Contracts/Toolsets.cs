@@ -114,6 +114,12 @@ public static class BuiltinToolsets
     /// <summary>写作扩展（基石插件 writing-kit）。</summary>
     public const string WritingKit = "writing-kit";
 
+    /// <summary>技能工坊：生成 / 校验 / 提炼技能包（任务 2）。</summary>
+    public const string Skill = "skill";
+
+    /// <summary>实验包：新工具类型的官方样例（任务 2）。</summary>
+    public const string Lab = "lab";
+
     /// <summary>不许关闭的包（宿主会拒绝这类开关请求）。</summary>
     public static IReadOnlySet<string> Protected { get; } =
         new HashSet<string>(StringComparer.Ordinal) { Core, Meta };

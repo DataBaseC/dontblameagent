@@ -122,6 +122,44 @@ Check("主循环在拒绝后仍能收尾", commandClient.Requests.Count >= 2);
 
 await host3.DisposeAsync();
 
+// ── 4.5 审批档位矩阵（任务 5）───────────────────────────────
+Console.WriteLine("\n── 4.5 审批档位矩阵 ──");
+
+static ToolPreExecuteEvent Call(string tool, params (string Key, string Value)[] args)
+    => new()
+    {
+        ToolName = tool,
+        Arguments = args.ToDictionary(a => a.Key, a => (string?)a.Value),
+    };
+
+ApprovalDecision Decide(ApprovalTier tier, ToolPreExecuteEvent e)
+    => ApprovalTiers.Decide(tier, e, workspace);
+
+// Ask：写/执行都问，读放行
+Check("Ask 档：write_file 仍问", Decide(ApprovalTier.Ask, Call("write_file", ("path", "a.txt"))) == ApprovalDecision.Ask);
+Check("Ask 档：read_file 放行", Decide(ApprovalTier.Ask, Call("read_file", ("path", "a.txt"))) == ApprovalDecision.Allow);
+
+// Build：区内写放行、区外写问；安全命令放行、危险命令问
+Check("★ Build 档：工作区内写自动放行",
+    Decide(ApprovalTier.Build, Call("write_file", ("path", "sub/a.txt"))) == ApprovalDecision.Allow);
+Check("★ Build 档：工作区外写仍问",
+    Decide(ApprovalTier.Build, Call("write_file", ("path", "../../evil.txt"))) == ApprovalDecision.Ask);
+Check("★ Build 档：普通命令放行",
+    Decide(ApprovalTier.Build, Call("run_command", ("command", "git status"))) == ApprovalDecision.Allow);
+Check("★ Build 档：危险命令仍问",
+    Decide(ApprovalTier.Build, Call("run_command", ("command", "rm -rf /"))) == ApprovalDecision.Ask);
+
+// Plan：逐项判定同 Ask（批量由 HostEventSink 的回合放行集处理）
+Check("Plan 档：write_file 逐项仍问", Decide(ApprovalTier.Plan, Call("write_file", ("path", "a.txt"))) == ApprovalDecision.Ask);
+
+// Yolo：全放行，但审计事件链不变（事件由主循环保证，这里只验策略）
+Check("★ Yolo 档：写与执行全部放行",
+    Decide(ApprovalTier.Yolo, Call("write_file", ("path", "../../evil.txt"))) == ApprovalDecision.Allow
+    && Decide(ApprovalTier.Yolo, Call("run_command", ("command", "rm -rf /"))) == ApprovalDecision.Allow);
+
+// 未知工具在 Build 档保持谨慎
+Check("Build 档：未知工具仍问", Decide(ApprovalTier.Build, Call("mystery_tool")) == ApprovalDecision.Ask);
+
 // ── 5. 插件并入 ────────────────────────────────────────────
 Console.WriteLine("\n── 5. 插件并入 ──");
 var pluginsDir = Path.Combine(AppContext.BaseDirectory, "plugins");

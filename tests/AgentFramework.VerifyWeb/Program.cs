@@ -251,9 +251,42 @@ Check("会话列表变成 2 个",
     JsonDocument.Parse(await http.GetStringAsync(server.Url + "api/sessions"))
         .RootElement.GetProperty("sessions").GetArrayLength() == 2);
 
-Check("拒绝删除当前会话",
-    (int)(await http.PostAsync(server.Url + "api/sessions/delete",
-        new StringContent("""{"id":"web"}""", Encoding.UTF8, "application/json"))).StatusCode == 400);
+// 删除当前会话：从前直接 400，用户点删除「没反应」；现在允许，删完自动切走。
+// 用一个一次性会话当「当前」再删掉，不碰后面还要用的 web。
+string? throwaway = null;
+using (var mk = await http.PostAsync(server.Url + "api/sessions/new",
+    new StringContent("""{"mode":"work"}""", Encoding.UTF8, "application/json")))
+{
+    var mkBody = await mk.Content.ReadAsStringAsync();
+    using var mkDoc = JsonDocument.Parse(mkBody);
+    throwaway = mkDoc.RootElement.GetProperty("sessionId").GetString();
+}
+
+string delCurBody = "";
+using (var delCur = await http.PostAsync(server.Url + "api/sessions/delete",
+    new StringContent("{\"id\":\"" + throwaway + "\"}", Encoding.UTF8, "application/json")))
+{
+    delCurBody = await delCur.Content.ReadAsStringAsync();
+    string? switchedTo = null;
+    try
+    {
+        using var delDoc = JsonDocument.Parse(delCurBody);
+        switchedTo = delDoc.RootElement.TryGetProperty("switchedTo", out var sw)
+            ? sw.GetString()
+            : null;
+    }
+    catch { /* 非 JSON 时下面统一判失败 */ }
+
+    Check("★ 删除当前会话成功并自动切走",
+        (int)delCur.StatusCode == 200
+        && !string.IsNullOrEmpty(switchedTo)
+        && !string.Equals(switchedTo, throwaway, StringComparison.Ordinal),
+        delCurBody);
+}
+
+// 切回 web，后面重命名 / 分叉 / 导出都指着它。
+await http.PostAsync(server.Url + "api/sessions/switch",
+    new StringContent("""{"id":"web"}""", Encoding.UTF8, "application/json"));
 
 // B3 修复：删除非当前会话时，runtime 也一并从会话表移除并释放 ——
 // 否则同 id 重建会拿到旧 runtime，内存事件表把已删除的历史“复活”。
@@ -631,6 +664,43 @@ var badMode = await http.PostAsync(server.Url + "api/sessions/new",
     new StringContent("""{"mode":"tavern"}""", Encoding.UTF8, "application/json"));
 Check("未注册的自定义模式被 400 拒绝（插件注册后才可用）", (int)badMode.StatusCode == 400);
 
+// 任务 4：内置编程 / 写作两档
+Check("★ /api/modes 含编程与写作模式",
+    modesJson.Contains("\"code\"") && modesJson.Contains("\"write\""));
+
+var codeSess = await http.PostAsync(server.Url + "api/sessions/new",
+    new StringContent("""{"mode":"code"}""", Encoding.UTF8, "application/json"));
+var codeBody = await codeSess.Content.ReadAsStringAsync();
+Check("★ 新建编程模式会话", (int)codeSess.StatusCode == 200 && codeBody.Contains("\"current\":\"code\""));
+
+var codeStatus = await http.GetStringAsync(server.Url + "api/status");
+using (var doc = JsonDocument.Parse(codeStatus))
+{
+    var tools = doc.RootElement.GetProperty("mode").GetProperty("tools")
+        .EnumerateArray().Select(t => t.GetString()).ToList();
+    Check("★ 编程模式下 run_command 可用", tools.Contains("run_command"));
+}
+
+await http.PostAsync(server.Url + "api/sessions/new",
+    new StringContent("""{"mode":"write"}""", Encoding.UTF8, "application/json"));
+var writeStatus = await http.GetStringAsync(server.Url + "api/status");
+using (var doc = JsonDocument.Parse(writeStatus))
+{
+    var tools = doc.RootElement.GetProperty("mode").GetProperty("tools")
+        .EnumerateArray().Select(t => t.GetString()).ToList();
+    Check("★ 写作模式下默认不暴露 run_command（工具面与编程模式真实不同）", !tools.Contains("run_command"));
+    Check("写作模式仍可用核心读写工具", tools.Contains("write_file") && tools.Contains("read_file"));
+}
+
+// 任务 4：in-session 切换（无需重启）
+var switchMode = await http.PostAsync(server.Url + "api/mode",
+    new StringContent("""{"mode":"code"}""", Encoding.UTF8, "application/json"));
+Check("★ in-session 切到编程模式成功", (int)switchMode.StatusCode == 200);
+
+var modeBad = await http.PostAsync(server.Url + "api/mode",
+    new StringContent("""{"mode":"nope"}""", Encoding.UTF8, "application/json"));
+Check("未知模式 in-session 切换被 400 拒绝", (int)modeBad.StatusCode == 400);
+
 var pluginsJson = await http.GetStringAsync(server.Url + "api/plugins");
 Check("★ /api/plugins 可用（测试环境无插件 → 空列表）", pluginsJson.Contains("\"plugins\":[]"));
 var panel404 = await http.GetAsync(server.Url + "plugin-panel?id=nonexistent");
@@ -760,6 +830,137 @@ using (var lazyHttp = new HttpClient { Timeout = Timeout.InfiniteTimeSpan })
     Check("★ 不读数据的 SSE 客户端不拖住请求（P1-F3）",
         (int)sendUnderSlowClient.StatusCode == 202 && sw.ElapsedMilliseconds < 3000,
         $"{(int)sendUnderSlowClient.StatusCode} / {sw.ElapsedMilliseconds}ms");
+}
+
+// ── 12. 上下文与压缩设置（任务 1）───────────────────────────
+Console.WriteLine("\n── 12. 上下文与压缩设置 ──");
+
+using (var ctxDoc = await GetJson(http, server.Url + "api/context"))
+{
+    var ctx = ctxDoc.RootElement;
+    Check("★ GET /api/context 返回预算与两个水位",
+        ctx.GetProperty("ok").GetBoolean()
+        && ctx.GetProperty("context").GetProperty("tokenBudget").GetInt32() == 24000
+        && ctx.GetProperty("checkpoint").GetProperty("triggerRatio").GetDouble() == 0.35
+        && ctx.GetProperty("context").GetProperty("compressionTriggerRatio").GetDouble() == 0.8,
+        "默认 24000 / 0.35 / 0.8");
+}
+
+// 合法写入：改预算与两个水位 → 活实例立即变（不重启）
+using (var setDoc = await PostJson(http, server.Url + "api/context",
+    """{"tokenBudget":32000,"checkpointTriggerRatio":0.3,"compressionTriggerRatio":0.85}"""))
+{
+    Check("★ POST /api/context 合法写入写回活实例",
+        setDoc.RootElement.GetProperty("ok").GetBoolean()
+        && host.Options.Context.TokenBudget == 32000
+        && host.Options.Checkpoint.TriggerRatio == 0.3
+        && host.Options.Context.CompressionTriggerRatio == 0.85);
+}
+
+// GET 复证（任务书要求「可用 /api/context 复证」）
+using (var reDoc = await GetJson(http, server.Url + "api/context"))
+{
+    Check("★ /api/context 复读与写入一致",
+        reDoc.RootElement.GetProperty("context").GetProperty("tokenBudget").GetInt32() == 32000);
+}
+
+// 语义颠倒：压缩水位 ≤ 写盘水位 → 400
+using (var badRel = await http.PostAsync(server.Url + "api/context",
+    new StringContent("""{"checkpointTriggerRatio":0.8,"compressionTriggerRatio":0.8}""", Encoding.UTF8, "application/json")))
+{
+    Check("★ 压缩水位 ≤ 写盘水位 → 400（禁止「还没写盘就先裁剪」）",
+        badRel.StatusCode == HttpStatusCode.BadRequest);
+}
+
+// 越界：比例超出范围 → 400
+using (var badRange = await http.PostAsync(server.Url + "api/context",
+    new StringContent("""{"compressionTriggerRatio":1.5}""", Encoding.UTF8, "application/json")))
+{
+    Check("压缩水位超范围 → 400", badRange.StatusCode == HttpStatusCode.BadRequest);
+}
+
+// 被拒的写入不改动活实例
+Check("★ 被拒的写入一个字节都不改", host.Options.Context.CompressionTriggerRatio == 0.85);
+
+// 恢复默认：与 ContextOptions / CheckpointOptions 源码默认值一致
+using (var resetDoc = await PostJson(http, server.Url + "api/context",
+    """{"tokenBudget":24000,"checkpointTriggerRatio":0.35,"compressionTriggerRatio":0.8,"maskOldToolResults":true,"maskedNoteMaxChars":240,"minMaskSavingChars":200}"""))
+{
+    Check("★ 恢复默认与源码默认值一致",
+        resetDoc.RootElement.GetProperty("ok").GetBoolean()
+        && host.Options.Context.TokenBudget == 24000
+        && host.Options.Context.CompressionTriggerRatio == 0.8
+        && host.Options.Checkpoint.TriggerRatio == 0.35);
+}
+
+// ── 13. 审批档位（任务 5）───────────────────────────────────
+Console.WriteLine("\n── 13. 审批档位 ──");
+
+using (var appr = await GetJson(http, server.Url + "api/approval"))
+{
+    var a = appr.RootElement;
+    Check("★ GET /api/approval 返回当前档位与四档可选",
+        a.GetProperty("tier").GetString() == "ask" && a.GetProperty("tiers").GetArrayLength() == 4,
+        a.GetProperty("tier").GetString());
+}
+
+using (var yolo = await PostJson(http, server.Url + "api/approval", """{"tier":"yolo"}"""))
+{
+    Check("★ 切到全盘托管：yolo=true 且活配置生效",
+        yolo.RootElement.GetProperty("yolo").GetBoolean()
+        && host.Options.ApprovalTier == ApprovalTier.Yolo);
+}
+
+using (var plan = await PostJson(http, server.Url + "api/approval", """{"tier":"plan"}"""))
+{
+    Check("切到 Plan 档生效",
+        plan.RootElement.GetProperty("tier").GetString() == "plan"
+        && host.Options.ApprovalTier == ApprovalTier.Plan);
+}
+
+using (var nonsense = await PostJson(http, server.Url + "api/approval", """{"tier":"nonsense"}"""))
+{
+    Check("未知档位回落到 ask（保守，不静默成别的档）",
+        nonsense.RootElement.GetProperty("tier").GetString() == "ask");
+}
+
+using (var back = await PostJson(http, server.Url + "api/approval", """{"tier":"ask"}"""))
+{
+    Check("★ 一键收回：切回 ask 后 yolo=false",
+        back.RootElement.GetProperty("yolo").GetBoolean() == false
+        && host.Options.ApprovalTier == ApprovalTier.Ask);
+}
+
+// ── 13.5 模式注册面（任务 4）───────────────────────────────
+Console.WriteLine("\n── 13.5 模式注册面 ──");
+
+AgentModes.Register(new ModeProfile
+{
+    CustomId = "tavern-test",
+    Name = "测试档",
+    MemoryScopes = [MemoryScope.Global],
+});
+try
+{
+    using var regDoc = await GetJson(http, server.Url + "api/modes");
+    Check("★ 注册的自定义模式出现在 /api/modes",
+        regDoc.RootElement.GetProperty("modes").ToString().Contains("tavern-test"));
+
+    var conflict = false;
+    try
+    {
+        AgentModes.Register(new ModeProfile { CustomId = "work", Name = "x", MemoryScopes = [] });
+    }
+    catch (ArgumentException)
+    {
+        conflict = true;
+    }
+
+    Check("★ 与内置档位冲突的模式注册被拒（不静默覆盖）", conflict);
+}
+finally
+{
+    AgentModes.Unregister("tavern-test");
 }
 
 sseCts.Cancel();

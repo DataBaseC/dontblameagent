@@ -39,7 +39,8 @@ taskkill /f /im AgentFramework.Host.exe >nul 2>&1
 taskkill /f /im AgentFramework.Launcher.exe >nul 2>&1
 taskkill /f /im AgentFramework.Desktop.exe >nul 2>&1
 rem Give the OS a moment to release file handles.
-timeout /t 2 /nobreak >nul
+rem ping is used instead of timeout: timeout breaks when stdin is redirected.
+ping -n 3 127.0.0.1 >nul
 
 rem Drop build-server locks on Contracts ref/dll.
 call :release_locks
@@ -169,6 +170,11 @@ if exist "src\AgentFramework.Contracts\bin\Release" rd /s /q "src\AgentFramework
 exit /b 0
 
 :maybe_pause
-rem Always pause when double-clicked. Scripted callers can use --no-pause.
+rem Pause when double-clicked. Skip in scripts:
+rem   pack-launcher.cmd --no-pause
+rem   set AUTO_PAUSE=1
+if defined AUTO_PAUSE exit /b 0
+echo %* | findstr /i /c:"--no-pause" >nul
+if not errorlevel 1 exit /b 0
 pause
 exit /b 0

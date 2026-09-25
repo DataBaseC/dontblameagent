@@ -69,7 +69,7 @@ public sealed class HostOptions
     public int LongContextChars { get; set; } = 6000;
 
     public string SystemPrompt { get; set; } =
-        "你是一个可靠的桌面助手。可以调用工具读写文件、执行命令、搜索网络。"
+        "你是[咪咪]，dba桌面助手。可以调用工具读写文件、执行命令、搜索网络。"
         + "回答简洁；引用网络来源时使用 markdown 链接。";
 
     public double Temperature { get; set; } = 0.7;
@@ -108,6 +108,29 @@ public sealed class HostOptions
     /// 同样是活实例 —— 水位、窗口、遮蔽策略都能改完即生效。
     /// </summary>
     public Contracts.ContextOptions Context { get; set; } = new();
+
+    /// <summary>
+    /// checkpoint（写盘）配置（任务 1）。
+    ///
+    /// <para>
+    /// 与 <see cref="Context"/> 一样是<b>活实例</b>：界面改完即生效、不重启。
+    /// 注意 <see cref="Contracts.CheckpointOptions.TriggerRatio"/>（写盘，0.35）与
+    /// <see cref="Contracts.ContextOptions.CompressionTriggerRatio"/>（裁剪，0.8）是
+    /// <b>两个触发点</b>，勿绑成一个。
+    /// </para>
+    /// </summary>
+    public Contracts.CheckpointOptions Checkpoint { get; set; } = new();
+
+    /// <summary>
+    /// 审批档位（任务 5）：ask / plan / build / yolo。**活配置** —— 切档下一轮立即生效。
+    ///
+    /// <para>
+    /// 与 <see cref="ApprovalPolicy"/> 的关系：档位是「总有一档在生效」的产品面，
+    /// 切档会据此重建 <see cref="ApprovalPolicy"/>；<see cref="ApprovalPolicy"/> 保持可覆盖
+    /// （验收测试与插件可以塞自己的策略）。
+    /// </para>
+    /// </summary>
+    public ApprovalTier ApprovalTier { get; set; } = ApprovalTier.Ask;
 
     /// <summary>
     /// 注入自定义上下文摘要器（L5；验收测试用）。
@@ -169,6 +192,17 @@ public sealed class HostOptions
     public bool FailFastOnPluginError { get; set; }
 
     /// <summary>
+    /// 外部 MCP server 列表（子进程 + stdio JSON-RPC）。
+    ///
+    /// <para>
+    /// 每个 server 成 <c>mcp:&lt;id&gt;</c> 工具包，<b>默认延迟</b>（工具注册着但不进 schema）——
+    /// 多个 server 加起来往往几十上百个工具，全量塞进上下文纯属浪费；
+    /// 要用时由 <c>use_toolset</c> 把对应包拉进来。
+    /// </para>
+    /// </summary>
+    public List<Mcp.McpServerConfig> McpServers { get; set; } = [];
+
+    /// <summary>
     /// 复制一份、只换会话 id。
     /// 会话切换的实现方式：<b>重新装配一个宿主</b> —— 因为日志文件在装配时就被打开，
     /// 而宿主本就该是"一次装配对应一个会话"的不可变体。
@@ -193,6 +227,7 @@ public sealed class HostOptions
         SearchBackends = SearchBackends,
         SearxngBaseUrl = SearxngBaseUrl,
         ApprovalPolicy = ApprovalPolicy,
+        ApprovalTier = ApprovalTier,
         AllowOfflineDemo = AllowOfflineDemo,
         LlmOverride = LlmOverride,
         // 刻意共享同一个实例：转述设置是「用户偏好」，不该随会话走。
@@ -200,6 +235,8 @@ public sealed class HostOptions
         RephraserOverride = RephraserOverride,
         // 上下文治理同理：它是「这台机器的运行边界」，不是某个会话的私事。
         Context = Context,
+        // checkpoint（写盘）配置同样共享同一实例 —— 切会话不该分裂出第二份水位。
+        Checkpoint = Checkpoint,
         ContextSummarizerOverride = ContextSummarizerOverride,
         IndexEnabled = IndexEnabled,
         IndexOverride = IndexOverride,
@@ -210,5 +247,7 @@ public sealed class HostOptions
         MemoryStoreOverride = MemoryStoreOverride,
         EnabledPlugins = EnabledPlugins,
         FailFastOnPluginError = FailFastOnPluginError,
+        // MCP server 列表：与「装了哪些插件」同级，属这台机器的接入配置，不随会话漂移。
+        McpServers = McpServers,
     };
 }

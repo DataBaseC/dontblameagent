@@ -145,17 +145,46 @@ public sealed partial class WebUiServer
                 return;
             }
 
-            if (string.Equals(id, _host.SessionId, StringComparison.Ordinal))
-            {
-                request.Json(new { ok = false, error = "不能删除当前正在使用的会话" }, 400);
-                return;
-            }
+            var wasCurrent = string.Equals(id, _host.SessionId, StringComparison.Ordinal);
 
             var file = Path.Combine(_baseOptions.SessionsDir, id + ".jsonl");
             if (!File.Exists(file))
             {
                 request.Json(new { ok = false, error = "会话不存在" }, 404);
                 return;
+            }
+
+            // 删的是当前会话：必须**先切走再关**。
+            // 先 Close 再 Switch 会让 SwitchSessionAsync 碰到已 Dispose 的 TurnGate → 500。
+            string? switchedTo = null;
+            if (wasCurrent)
+            {
+                var next = ListSessions().Select(s => s.Id)
+                    .FirstOrDefault(x => !string.Equals(x, id, StringComparison.Ordinal));
+                if (string.IsNullOrEmpty(next))
+                {
+                    var now = DateTime.UtcNow;
+                    next = $"s-{now:yyyyMMdd-HHmmss}";
+                    var ordinal = 1;
+                    while (File.Exists(Path.Combine(_baseOptions.SessionsDir, next + ".jsonl")))
+                    {
+                        next = $"s-{now:yyyyMMdd-HHmmss}-{ordinal++}";
+                    }
+
+                    _host.OpenSession(next, relayToUi: true);
+                }
+
+                var (ok, err) = await SwitchSessionAsync(next).ConfigureAwait(false);
+                if (!ok)
+                {
+                    request.Json(new { ok = false, error = err ?? "切换到其它会话失败，未删除" }, 409);
+                    return;
+                }
+
+                switchedTo = next;
+                Broadcast(JsonSerializer.SerializeToElement(
+                    new { type = "session-switched", sessionId = next },
+                    WebUiJson.Options));
             }
 
             // ★ B3 修复：删的不只是文件 —— 若会话在本进程里已打开（runtime 在会话表里），
@@ -177,7 +206,7 @@ public sealed partial class WebUiServer
             File.Delete(file);
             await _host.InvalidateDerivedDataAsync(id).ConfigureAwait(false);
 
-            request.Json(new { ok = true });
+            request.Json(new { ok = true, deleted = id, switchedTo });
         }));
 
         // 历史（当前会话的原始事件流）

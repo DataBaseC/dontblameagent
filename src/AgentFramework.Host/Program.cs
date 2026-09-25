@@ -79,6 +79,8 @@ var options = new HostOptions
         ',',
         StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
         ?? config?.EnabledPlugins,
+    // 外部 MCP server（agent.json 的 mcpServers）：子进程 + stdio JSON-RPC，默认延迟。
+    McpServers = config?.McpServers ?? [],
     SessionId = Pick(GetArg("--session"), "AGENT_SESSION", config?.SessionId) ?? "default",
     // 模型管理要读写这份配置单（界面里改端点 / 换模型走它）
     ConfigPath = configPath,

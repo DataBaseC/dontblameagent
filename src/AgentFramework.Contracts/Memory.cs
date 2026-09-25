@@ -553,6 +553,57 @@ public static class AgentModes
             "预计超过 5 次工具调用的检索/阅读任务，先派子 Agent，只消化结论。",
     };
 
+    /// <summary>
+    /// 编程模式（任务 4）：提示词偏「读代码 → 改代码 → 跑测试」；默认开 exec + plan + search + 编程工具包。
+    /// 用 <see cref="ModeProfile.CustomId"/> 标识（字符串 id 钉会话），**不改 <see cref="AgentMode"/> 枚举**。
+    /// </summary>
+    public static ModeProfile Code { get; } = new()
+    {
+        CustomId = "code",
+        Name = "编程模式",
+        MemoryScopes = [MemoryScope.Project],
+        AllowedTools = null,
+        AllowedToolsets =
+        [
+            BuiltinToolsets.Core, BuiltinToolsets.Memory, BuiltinToolsets.Exec,
+            BuiltinToolsets.Plan, BuiltinToolsets.Search, BuiltinToolsets.DevKit,
+        ],
+        InjectTaskCard = true,
+        ContextGovernance = true,
+        MemoryIndexLimit = 8,
+        MemoryRecallLimit = 5,
+        PriorityStrategy = MemoryPriorityStrategy.Temperature,
+        SystemPromptSuffix =
+            "当前是编程模式：先读懂相关代码再改，改动尽量局部化，改完跑测试验证。\n" +
+            "预计超过 5 次工具调用的检索/阅读/比对任务：用 spawn_subagent 派子 Agent。\n" +
+            "多步骤任务先 update_plan 建计划，每完成一步就更新状态。",
+    };
+
+    /// <summary>
+    /// 写作模式（任务 4）：提示词偏「结构与改写」；**默认收起 exec**（跑命令不是写作的常态），
+    /// 对接 WritingKit 工具包。工具面与编程模式真实不同 —— 不是只换提示词。
+    /// </summary>
+    public static ModeProfile Write { get; } = new()
+    {
+        CustomId = "write",
+        Name = "写作模式",
+        MemoryScopes = [MemoryScope.Project],
+        AllowedTools = null,
+        AllowedToolsets =
+        [
+            BuiltinToolsets.Core, BuiltinToolsets.Memory,
+            BuiltinToolsets.Search, BuiltinToolsets.WritingKit,
+        ],
+        InjectTaskCard = true,
+        ContextGovernance = true,
+        MemoryIndexLimit = 8,
+        MemoryRecallLimit = 4,
+        PriorityStrategy = MemoryPriorityStrategy.Temperature,
+        SystemPromptSuffix =
+            "当前是写作模式：先定结构（提纲 / 骨架）再落笔；改写重在重新表达，而不是堆砌辞藻。\n" +
+            "长文分段推进，每段写完回看与上文的衔接。",
+    };
+
     public static ModeProfile For(AgentMode mode) => mode switch
     {
         AgentMode.Chat => Chat,
@@ -565,7 +616,10 @@ public static class AgentModes
     // 暴露什么工具、读哪层记忆、什么提示词基调。注册即插拔，无需改枚举。
     private static readonly Dictionary<string, ModeProfile> Custom = new(StringComparer.Ordinal);
 
-    /// <summary>注册一个自定义模式（插件装配期调用）。id 冲突时后注册者覆盖 —— 插件自担版本责任。</summary>
+    /// <summary>
+    /// 注册一个自定义模式（插件装配期调用）。
+    /// id 与内置档位冲突时**抛异常**（不静默覆盖内置）；插件之间重名则后注册者覆盖。
+    /// </summary>
     public static void Register(ModeProfile profile)
     {
         var id = profile.CustomId?.Trim();
@@ -574,10 +628,19 @@ public static class AgentModes
             throw new ArgumentException("自定义模式必须设置 CustomId", nameof(profile));
         }
 
+        if (IsBuiltinId(id))
+        {
+            throw new ArgumentException(
+                $"模式 id「{id}」与内置档位冲突（work / chat / design / code / write 不可覆盖）", nameof(profile));
+        }
+
         Custom[id] = profile;
     }
 
-    /// <summary>按字符串 id 解析模式档位：内置三档 → 插件注册表 → 工作模式兜底。</summary>
+    /// <summary>注销一个自定义模式（插件卸载 / 热重载时调用，避免串档与泄漏）。</summary>
+    public static bool Unregister(string id) => Custom.Remove(id.Trim());
+
+    /// <summary>按字符串 id 解析模式档位：内置（work/chat/design/code/write）→ 插件注册表 → 工作模式兜底。</summary>
     public static bool TryResolve(string? id, out ModeProfile profile)
     {
         profile = Work;
@@ -591,6 +654,8 @@ public static class AgentModes
             case "work": profile = Work; return true;
             case "chat": profile = Chat; return true;
             case "design": profile = Design; return true;
+            case "code": profile = Code; return true;
+            case "write": profile = Write; return true;
             default:
                 if (Custom.TryGetValue(id.Trim(), out var custom))
                 {
@@ -604,12 +669,16 @@ public static class AgentModes
     public static ModeProfile Resolve(string? id)
         => TryResolve(id, out var profile) ? profile : Work;
 
-    /// <summary>全部可用档位（内置三档 + 插件注册）—— 新建会话选择器与 /api/modes 的数据源。</summary>
+    /// <summary>内置档位 id（插件不得覆盖 —— 冲突时显式报错）。</summary>
+    public static bool IsBuiltinId(string id) =>
+        id is "work" or "chat" or "design" or "code" or "write";
+
+    /// <summary>全部可用档位（内置五档 + 插件注册）—— 新建会话选择器与 /api/modes 的数据源。</summary>
     public static IReadOnlyList<ModeProfile> Available
     {
         get
         {
-            var list = new List<ModeProfile> { Work, Design, Chat };
+            var list = new List<ModeProfile> { Work, Design, Chat, Code, Write };
             list.AddRange(Custom.Values);
             return list;
         }
@@ -622,4 +691,13 @@ public static class AgentModes
         AgentMode.Design => "design",
         _ => "work",
     };
+}
+
+/// <summary>
+/// 模式注册的撤销句柄（任务 4）：注销时从 <see cref="AgentModes"/> 移除。
+/// 由 <see cref="IPluginContext.RegisterMode"/> 返回，被内核作用域收集、卸载时逆序撤销。
+/// </summary>
+public sealed class ModeRegistration(string id) : IDisposable
+{
+    public void Dispose() => AgentModes.Unregister(id);
 }
