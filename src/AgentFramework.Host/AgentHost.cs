@@ -152,6 +152,9 @@ public sealed class AgentHost : IAsyncDisposable
             // 所以这里的「当前会话」必然就是这次审批所属的那个会话。
             : new ApprovalPromptInteraction(ApprovalPrompt, toolName => _session.AllowTool(toolName)));
 
+    /// <summary>把工具记进当前会话放行集（审批卡「本会话允许此工具」用）。</summary>
+    public void RememberTool(string toolName) => _session.AllowTool(toolName);
+
     // ── 状态 ───────────────────────────────────────────────
 
     public HostOptions Options { get; }

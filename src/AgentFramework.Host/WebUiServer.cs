@@ -21,6 +21,7 @@ public sealed partial class WebUiServer : IDisposable, IApprovalPrompt
     private readonly HostOptions _baseOptions;
     private readonly List<SseClient> _clients = [];
     private readonly Dictionary<string, TaskCompletionSource<ApprovalAnswer>> _pendingApprovals = [];
+    private readonly Dictionary<string, TaskCompletionSource<AskUserAnswer>> _pendingAsks = [];
     private readonly object _gate = new();
     private readonly SemaphoreSlim _switchGate = new(1, 1);
 
@@ -78,6 +79,9 @@ public sealed partial class WebUiServer : IDisposable, IApprovalPrompt
         host.TextDelta += OnTextDelta;
         host.ReasoningDelta += OnReasoningDelta;
         host.ApprovalPrompt = this;
+        // ask_user 要能真正问到人：显式注入完整交互（审批 + 提问），
+        // 否则会退回 ApprovalPromptInteraction.AskAsync 的「问不出去」。
+        host.UserInteraction = new WebUiInteraction(this);
     }
 
     private void Detach(AgentHost host)
@@ -239,6 +243,90 @@ public sealed partial class WebUiServer : IDisposable, IApprovalPrompt
     /// <summary>只问「允不允许」—— 老缝的语义，薄封装在 <see cref="AskDetailedAsync"/> 之上。</summary>
     public async ValueTask<bool> AskAsync(ToolPreExecuteEvent request, CancellationToken ct)
         => (await AskDetailedAsync(request, ct).ConfigureAwait(false)).Allowed;
+
+    /// <summary>
+    /// Web 交互缝：审批 + 向用户提问（<c>ask_user</c>）。
+    /// 显式注入它，而不是只靠 <see cref="ApprovalPrompt"/> 兜底 ——
+    /// 兜底适配器的 AskAsync 永远「问不出去」。
+    /// </summary>
+    private sealed class WebUiInteraction(WebUiServer server) : IUserInteraction
+    {
+        public bool CanInteract => true;
+
+        public async ValueTask<bool> ConfirmAsync(ToolPreExecuteEvent toolCall, CancellationToken ct = default)
+        {
+            var answer = await server.AskDetailedAsync(toolCall, ct).ConfigureAwait(false);
+            if (answer is { Allowed: true, Remember: true })
+            {
+                server._host.RememberTool(toolCall.ToolName);
+            }
+            return answer.Allowed;
+        }
+
+        public ValueTask<AskUserAnswer> AskAsync(AskUserRequest request, CancellationToken ct = default)
+            => server.AskUserAsync(request, ct);
+
+        public ValueTask NotifyAsync(string text, CancellationToken ct = default)
+        {
+            server.Broadcast(JsonSerializer.SerializeToElement(
+                new { type = "notify", text }, WebUiJson.Options));
+            return ValueTask.CompletedTask;
+        }
+    }
+
+    /// <summary>
+    /// 向用户提问：广播 ask-user 帧 → 等浏览器提交答案。
+    /// 120 秒无人答就如实回「没答」，绝不替用户编一个答案。
+    /// </summary>
+    private async ValueTask<AskUserAnswer> AskUserAsync(AskUserRequest request, CancellationToken ct)
+    {
+        var id = "ask-" + Guid.NewGuid().ToString("N")[..8];
+        var completion = new TaskCompletionSource<AskUserAnswer>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        lock (_gate)
+        {
+            _pendingAsks[id] = completion;
+        }
+
+        Broadcast(JsonSerializer.SerializeToElement(new
+        {
+            type = "ask-user",
+            id,
+            question = request.Question,
+            options = request.Options,
+            context = request.Context,
+        }, WebUiJson.Options));
+
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        timeout.CancelAfter(TimeSpan.FromSeconds(120));
+
+        try
+        {
+            await using var registration = timeout.Token
+                .Register(() =>
+                {
+                    if (ct.IsCancellationRequested)
+                    {
+                        completion.TrySetCanceled(ct);
+                    }
+                    else
+                    {
+                        // 超时 = 用户没答。如实说没答，不假装回答过。
+                        completion.TrySetResult(AskUserAnswer.None);
+                    }
+                })
+                .ConfigureAwait(false);
+
+            return await completion.Task.ConfigureAwait(false);
+        }
+        finally
+        {
+            lock (_gate)
+            {
+                _pendingAsks.Remove(id);
+            }
+        }
+    }
 
     /// <summary>
     /// 每个 SSE 客户端一个写循环：队列 → 网络。

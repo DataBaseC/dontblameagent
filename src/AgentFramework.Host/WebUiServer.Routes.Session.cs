@@ -271,19 +271,21 @@ public sealed partial class WebUiServer
             // 项目目录（可选）：多项目记忆隔离的锚点。填了就建目录；空 = 宿主工作区。
             if (!string.IsNullOrWhiteSpace(projectDir))
             {
+                // 先判绝对路径再 GetFullPath —— 顺序反了的话相对路径会被拼成绝对路径，
+                // 下面那条「必须是绝对路径」永远拦不住。
+                if (!Path.IsPathRooted(projectDir))
+                {
+                    request.Json(new { ok = false, error = "工作文件夹必须是绝对路径" }, 400);
+                    return;
+                }
+
                 try
                 {
                     projectDir = Path.GetFullPath(projectDir);
                 }
                 catch (Exception ex)
                 {
-                    request.Json(new { ok = false, error = $"项目目录非法：{ex.Message}" }, 400);
-                    return;
-                }
-
-                if (!Path.IsPathRooted(projectDir))
-                {
-                    request.Json(new { ok = false, error = "项目目录必须是绝对路径" }, 400);
+                    request.Json(new { ok = false, error = $"工作文件夹非法：{ex.Message}" }, 400);
                     return;
                 }
 

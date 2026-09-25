@@ -159,6 +159,41 @@ public sealed partial class WebUiServer
             request.Json(new { ok = true, allow, remember });
         }));
 
+        // ask_user 回执：用户在提问卡片上填了答案（或点了选项）。
+        Map(new DelegateRoute("POST", "/api/ask-user", async (request, ct) =>
+        {
+            var body = await request.ReadBodyAsync().ConfigureAwait(false);
+            if (body is null)
+            {
+                request.Json(new { ok = false, error = "请求体不是合法 JSON" }, 400);
+                return;
+            }
+
+            var id = ReadString(body.Value, "id") ?? string.Empty;
+            var text = ReadString(body.Value, "text");
+
+            TaskCompletionSource<AskUserAnswer>? completion = null;
+            lock (_gate)
+            {
+                if (!string.IsNullOrEmpty(id))
+                {
+                    _pendingAsks.Remove(id, out completion);
+                }
+            }
+
+            if (completion is null)
+            {
+                request.Json(new { ok = false, error = "提问已超时或不存在" }, 404);
+                return;
+            }
+
+            // 空文本也算「答了」——用户可能只是想跳过；工具侧会如实反映。
+            completion.TrySetResult(string.IsNullOrWhiteSpace(text)
+                ? AskUserAnswer.None
+                : AskUserAnswer.Of(text.Trim()));
+            request.Json(new { ok = true });
+        }));
+
         // 切工作模式。模式是**全局**状态，切了要广播给所有标签页。
         Map(new DelegateRoute("POST", "/api/mode", async (request, ct) =>
         {

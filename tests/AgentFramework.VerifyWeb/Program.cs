@@ -692,6 +692,39 @@ using (var doc = JsonDocument.Parse(writeStatus))
     Check("写作模式仍可用核心读写工具", tools.Contains("write_file") && tools.Contains("read_file"));
 }
 
+// 任务：新建会话可自选工作文件夹（写边界 + 项目记忆锚点）
+{
+    var workDir = Path.Combine(Path.GetTempPath(), "af-verify-workdir-" + Guid.NewGuid().ToString("N")[..8]);
+    try
+    {
+        var withDir = await http.PostAsync(server.Url + "api/sessions/new",
+            new StringContent(
+                JsonSerializer.Serialize(new { mode = "work", projectDir = workDir }),
+                Encoding.UTF8, "application/json"));
+        var withDirBody = await withDir.Content.ReadAsStringAsync();
+        Check("★ 新建会话可指定工作文件夹",
+            (int)withDir.StatusCode == 200 && withDirBody.Contains("projectDir"),
+            withDirBody.Length > 80 ? withDirBody[..80] : withDirBody);
+
+        // 回读会话列表：projectDir 应出现在 meta 上
+        var listJson = await http.GetStringAsync(server.Url + "api/sessions");
+        Check("★ 会话列表带上工作文件夹",
+            listJson.Contains("projectDir") && listJson.Contains(Path.GetFileName(workDir)),
+            listJson.Contains("projectDir") ? "ok" : "missing projectDir");
+
+        Check("★ 指定的工作文件夹已被创建", Directory.Exists(workDir), workDir);
+
+        // 非法路径拒掉
+        var badDir = await http.PostAsync(server.Url + "api/sessions/new",
+            new StringContent("""{"mode":"work","projectDir":"relative\\nope"}""", Encoding.UTF8, "application/json"));
+        Check("★ 非绝对路径的工作文件夹被 400 拒绝", (int)badDir.StatusCode == 400, $"{(int)badDir.StatusCode}");
+    }
+    finally
+    {
+        try { if (Directory.Exists(workDir)) Directory.Delete(workDir, recursive: true); } catch { }
+    }
+}
+
 // 任务 4：in-session 切换（无需重启）
 var switchMode = await http.PostAsync(server.Url + "api/mode",
     new StringContent("""{"mode":"code"}""", Encoding.UTF8, "application/json"));

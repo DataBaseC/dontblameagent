@@ -666,20 +666,21 @@ internal static class WebUiPage
         </div>
       </div>
 
-      <!-- 新建会话：选择工作模式（创建后钉住） -->
+      <!-- 新建会话：工作文件夹 + 工作模式（创建后钉住） -->
       <div id="mode-pick" class="modal-mask" hidden>
         <div class="modal">
-          <div class="modal-title">新会话 · 选择工作模式</div>
-          <div class="modal-sub">模式决定暴露哪些工具与记忆层级 —— 创建后固定，换模式就再开一个新会话</div>
-          <div id="mode-cards"></div>
-          <div class="row" style="margin-top:6px; margin-bottom:0">
-            <span style="font-size:12px; color:var(--dim); flex:0 0 auto">项目目录</span>
-            <input id="np-project-dir" placeholder="留空 = 宿主默认工作区；点右侧「浏览…」挑一个文件夹">
+          <div class="modal-title">新会话 · 选工作文件夹</div>
+          <div class="modal-sub">先定这个会话的工作文件夹（可留空用默认），再点模式创建</div>
+          <div class="row" style="margin:8px 0 4px">
+            <span style="font-size:12px; color:var(--dim); flex:0 0 auto">工作文件夹</span>
+            <input id="np-project-dir" placeholder="留空 = 宿主默认工作区；点「浏览…」挑一个文件夹">
             <button id="np-browse" class="ghost small" type="button">浏览…</button>
           </div>
-          <div class="modal-sub" style="margin:6px 0 0">
-            这个目录只圈「写」：会话的文件写入与项目记忆锚定在这里；「读」不受限，可读硬盘任意目录。
+          <div class="modal-sub" style="margin:4px 0 8px">
+            这个文件夹圈住本会话的「写」与项目记忆；「读」不受限，可读硬盘任意目录。创建后钉住，换文件夹就再开一个新会话。
           </div>
+          <div class="modal-sub" style="margin:0 0 4px">选择工作模式</div>
+          <div id="mode-cards"></div>
           <div class="modal-acts"><button id="mode-cancel" class="ghost small">取消</button></div>
         </div>
       </div>
@@ -991,6 +992,88 @@ function addApprovalCard(a) {
   card.appendChild(acts);
   wrap.appendChild(card);
   toBottom();
+}
+
+// ask_user 提问卡片：模型在等你拍板。外层帧 type=ask-user（与 approval 同层）。
+function addAskUserCard(a) {
+  const card = document.createElement('div');
+  card.className = 'approval';
+
+  const title = document.createElement('div');
+  title.className = 'title';
+  title.textContent = '💬 模型在问你';
+
+  const detail = document.createElement('div');
+  detail.className = 'detail';
+  detail.style.whiteSpace = 'pre-wrap';
+  detail.style.fontFamily = 'inherit';
+  detail.style.fontSize = '13px';
+  detail.textContent = a.question || '';
+  if (a.context) detail.textContent += '\n\n（' + a.context + '）';
+
+  const acts = document.createElement('div');
+  acts.className = 'acts';
+  acts.style.flexWrap = 'wrap';
+
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.placeholder = '输入回答…（或点下方选项）';
+  input.style.cssText = 'flex:1;min-width:160px;background:#1c160c;border:1px solid #6b4a1f;'
+    + 'border-radius:6px;color:var(--fg);padding:6px 10px;font-size:12px;';
+  const send = document.createElement('button');
+  send.textContent = '发送';
+
+  const state = document.createElement('span');
+  state.className = 'state';
+
+  async function answer(text) {
+    input.disabled = true;
+    send.disabled = true;
+    acts.querySelectorAll('button.opt').forEach(b => { b.disabled = true; });
+    state.textContent = '已提交…';
+    try {
+      const r = await fetch('/api/ask-user', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: a.id, text: text || '' })
+      });
+      const j = await r.json();
+      if (!j.ok) state.textContent = '✗ ' + (j.error || '提交失败');
+      else {
+        state.textContent = text ? '已回答：' + text : '已跳过';
+        card.classList.add('done');
+      }
+    } catch (err) {
+      state.textContent = '提交失败：' + err.message;
+      input.disabled = false;
+      send.disabled = false;
+    }
+  }
+
+  send.onclick = () => answer(input.value);
+  input.addEventListener('keydown', ev => {
+    if (ev.key === 'Enter') { ev.preventDefault(); answer(input.value); }
+  });
+
+  // 选项是快捷按钮，不挡自由作答（契约：给了选项仍可自答）。
+  const opts = Array.isArray(a.options) ? a.options : [];
+  acts.appendChild(input);
+  acts.appendChild(send);
+  for (const o of opts) {
+    const b = document.createElement('button');
+    b.className = 'opt';
+    b.textContent = o;
+    b.onclick = () => { input.value = o; answer(o); };
+    acts.appendChild(b);
+  }
+  acts.appendChild(state);
+
+  card.appendChild(title);
+  card.appendChild(detail);
+  card.appendChild(acts);
+  wrap.appendChild(card);
+  toBottom();
+  input.focus();
 }
 
 function renderEvent(e) {
@@ -1531,7 +1614,8 @@ async function createSession(mode) {
       hint.textContent = '创建失败：' + (data.error || response.status);
       return;
     }
-    hint.textContent = '新会话已就绪（模式：' + data.mode.name + '）';
+    hint.textContent = '新会话已就绪（模式：' + data.mode.name
+      + (data.projectDir ? ' · 工作文件夹：' + data.projectDir : ' · 默认工作区') + '）';
     await loadSessions();
     await switchSession(data.sessionId);
   } catch (err) {
@@ -2731,6 +2815,21 @@ stream.onmessage = (message) => {
       addApprovalCard(data);
       setPhase('等待你确认：' + (data.toolName || '工具') + ' …');
     }
+  }
+  else if (data.type === 'ask-user') {
+    // 与审批同层的外层帧：模型在问用户，必须弹出可答卡片。
+    if (isCurrent) {
+      sealReasoning();
+      addAskUserCard(data);
+      setPhase('等待你的回答…');
+    }
+  }
+  else if (data.type === 'notify') {
+    const el = document.createElement('div');
+    el.className = 'sys';
+    el.textContent = data.text || '';
+    wrap.appendChild(el);
+    toBottom();
   }
   else if (data.type === 'sys') {
     // 温和的系统消息（如“回合已停止”）—— 也可能是一轮的最后一条，一并收口思考块

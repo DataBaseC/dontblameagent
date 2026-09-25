@@ -217,6 +217,16 @@ public sealed class AgentRunner
             var assistantText = text.ToString();
             lastAssistantText = assistantText;
 
+            // 工具后偶发：端点把最终答复只放进 reasoning_content（content 为空）。
+            // 那是给用户看的答复，必须进对话框 —— 只躺在思考块里等于「答了但看不见」。
+            if (assistantText.Length == 0
+                && reasoning.Length > 0
+                && (calls is null || calls.Count == 0))
+            {
+                assistantText = reasoning.ToString();
+                lastAssistantText = assistantText;
+            }
+
             history.Add(new LlmMessage
             {
                 Role = LlmRole.Assistant,
