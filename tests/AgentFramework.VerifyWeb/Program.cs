@@ -70,6 +70,13 @@ Check("页面用 SSE 接收流式输出", html.Contains("EventSource('/api/strea
 Check("页面能渲染工具卡片", html.Contains("tool-call-requested") && html.Contains("tool-call-completed"));
 Check("页面带审批卡片", html.Contains("需要你确认") && html.Contains("/api/approve"));
 Check("页面带会话侧边栏", html.Contains("session-list") && html.Contains("/api/sessions"));
+Check("页面 favicon 指向内嵌图标", html.Contains("/icon.png") && html.Contains("image/png"));
+
+var iconBytes = await http.GetByteArrayAsync(server.Url + "icon.png");
+Check("★ /icon.png 返回 PNG 图标",
+    iconBytes.Length > 100
+    && iconBytes[0] == 0x89 && iconBytes[1] == (byte)'P' && iconBytes[2] == (byte)'N' && iconBytes[3] == (byte)'G',
+    $"{iconBytes.Length} 字节");
 
 var statusJson = await http.GetStringAsync(server.Url + "api/status");
 using (var doc = JsonDocument.Parse(statusJson))

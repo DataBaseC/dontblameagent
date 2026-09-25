@@ -19,6 +19,8 @@
     <EnableWindowsTargeting>true</EnableWindowsTargeting>
     <AssemblyTitle>Agent 桌面客户端</AssemblyTitle>
     <RootNamespace>AgentFramework.Desktop</RootNamespace>
+    <!-- 任务栏/窗口/快捷方式图标（WinForms 窗体默认跟随 exe 图标） -->
+    <ApplicationIcon>..\..\assets\app.ico</ApplicationIcon>
   </PropertyGroup>
 
   <ItemGroup>

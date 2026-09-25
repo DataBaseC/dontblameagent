@@ -55,6 +55,10 @@ public sealed class WebUiRequest(HttpListenerContext http, AgentHost host, strin
     /// <summary>回纯文本。</summary>
     public void Text(string content, string contentType = "text/plain; charset=utf-8", int statusCode = 200)
         => WebUiServer.WriteText(Http, contentType, content, statusCode);
+
+    /// <summary>回二进制（favicon / 图片等）。字节原样写出，不做编码转换。</summary>
+    public void Bytes(byte[] content, string contentType, int statusCode = 200)
+        => WebUiServer.WriteBytes(Http, contentType, content, statusCode);
 }
 
 /// <summary>

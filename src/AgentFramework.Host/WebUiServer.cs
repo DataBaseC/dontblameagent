@@ -945,6 +945,12 @@ public sealed partial class WebUiServer : IDisposable, IApprovalPrompt
     internal static void WriteText(HttpListenerContext context, string contentType, string content, int statusCode = 200)
     {
         var bytes = Encoding.UTF8.GetBytes(content);
+        WriteBytes(context, contentType, bytes, statusCode);
+    }
+
+    /// <summary>写二进制响应体（favicon / 图片）。</summary>
+    internal static void WriteBytes(HttpListenerContext context, string contentType, byte[] bytes, int statusCode = 200)
+    {
         context.Response.StatusCode = statusCode;
         context.Response.ContentType = contentType;
         context.Response.ContentLength64 = bytes.Length;

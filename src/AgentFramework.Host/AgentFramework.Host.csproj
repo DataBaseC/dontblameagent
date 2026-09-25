@@ -4,7 +4,13 @@
     <OutputType>Exe</OutputType>
     <RootNamespace>AgentFramework.Host</RootNamespace>
     <AssemblyName>AgentFramework.Host</AssemblyName>
+    <ApplicationIcon>..\..\assets\app.ico</ApplicationIcon>
   </PropertyGroup>
+
+  <ItemGroup>
+    <!-- 浏览器标签页 favicon：由 /icon.png 端点吐出（见 WebUiServer.Routes.Session.cs） -->
+    <EmbeddedResource Include="..\..\assets\icon.png" Link="assets\icon.png" LogicalName="AgentFramework.Host.assets.icon.png" />
+  </ItemGroup>
 
   <ItemGroup>
     <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="9.0.0" />

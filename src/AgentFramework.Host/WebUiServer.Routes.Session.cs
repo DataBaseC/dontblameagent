@@ -35,6 +35,23 @@ public sealed partial class WebUiServer
             return ValueTask.CompletedTask;
         }));
 
+        // 浏览器标签页 / 收藏夹图标。从程序集内嵌的 assets/icon.png 吐出，
+        // 不依赖工作目录里有没有文件 —— green 包、单文件发布都能用。
+        Map(new DelegateRoute("GET", "/icon.png", (request, _) =>
+        {
+            var data = LoadEmbeddedIcon();
+            if (data is null)
+            {
+                request.Text("icon missing", "text/plain; charset=utf-8", 404);
+            }
+            else
+            {
+                request.Bytes(data, "image/png");
+            }
+
+            return ValueTask.CompletedTask;
+        }));
+
         // 状态总览：UI 每隔几秒来拉一次，拼的是宿主各面的当前状态
         Map(new DelegateRoute("GET", "/api/status", (request, _) =>
         {
@@ -467,6 +484,36 @@ public sealed partial class WebUiServer
             request.RawJson(BuildDebugJson());
             return ValueTask.CompletedTask;
         }));
+    }
+
+    /// <summary>读内嵌的 assets/icon.png。读一次缓存；缺失返回 null（端点回 404，不抛）。</summary>
+    private static byte[]? _embeddedIcon;
+
+    private static byte[]? LoadEmbeddedIcon()
+    {
+        if (_embeddedIcon is not null)
+        {
+            return _embeddedIcon;
+        }
+
+        try
+        {
+            using var stream = typeof(WebUiServer).Assembly
+                .GetManifestResourceStream("AgentFramework.Host.assets.icon.png");
+            if (stream is null)
+            {
+                return null;
+            }
+
+            using var ms = new MemoryStream();
+            stream.CopyTo(ms);
+            _embeddedIcon = ms.ToArray();
+            return _embeddedIcon;
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     /// <summary>debug 数据快照（HTML 窗与 JSON 端点共用，保证两处数字永远一致）。</summary>

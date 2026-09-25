@@ -326,6 +326,23 @@ public sealed class LauncherServer
                 return;
             }
 
+            // 标签页 favicon：与本体同一张内嵌图，不依赖工作目录。
+            case "/icon.png":
+            {
+                var icon = LoadEmbeddedIcon();
+                if (icon is null)
+                {
+                    context.Response.StatusCode = 404;
+                    context.Response.Close();
+                }
+                else
+                {
+                    WriteBytes(context, "image/png", icon);
+                }
+
+                return;
+            }
+
             default:
                 WriteHtml(context, RenderPage());
                 return;
@@ -409,7 +426,7 @@ public sealed class LauncherServer
             <meta charset="utf-8">
             <meta name="viewport" content="width=device-width, initial-scale=1">
             <title>Agent 启动器 · 插件管理</title>
-            <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='88'>🦞</text></svg>">
+            <link rel="icon" type="image/png" href="/icon.png">
             <style>
               :root { color-scheme: dark;
                       --bg: #14161a; --card: #1c1f26; --border: #2a2f39; --line: #242832;
@@ -870,6 +887,45 @@ public sealed class LauncherServer
         context.Response.ContentLength64 = bytes.Length;
         context.Response.OutputStream.Write(bytes);
         context.Response.Close();
+    }
+
+    private static void WriteBytes(HttpListenerContext context, string contentType, byte[] bytes)
+    {
+        context.Response.StatusCode = 200;
+        context.Response.ContentType = contentType;
+        context.Response.ContentLength64 = bytes.Length;
+        context.Response.OutputStream.Write(bytes);
+        context.Response.Close();
+    }
+
+    /// <summary>读内嵌的 assets/icon.png。读一次缓存；缺失返回 null。</summary>
+    private static byte[]? _embeddedIcon;
+
+    private static byte[]? LoadEmbeddedIcon()
+    {
+        if (_embeddedIcon is not null)
+        {
+            return _embeddedIcon;
+        }
+
+        try
+        {
+            using var stream = typeof(LauncherServer).Assembly
+                .GetManifestResourceStream("AgentFramework.Launcher.assets.icon.png");
+            if (stream is null)
+            {
+                return null;
+            }
+
+            using var ms = new MemoryStream();
+            stream.CopyTo(ms);
+            _embeddedIcon = ms.ToArray();
+            return _embeddedIcon;
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     private static void TryRedirect(HttpListenerContext context, string location)

@@ -66,7 +66,7 @@ internal static class WebUiPage
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Agent 对话</title>
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='88'>🦞</text></svg>">
+<link rel="icon" type="image/png" href="/icon.png">
 <style>
   /* ── 设计令牌 ─────────────────────────────────────────────
      一套变量管全局：改主题色/明暗只动这里。颜色梯度按表面高度走。 */
