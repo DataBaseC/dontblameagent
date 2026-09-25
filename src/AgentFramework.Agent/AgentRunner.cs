@@ -130,6 +130,7 @@ public sealed class AgentRunner
             IReadOnlyList<ToolCallRequest>? calls = null;
             LlmUsage? usage = null;
             string? servedModel = null;
+            string? stopReason = null;
 
             var startedAt = Stopwatch.GetTimestamp();
             long? firstTokenMs = null;
@@ -141,14 +142,16 @@ public sealed class AgentRunner
                     case LlmStreamChunk.TextDelta delta:
                         firstTokenMs ??= ElapsedMs(startedAt);
                         text.Append(delta.Text);
-                        _options.OnTextDelta?.Invoke(delta.Text);
+                        // v3.6 审查修复：UI 增量回调隔离 —— 原先内联直调，
+                        // 回调抛异常会中断整轮，而此刻 assistant 文本尚未落账 → 该轮输出丢失。
+                        try { _options.OnTextDelta?.Invoke(delta.Text); } catch { /* UI 回调异常不拖垮回合 */ }
                         break;
 
                     // 思考与正文是两条通道：思考不喂回模型，但可以实时给用户看
                     case LlmStreamChunk.ReasoningDelta reasoningDelta:
                         firstTokenMs ??= ElapsedMs(startedAt);
                         reasoning.Append(reasoningDelta.Text);
-                        _options.OnReasoningDelta?.Invoke(reasoningDelta.Text);
+                        try { _options.OnReasoningDelta?.Invoke(reasoningDelta.Text); } catch { /* 同上 */ }
                         break;
 
                     case LlmStreamChunk.UsageReady usageReady:
@@ -158,6 +161,12 @@ public sealed class AgentRunner
 
                     case LlmStreamChunk.ToolCallsReady ready:
                         calls = ready.Calls;
+                        break;
+
+                    case LlmStreamChunk.Completed completed:
+                        // v3.6 审查修复：消费 finish_reason —— 原先这一支被丢弃，
+                        // 于是被 max_tokens 截断（length）/ 内容过滤（content_filter）也被当作成功。
+                        stopReason = completed.FinishReason;
                         break;
                 }
             }
@@ -222,16 +231,22 @@ public sealed class AgentRunner
                     .ConfigureAwait(false);
             }
 
-            // 没有工具调用 → 本轮任务结束
+            // 没有工具调用 → 本轮任务结束。
+            // v3.6 审查修复：如实传递 finish_reason —— 被 max_tokens 截断（length）或内容过滤
+            // （content_filter）不该再报「成功」，否则用户看到的是「半截答案 + 一切正常」。
             if (calls is null || calls.Count == 0)
             {
-                return new AgentRunResult(true, assistantText, step, "stop");
+                var reason = string.IsNullOrEmpty(stopReason) ? "stop" : stopReason;
+                var incomplete = reason is "length" or "content_filter";
+                return new AgentRunResult(!incomplete, assistantText, step, reason);
             }
 
             // 有工具调用 → 逐个走「记录意图 → 审批 → 执行 → 记录结果」
             foreach (var call in calls)
             {
-                var arguments = ParseArguments(call.ArgumentsJson);
+                // v3.6 审查修复：参数解析失败要**显式失败**，而不是静默当空参执行工具 ——
+                // 前者模型能看到错误并重试；后者会用空/错参数跑一个带副作用的工具。
+                var arguments = ParseArguments(call.ArgumentsJson, out var argumentError);
 
                 await _sink.EmitAsync(new ToolCallRequestedEvent
                 {
@@ -248,11 +263,16 @@ public sealed class AgentRunner
                 };
 
                 ToolResult result;
+                var completedEmitted = false;
                 try
                 {
                     if (string.IsNullOrWhiteSpace(call.ToolName))
                     {
                         result = ToolResult.Fail("工具名为空：模型未给出有效的 function.name，无法执行");
+                    }
+                    else if (argumentError is not null)
+                    {
+                        result = ToolResult.Fail(argumentError);
                     }
                     else
                     {
@@ -292,14 +312,8 @@ public sealed class AgentRunner
                 {
                     // 审批等待被停止键打断：仍要落 completed，否则悬空 tool_call 会弄坏会话
                     result = ToolResult.Fail("已取消：回合被停止");
-                    await _sink.EmitAsync(new ToolCallCompletedEvent
-                    {
-                        SessionId = _options.SessionId,
-                        CallId = call.CallId,
-                        Success = false,
-                        Output = string.Empty,
-                        Error = result.Error,
-                    }, CancellationToken.None).ConfigureAwait(false);
+                    await EmitToolCompletedAsync(call, result, CancellationToken.None).ConfigureAwait(false);
+                    completedEmitted = true;
                     history.Add(new LlmMessage
                     {
                         Role = LlmRole.Tool,
@@ -308,15 +322,17 @@ public sealed class AgentRunner
                     });
                     throw;
                 }
-
-                await _sink.EmitAsync(new ToolCallCompletedEvent
+                catch (Exception ex)
                 {
-                    SessionId = _options.SessionId,
-                    CallId = call.CallId,
-                    Success = result.Success,
-                    Output = result.Output,
-                    Error = result.Error,
-                }, ct).ConfigureAwait(false);
+                    // 审批/订阅者抛出的非取消异常：也必须落 completed。
+                    // 否则 UI 工具卡永远停在「执行中…」，下一轮还会因悬空 tool_call 被端点 400。
+                    result = ToolResult.Fail($"工具流程异常：{ex.GetType().Name}: {ex.Message}");
+                }
+
+                if (!completedEmitted)
+                {
+                    await EmitToolCompletedAsync(call, result, ct).ConfigureAwait(false);
+                }
 
                 history.Add(new LlmMessage
                 {
@@ -335,8 +351,28 @@ public sealed class AgentRunner
     private static long ElapsedMs(long startedAt)
         => (long)((Stopwatch.GetTimestamp() - startedAt) * 1000.0 / Stopwatch.Frequency);
 
-    private static Dictionary<string, string?> ParseArguments(string json)
+    /// <summary>
+    /// 落一条工具完成事件。「请求 → 完成」必须成对，缺 completed 会让
+    /// UI 卡在「执行中…」、下一轮因悬空 tool_call 被端点 400。
+    /// </summary>
+    private async ValueTask EmitToolCompletedAsync(ToolCallRequest call, ToolResult result, CancellationToken ct)
+        => await _sink.EmitAsync(new ToolCallCompletedEvent
+        {
+            SessionId = _options.SessionId,
+            CallId = call.CallId,
+            Success = result.Success,
+            Output = result.Output,
+            Error = result.Error,
+        }, ct).ConfigureAwait(false);
+
+    /// <summary>
+    /// 把模型给的参数 JSON 解析成字典。<paramref name="error"/> 非空表示解析失败 ——
+    /// 调用方据此**显式失败**，而不再静默当空参执行工具（v3.6 审查修复）。
+    /// 空串合法（视为无参数、error 为 null）；非对象或非法 JSON 视为失败。
+    /// </summary>
+    private static Dictionary<string, string?> ParseArguments(string json, out string? error)
     {
+        error = null;
         var result = new Dictionary<string, string?>();
         if (string.IsNullOrWhiteSpace(json))
         {
@@ -348,6 +384,7 @@ public sealed class AgentRunner
             using var doc = JsonDocument.Parse(json);
             if (doc.RootElement.ValueKind != JsonValueKind.Object)
             {
+                error = "工具参数不是 JSON 对象，已拒绝执行（避免用错误参数调用工具）";
                 return result;
             }
 
@@ -360,7 +397,7 @@ public sealed class AgentRunner
         }
         catch (JsonException)
         {
-            // 模型偶尔会给出不合法 JSON —— 当作空参数处理，让工具自己去报错
+            error = "工具参数不是合法 JSON，已拒绝执行（避免用错误参数调用工具）";
         }
 
         return result;

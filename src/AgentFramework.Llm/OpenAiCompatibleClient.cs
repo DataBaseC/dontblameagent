@@ -102,8 +102,12 @@ public sealed class OpenAiCompatibleClient : ILlmClient, IDisposable
         };
         ApplyAuth(httpRequest);
 
+        // v3.6 审查修复：连接 / 等待响应头阶段也要有超时 ——
+        // 总时限已放开（见构造函数），空闲超时只覆盖「收到响应头之后」的帧间；
+        // 端点接受连接却迟迟不回响应头时，原先会永久挂起，整个回合卡死。
         using var response = await _http
             .SendAsync(httpRequest, HttpCompletionOption.ResponseHeadersRead, ct)
+            .WaitAsync(_options.Timeout, ct)
             .ConfigureAwait(false);
 
         if (!response.IsSuccessStatusCode)
@@ -120,6 +124,12 @@ public sealed class OpenAiCompatibleClient : ILlmClient, IDisposable
         var finishReason = "stop";
         LlmUsage? usage = null;
         string? servedModel = null;
+
+        // v3.6 审查修复：显式记录「流是否被正常终止」。
+        // 端点中途断连、或反代返回 200 + HTML 错误页时，若不校验会把半截结果当成功 ——
+        // 表现就是「界面显示模型什么都没说，却算这一轮成功」，甚至拿残缺 tool_calls 去执行。
+        var sawDone = false;
+        var sawFinishReason = false;
 
         // 坏帧计数：本地端点偶发残帧不该炸掉整轮，但连续大量坏帧必须断流（否则把问题藏起来）
         var badFrames = 0;
@@ -163,6 +173,7 @@ public sealed class OpenAiCompatibleClient : ILlmClient, IDisposable
             var data = line[5..].Trim();
             if (data == "[DONE]")
             {
+                sawDone = true;
                 break;
             }
 
@@ -208,16 +219,28 @@ public sealed class OpenAiCompatibleClient : ILlmClient, IDisposable
                     usage = ParseUsage(usageNode);
                 }
 
-                if (!root.TryGetProperty("choices", out var choices) || choices.GetArrayLength() == 0)
+                // v3.6 审查修复：先判类型再取长度 —— choices 为 null / 非数组时
+                // GetArrayLength() 抛 InvalidOperationException，而它不在坏帧的 catch 范围内，
+                // 一枚坏帧就能炸穿整条流，抵消掉 badFrames 容错的全部意义。
+                if (!root.TryGetProperty("choices", out var choices)
+                    || choices.ValueKind != JsonValueKind.Array
+                    || choices.GetArrayLength() == 0)
                 {
                     continue;
                 }
 
                 var choice = choices[0];
 
-                if (choice.TryGetProperty("finish_reason", out var fr) && fr.ValueKind == JsonValueKind.String)
+                if (choice.ValueKind == JsonValueKind.Object
+                    && choice.TryGetProperty("finish_reason", out var fr)
+                    && fr.ValueKind == JsonValueKind.String)
                 {
-                    finishReason = fr.GetString() ?? "stop";
+                    var reason = fr.GetString();
+                    if (!string.IsNullOrEmpty(reason))
+                    {
+                        finishReason = reason;
+                        sawFinishReason = true;
+                    }
                 }
 
                 if (!choice.TryGetProperty("delta", out var delta))
@@ -285,7 +308,18 @@ public sealed class OpenAiCompatibleClient : ILlmClient, IDisposable
             }
         }
 
-        if (toolCalls.Count > 0)
+        // v3.6 审查修复：流必须「正常终止」才可交付 ——
+        // 读到 [DONE] 或收到过合法的 finish_reason 都算正常；
+        // 两者都没有（中途断连、反代返回 200 + HTML 错误页）→ 抛错，绝不把半截结果当成功。
+        if (!sawDone && !sawFinishReason)
+        {
+            throw new InvalidOperationException(
+                "LLM 流意外中断：既未收到 [DONE]，也未收到 finish_reason（端点断连或返回了非 SSE 正文）");
+        }
+
+        // v3.6 审查修复：被 max_tokens 截断（length）时，工具参数很可能不完整 ——
+        // 宁可不下发，也不用残缺参数执行带副作用的工具（原因由 Completed 带给上层呈现）。
+        if (toolCalls.Count > 0 && !string.Equals(finishReason, "length", StringComparison.Ordinal))
         {
             // 纯数字键按数值序（协议里 index 本就是序号），非数字键排在后面按字典序
             var calls = toolCalls
@@ -528,7 +562,7 @@ public sealed class OpenAiCompatibleClient : ILlmClient, IDisposable
                     {
                         ["name"] = tool.Name,
                         ["description"] = tool.Description,
-                        ["parameters"] = JsonNode.Parse(tool.ParametersJsonSchema),
+                        ["parameters"] = ParseToolSchema(tool.ParametersJsonSchema),
                     },
                 });
             }
@@ -537,6 +571,28 @@ public sealed class OpenAiCompatibleClient : ILlmClient, IDisposable
         }
 
         return payload.ToJsonString();
+    }
+
+    /// <summary>
+    /// 容错解析单个工具的 JSON Schema（v3.6 审查修复）：
+    /// 原实现对每个 schema 直接 <c>JsonNode.Parse</c>，一个坏工具（空串 / 非法 JSON）会让
+    /// **整轮** LLM 请求在建包阶段就抛异常，所有工具都用不了。坏 schema 回退成空对象，别拖垮整包。
+    /// </summary>
+    private static JsonNode? ParseToolSchema(string? schema)
+    {
+        if (string.IsNullOrWhiteSpace(schema))
+        {
+            return new JsonObject();
+        }
+
+        try
+        {
+            return JsonNode.Parse(schema) ?? new JsonObject();
+        }
+        catch (JsonException)
+        {
+            return new JsonObject();
+        }
     }
 
     /// <summary>

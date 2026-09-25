@@ -303,7 +303,10 @@ public sealed class ModelSettingsStore
         }
 
         var json = node.ToJsonString(new JsonSerializerOptions { WriteIndented = true });
-        var temporary = Path + ".tmp";
+
+        // v3.6 审查修复：临时名带随机后缀 —— 原先固定 Path+".tmp"，
+        // 并发保存（界面双击 / 并发 /api/models）时两个写者会写同一个临时文件而互相踩。
+        var temporary = Path + "." + Guid.NewGuid().ToString("N")[..8] + ".tmp";
 
         File.WriteAllText(temporary, json);
         File.Move(temporary, Path, overwrite: true);

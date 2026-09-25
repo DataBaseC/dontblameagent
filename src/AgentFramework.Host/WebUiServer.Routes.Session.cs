@@ -353,7 +353,7 @@ public sealed partial class WebUiServer
         Map(new DelegateRoute("GET", "/plugin-panel", (request, _) =>
         {
             var id = request.Query["id"];
-            var panel = IsValidSessionId(id ?? "") ? FindPanelPath(id!) : null;
+            var panel = PluginStore.IsValidId(id) ? FindPanelPath(id!) : null;
             if (panel is null)
             {
                 request.Json(new { ok = false, error = "插件不存在或未提供面板" }, 404);
@@ -372,7 +372,7 @@ public sealed partial class WebUiServer
             var id = request.Query["id"];
             var file = request.Query["file"];
 
-            if (!IsValidSessionId(id ?? string.Empty) || string.IsNullOrWhiteSpace(file))
+            if (!PluginStore.IsValidId(id) || string.IsNullOrWhiteSpace(file))
             {
                 request.Text("/* 缺少或非法的 id / file */", "text/plain; charset=utf-8", 400);
                 return ValueTask.CompletedTask;

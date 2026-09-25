@@ -85,14 +85,21 @@ internal static class ProcessRunner
         {
             lock (ioGate)
             {
-                if (target.Length < run.Limits.MaxOutputChars)
-                {
-                    target.AppendLine(line);
-                }
-                else
+                var remaining = run.Limits.MaxOutputChars - target.Length;
+                if (remaining <= 0)
                 {
                     truncated = true;
+                    return;
                 }
+
+                // 单行也要封顶：无换行的超长单行（压缩成一行的超大 JSON/日志）不能整段进缓冲。
+                if (line.Length > remaining)
+                {
+                    line = line[..remaining];
+                    truncated = true;
+                }
+
+                target.AppendLine(line);
             }
         }
 
@@ -153,12 +160,32 @@ internal static class ProcessRunner
             timedOut = !ct.IsCancellationRequested;
             cancelled = ct.IsCancellationRequested;
             Terminate(process, run.OnTerminate);
+
+            // v3.6 审查修复：终止后也要把异步输出排空 —— 否则 OutputDataReceived 回调
+            // 可能仍在别的线程 AppendLine，而下面要读 StringBuilder，那是数据竞争。
+            // 参数无关的 WaitForExit() 会等异步输出处理完成（.NET 文档明示）。
+            try
+            {
+                process.WaitForExit();
+            }
+            catch
+            {
+                // 进程已终止，等不到也无妨 —— 下面读取另有 ioGate 兜底。
+            }
+        }
+
+        string stdoutText;
+        string stderrText;
+        lock (ioGate)
+        {
+            stdoutText = stdout.ToString();
+            stderrText = stderr.ToString();
         }
 
         return new SandboxOutcome(
             SafeExitCode(process),
-            stdout.ToString(),
-            stderr.ToString(),
+            stdoutText,
+            stderrText,
             timedOut,
             cancelled,
             truncated,

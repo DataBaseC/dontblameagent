@@ -157,3 +157,36 @@ MiMo 自己都写：*「目前以 prompt 形式定义的许多 skill，未来会
 - **单一实现**：可见面/状态一份（v3.10 刚踩过「双实现」的坑）；
 - **零回归优先**：每个新开关默认关闭或默认等于旧行为，全量验证必须保持 0 失败（总数以 verify-all 输出为准）；
 - **先验收桩再实现**：每个新模块配新验证工程。
+
+## 6. 修订 · 降档判据：调用频率，而不是时间线（v3.6）
+
+**起因**：原 `SweepAsync` 用「超过 `minAgeDays`（面板默认 30）天未写 && 热度 ≤ 1」判冷归档。
+这条判据有四处硬伤，且与本文档第 2 节「支柱四」自己定的原则（**桌面宿主不该常驻定时器，用累计会话数/轮次而非挂钟**）互相打架：
+
+1. **轴选错了**：`(now - CreatedAt).TotalDays >= 30` 用的是**创建时间**。价值不是年龄的函数，只有「还用不用」守恒。
+2. **刻度也用错了**：即便接受时间轴，也该是「距**上次使用**多久」，而 `MemoryEntry` 当时根本没有 `LastUsedAt` 字段 —— 「很久没用」这件事无法表达。
+3. **频率信号残缺、激励反转**：`Score` 只在**显式** `recall_memory` 时 +1；**每轮自动注入**的常驻索引卡与按需召回**都不加温**。于是「每轮都在被静默使用」的高频记忆，`Score` 恒为初始分 1，满 30 天照扫 —— 被清的恰恰是最该常驻的。
+4. **口径漂移**：预览与执行各写一套判据（`SweepPreviewAsync` vs `SweepAsync`）。
+
+**新判据（唯一出处：`SweepPolicy` + `JsonlMemoryStore.SleepCandidates`）**：
+
+```
+热度 = (1 + 使用次数) × 0.5^(闲置天数 / 半衰期)        半衰期默认 30 天
+热度 < MinEffectiveScore(0.5) && 未置顶  ⇒ 休眠（归档，可恢复）
+```
+
+- **时间只以半衰期形式出现在衰减指数里，绝不单独作为门槛** —— 这是与「30 天时间线」的分野；
+- **越用越新**：每用一次，次数 +1、衰减时钟归零 → 热度只增不减 → 老而常用永不掉线；
+- **寿命是频率的函数**：用过一次就把衰减阈值推后一个半衰期；
+- 起点 `1` 是「当初认定值得记」的先验，让新条目按半衰期自然衰减，而不是一创建就判死。
+
+**落地**：
+
+| 落点 | 说明 |
+|---|---|
+| `Contracts/Memory.cs` | `MemoryEntry` 增 `LastUsedAt` / `UseCount`（**视图字段**，`[JsonIgnore]` 不落盘）；新增 `SweepPolicy`；`IMemoryStore` 换 `SweepAsync(policy)` + 新增 `PreviewSweepAsync` / `TouchAsync` |
+| `Data/JsonlMemoryStore.cs` | Fold 折叠出使用次数/最近使用（由 score 事件时间戳算，**零新增落盘字段**）；`SleepCandidates` 为预览与执行**共用**判据；`TouchAsync` 记隐式使用（`delta=0` batch） |
+| `Host/AgentHost.cs` | 本轮检索命中即 `TouchAsync`（`ModeProfile.RecordRecallAsUse`，默认开）—— 补齐信号盲区 |
+| `Host/WebUiServer.Routes.Chat.cs` / `WebUiPage.cs` | 面板改称「巩固」、展示「用过 N 次 · 最近使用」、预览与执行同判据 |
+
+**验证**：VerifyMemory 新增第 13 节（8 项）——纯函数对照（同为 200 天前创建，常用的常青、没用的休眠）、频率决定寿命、touch 记使用不动排序热度、预览与执行同判据、置顶永不休眠。

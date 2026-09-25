@@ -721,8 +721,10 @@ catch (ArgumentException)
 
 // 清扫：只动「冷 && 未置顶」—— hot 5 分、pinned 置顶都不该被扫走；
 // 合并出的新结论（热度 1）按策略同样会被扫 —— 分层是状态机，不是一次性动作。
-var now = DateTimeOffset.UtcNow;
-var sweepCount = await tierStore.SweepAsync(MemoryScope.Project, now, minAgeDays: 0, maxScore: 1, "system");
+// 清扫：判据是**调用频率**不是时间线 —— 把 now 推后 45 天（= 1.5 个半衰期）：
+// 未被使用过的合并结论按半衰期衰减到线下 → 休眠；热记忆凭「用过的次数」常青（老而常用不休眠）；置顶不动。
+var now = DateTimeOffset.UtcNow.AddDays(45);
+var sweepCount = await tierStore.SweepAsync(MemoryScope.Project, now, SweepPolicy.Default, "system");
 Check("★ 清扫只归档冷记忆（低分+未置顶）", sweepCount == 1, $"{sweepCount} 条（预期：合并结论）");
 var afterSweep = await tierStore.LoadAsync(MemoryScope.Project, 20);
 Check("★ 热记忆与置顶记忆不被清扫",
@@ -770,8 +772,11 @@ Check("全局记忆跨项目共享",
 // 归档/清扫按项目作用域各管各的
 var aEntry = (await multiStore.LoadAsync(scopeA, 5)).First(e => e.Text.Contains("alpha"));
 await multiStore.RecordHitAsync(scopeA, aEntry.Id, delta: 3);
-var sweptA = await multiStore.SweepAsync(scopeA, DateTimeOffset.UtcNow, 0, 1, "system");
-var sweptB = await multiStore.SweepAsync(scopeB, DateTimeOffset.UtcNow, 0, 1, "system");
+// 同一时刻（推后 45 天）比两个项目：alpha 条目被用过（频率 > 0）→ 常青；
+// beta 条目从未被使用 → 按半衰期衰减到线下 → 休眠。判据是频率，不是各自的时间线。
+var sweepNow = DateTimeOffset.UtcNow.AddDays(45);
+var sweptA = await multiStore.SweepAsync(scopeA, sweepNow, SweepPolicy.Default, "system");
+var sweptB = await multiStore.SweepAsync(scopeB, sweepNow, SweepPolicy.Default, "system");
 Check("★ 清扫按项目作用域隔离（alpha 的热记忆不被扫，beta 的被扫）", sweptA == 0 && sweptB == 1, $"A={sweptA} B={sweptB}");
 
 // ── 12. 温度排序：先全局排序、后截断（v3.5 审查 P1-4）────────
@@ -812,6 +817,67 @@ Check("★ 被 10 条新流水账挤出时间窗的老约定，凭热度仍进�
 var tempView = await tempHost.Memory.LoadAsync(MemoryScope.Project, int.MaxValue);
 Check("老约定排在时间序最末（旧实现「最近 8 条」够不着）",
     tempView.Count == 11 && tempView[0].Text.Contains("老约定"), $"{tempView.Count} 条");
+
+// ── 13. 降档判据：调用频率（不是时间线）× 衰减（v3.6 新增）────
+Section("13. 降档按「使用频率」判定，不按时间线");
+
+var policy = SweepPolicy.Default;
+
+// 纯函数对照：同样「200 天前创建」，一条最近还在用、一条从没用过。
+// 时间线判据（`CreatedAt >= 30 天`）会把两条一起当冷条目扫走 —— 这正是要修的毛病。
+var createdAt = DateTimeOffset.UtcNow.AddDays(-200);
+var clock = DateTimeOffset.UtcNow;
+var usedRecently = new MemoryEntry { Scope = MemoryScope.Project, Text = "老但常用", CreatedAt = createdAt, LastUsedAt = clock, UseCount = 3 };
+var neverUsed = new MemoryEntry { Scope = MemoryScope.Project, Text = "老且从没用过", CreatedAt = createdAt };
+Check("★ 同为 200 天前创建：常用的常青、没用的休眠",
+    JsonlMemoryStore.DecayedHeat(usedRecently, clock, policy) >= policy.MinEffectiveScore
+    && JsonlMemoryStore.DecayedHeat(neverUsed, clock, policy) < policy.MinEffectiveScore);
+
+// 频率决定寿命：过了一个半衰期，用过一次的比从未用过的更耐衰减。
+var oneUse = new MemoryEntry { Scope = MemoryScope.Project, Text = "用过一次", CreatedAt = clock, LastUsedAt = clock, UseCount = 1 };
+var zeroUse = new MemoryEntry { Scope = MemoryScope.Project, Text = "从未用过", CreatedAt = clock, LastUsedAt = clock };
+var afterOneHalfLife = clock.AddDays(policy.HalfLifeDays);
+Check("★ 频率决定寿命：过了半衰期，用过一次的更耐衰减",
+    JsonlMemoryStore.DecayedHeat(oneUse, afterOneHalfLife, policy) > JsonlMemoryStore.DecayedHeat(zeroUse, afterOneHalfLife, policy));
+
+// 存储层：touch 记使用（只涨频率、不动排序热度）。
+var freqStore = new JsonlMemoryStore(new MemoryStoreOptions
+{
+    GlobalPath = Path.Combine(root, "mem-freq", "global.jsonl"),
+    ProjectPath = Path.Combine(root, "mem-freq", "project.jsonl"),
+});
+var touched = await freqStore.AppendAsync(MemoryScope.Project, "会被 touch 的一条", source: "user");
+var beforeTouch = (await freqStore.LoadAsync(MemoryScope.Project, 20)).First(e => e.Id == touched.Id);
+await freqStore.TouchAsync(MemoryScope.Project, [touched.Id], "t");
+var afterTouch = (await freqStore.LoadAsync(MemoryScope.Project, 20)).First(e => e.Id == touched.Id);
+Check("★ touch 记使用：次数 +1、最近使用被刷新",
+    afterTouch.UseCount == beforeTouch.UseCount + 1 && afterTouch.LastUsedAt is not null);
+Check("★ touch 不动排序热度（避免常驻条目自我强化）",
+    afterTouch.Score == beforeTouch.Score, $"{beforeTouch.Score} → {afterTouch.Score}");
+await freqStore.RetractAsync(MemoryScope.Project, touched.Id, "user");   // 清场，下面只测频率对照
+
+// 预览与执行共用同一判据：条数必须一致（杜绝"预览说 N 条、执行扫 M 条"）。
+var veteran = await freqStore.AppendAsync(MemoryScope.Project, "部署跑三个脚本（老而常用）", source: "user");
+for (var i = 0; i < 6; i++)
+{
+    await freqStore.RecordHitAsync(MemoryScope.Project, veteran.Id);
+}
+var fresh = await freqStore.AppendAsync(MemoryScope.Project, "刚记下、还没用过的说明", source: "user");
+var sweepClock = DateTimeOffset.UtcNow.AddDays(60);   // = 2 个半衰期
+var previewCount = (await freqStore.PreviewSweepAsync(MemoryScope.Project, sweepClock, policy)).Count;
+var swept = await freqStore.SweepAsync(MemoryScope.Project, sweepClock, policy, "system");
+Check("★ 预览与执行同一判据（条数一致）", previewCount == swept, $"预览 {previewCount} / 执行 {swept}");
+Check("★ 老而常用不被休眠（凭使用次数常青）",
+    (await freqStore.LoadAsync(MemoryScope.Project, 20)).Any(e => e.Id == veteran.Id));
+Check("★ 从未使用的条目被休眠",
+    (await freqStore.LoadAsync(MemoryScope.Project, 20)).All(e => e.Id != fresh.Id));
+
+// 置顶永不休眠：再久不扫。
+var pinnedFreq = await freqStore.AppendAsync(MemoryScope.Project, "置顶：永不自动休眠", source: "user");
+await freqStore.RecordHitAsync(MemoryScope.Project, pinnedFreq.Id, delta: 0, markImportant: true);
+await freqStore.SweepAsync(MemoryScope.Project, DateTimeOffset.UtcNow.AddDays(9999), policy, "system");
+Check("★ 置顶条目永不休眠（再久也不扫）",
+    (await freqStore.LoadAsync(MemoryScope.Project, 20)).Any(e => e.Id == pinnedFreq.Id));
 
 // ── 收尾 ───────────────────────────────────────────────────
 Console.WriteLine();

@@ -267,15 +267,28 @@ public sealed class PluginStore
         return combined;
     }
 
+    /// <summary>
+    /// 拷贝目录，**不跟随符号链接**（v3.6 审查修复）：
+    /// <c>SearchOption.AllDirectories</c> 会钻进目录联接 / 符号链接 ——
+    /// 一个含链接的插件目录能把整盘拷进快照，或撞上环状链接空转。
+    /// </summary>
     private static void CopyDirectory(string source, string target)
     {
         Directory.CreateDirectory(target);
 
-        foreach (var file in Directory.EnumerateFiles(source, "*", SearchOption.AllDirectories))
+        foreach (var file in Directory.EnumerateFiles(source))
         {
-            var destination = Path.Combine(target, Path.GetRelativePath(source, file));
-            Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
-            File.Copy(file, destination, overwrite: true);
+            File.Copy(file, Path.Combine(target, Path.GetFileName(file)), overwrite: true);
+        }
+
+        foreach (var sub in Directory.EnumerateDirectories(source))
+        {
+            if (new DirectoryInfo(sub).LinkTarget is not null)
+            {
+                continue;
+            }
+
+            CopyDirectory(sub, Path.Combine(target, Path.GetFileName(sub)));
         }
     }
 }

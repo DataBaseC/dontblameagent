@@ -112,8 +112,53 @@ public sealed record MemoryEntry
     /// <summary>这条是否曾被用户显式标记为重要（score 事件携带，随条目进入视图）。</summary>
     public bool IsImportant { get; init; }
 
+    /// <summary>
+    /// **视图字段**（由 <c>Fold</c> 折叠填充，<b>绝不落盘、不进事件流</b>）：
+    /// 最近一次「被使用」的时间 —— 显式召回命中，或被本轮检索消费。
+    ///
+    /// Why：旧降档判据只看 <see cref="CreatedAt"/>（创建时间），于是「31 天前创建、昨天刚用过」
+    /// 的记忆会被误扫。价值守恒的是「还用不用」，不是「存了多久」。这个字段让「很久没用」可被表达，
+    /// 由 score 事件的时间戳折叠得出 —— 零新增落盘字段。
+    /// </summary>
+    [System.Text.Json.Serialization.JsonIgnore]
+    public DateTimeOffset? LastUsedAt { get; init; }
+
+    /// <summary>
+    /// **视图字段**（由 <c>Fold</c> 折叠填充，不落盘）：被使用的累计次数（频率）—— 降档判据的主信号。
+    ///
+    /// 与 <see cref="Score"/> 的分工：Score 是「排序热度」（谁常驻索引卡），
+    /// UseCount 是「使用频率」（谁该继续活着）。隐式消费（delta=0）只涨 UseCount、不涨 Score，
+    /// 所以两者必须分开算 —— 否则常驻条目会自我强化、把索引卡锁死。
+    /// </summary>
+    [System.Text.Json.Serialization.JsonIgnore]
+    public int UseCount { get; init; }
+
     /// <summary>这条是否是一次「撤销」事件。</summary>
     public bool IsRetraction => string.Equals(Kind, MemoryKinds.Retract, StringComparison.Ordinal);
+}
+
+/// <summary>
+/// 记忆降档策略 —— 判据是「调用频率」，时间是衰减曲线而非门槛。
+///
+/// 有效热度：<c>(1 + 使用次数) × 0.5^(闲置天数 / 半衰期)</c>。
+///   · 使用次数来自「使用事件」（显式召回 delta&gt;0 + 本轮检索消费 delta=0），由 Fold 折叠得出；
+///   · 起点 1 是"当初认定值得记"的先验，让新条目按半衰期自然衰减，而不是一创建就判死；
+///   · 每用一次：次数 +1、闲置时钟归零 → 热度只增不减 → <b>老而常用永不掉线</b>。
+/// 寿命因此是<b>频率的函数</b>（用一次推后一个半衰期），而不是固定的"30 天"。
+/// 时间只在衰减指数里出现一次，绝不单独作为"该不该降档"的门槛。
+/// </summary>
+public sealed record SweepPolicy
+{
+    /// <summary>有效热度低于此值即休眠（归档）。默认 0.5 —— 约等于「半个先验已被衰减光」。</summary>
+    public double MinEffectiveScore { get; init; } = 0.5;
+
+    /// <summary>
+    /// 热度半衰期（天）：闲置这么久，有效热度减半。
+    /// 时间**只在此处出现** —— 作为衰减曲线的参数，不是门槛。
+    /// </summary>
+    public double HalfLifeDays { get; init; } = 30;
+
+    public static SweepPolicy Default { get; } = new();
 }
 
 /// <summary>
@@ -209,14 +254,40 @@ public interface IMemoryStore
     ValueTask<IReadOnlyList<MemoryEntry>> LoadArchivedAsync(string scope, int limit, CancellationToken ct = default);
 
     /// <summary>
-    /// 自动降级清扫：主视图里「超过 minAgeDays 天未写 && 热度 ≤ maxScore && 未置顶」的条目
-    /// 全部归档。返回归档条数。这是记忆的"睡眠巩固"—— 建议低频调用（面板打开时/定时）。
+    /// 给一批记忆记一次「使用」—— 追加 score 事件（<c>delta = 0</c>）：
+    /// 只刷新「使用频率 / 最近使用」（决定谁该继续活着），**不动排序热度**。
+    ///
+    /// 用于「本轮检索命中」这类**隐式使用** —— 让降档判据看到真实的调用频率，
+    /// 而不是只看到显式 recall 的那几次。一条 batch 落盘，一轮只付一次 fsync。
+    /// 返回实际记上的条数。
+    /// </summary>
+    ValueTask<int> TouchAsync(
+        string scope,
+        IReadOnlyCollection<string> ids,
+        string? sourceSession = null,
+        CancellationToken ct = default);
+
+    /// <summary>
+    /// 降档**预览**：按与 <see cref="SweepAsync"/> **完全相同**的判据列出将休眠的条目（只读不写）。
+    /// 预览与执行共用一份判据，杜绝"预览说 N 条、执行扫 M 条"的口径漂移。
+    /// </summary>
+    ValueTask<IReadOnlyList<MemoryEntry>> PreviewSweepAsync(
+        string scope,
+        DateTimeOffset now,
+        SweepPolicy policy,
+        CancellationToken ct = default);
+
+    /// <summary>
+    /// 降档清扫：把主视图里「**使用频率低于阈值**（按半衰期衰减后）」且未置顶的条目归档，返回条数。
+    ///
+    /// 判据是<b>调用频率</b>，不是创建时间：一条越用越新的记忆永远不会掉到线下，无论它多老；
+    /// 时间只以半衰期的形式参与衰减计算，不作为独立门槛。详见 <see cref="SweepPolicy"/>。
+    /// 这是记忆的"睡眠巩固"—— 建议低频调用（面板打开时 / 周期巩固时）。
     /// </summary>
     ValueTask<int> SweepAsync(
         string scope,
         DateTimeOffset now,
-        int minAgeDays,
-        int maxScore,
+        SweepPolicy policy,
         string source = "system",
         CancellationToken ct = default);
 }
@@ -290,8 +361,16 @@ public sealed class NullMemoryStore : IMemoryStore
         string scope, int limit, CancellationToken ct = default)
         => ValueTask.FromResult<IReadOnlyList<MemoryEntry>>([]);
 
+    public ValueTask<int> TouchAsync(
+        string scope, IReadOnlyCollection<string> ids, string? sourceSession = null, CancellationToken ct = default)
+        => ValueTask.FromResult(0);
+
+    public ValueTask<IReadOnlyList<MemoryEntry>> PreviewSweepAsync(
+        string scope, DateTimeOffset now, SweepPolicy policy, CancellationToken ct = default)
+        => ValueTask.FromResult<IReadOnlyList<MemoryEntry>>([]);
+
     public ValueTask<int> SweepAsync(
-        string scope, DateTimeOffset now, int minAgeDays, int maxScore,
+        string scope, DateTimeOffset now, SweepPolicy policy,
         string source = "system", CancellationToken ct = default)
         => ValueTask.FromResult(0);
 }
@@ -377,6 +456,15 @@ public sealed class ModeProfile
 
     /// <summary>检索块字符上限。</summary>
     public int MemoryRecallMaxChars { get; init; } = 1_200;
+
+    /// <summary>
+    /// 是否把「本轮检索命中」计为一次**使用**（续命信号，供降档判据看到真实调用频率）。
+    ///
+    /// 默认开。不这样做的话，降档只看得到显式 <c>recall_memory</c> 的那几次 ——
+    /// 「每轮都在被静默使用」的高频记忆反而会被当成冷条目，激励是反的。
+    /// 实现上只写一条 batch（delta=0），<b>不动排序热度</b>，一轮一次 fsync。
+    /// </summary>
+    public bool RecordRecallAsUse { get; init; } = true;
 
     /// <summary>
     /// 常驻索引卡与「本轮召回」的**排序策略**（默认仍是插入序，行为与 v3.4 一致）。

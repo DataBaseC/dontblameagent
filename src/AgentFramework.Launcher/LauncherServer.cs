@@ -797,43 +797,21 @@ public sealed class LauncherServer
     private string BuildStateJson()
     {
         var issues = RunPreflight();
-        var sb = new StringBuilder();
-        sb.Append("{");
-        sb.Append($"\"running\":{(IsRunning ? "true" : "false")},");
-        // 内置载荷解压状态（仅单文件形态非默认值）：页面据此提示「解压中 N/M」
-        sb.Append($"\"bundleBusy\":{(_state.BundleBusy ? "true" : "false")},");
-        sb.Append($"\"bundleProgress\":\"{Escape(_state.BundleProgress)}\",");
-        sb.Append($"\"bundleError\":{(_state.BundleError is null ? "null" : $"\"{Escape(_state.BundleError)}\"")},");
-        sb.Append($"\"hostPid\":{(IsRunning ? _state.GetRunningHost()!.Id.ToString() : "null")},");
-        sb.Append($"\"hostUrl\":{(_state.HostUrl is null ? "null" : $"\"{Escape(_state.HostUrl)}\"")},");
-        sb.Append("\"loadOrder\":[");
-        var first = true;
-        foreach (var id in EnabledInLoadOrder())
+
+        // v3.6 审查修复：改用 JsonSerializer —— 原先手工拼 JSON 且用 HTML 转义器
+        // （只替 & < > "，不转反斜杠），Windows 路径里的 `\` 产出非法转义，
+        // /api/state 直接变成格式错误的 JSON，任何消费者解析即失败。
+        return System.Text.Json.JsonSerializer.Serialize(new
         {
-            if (!first)
-            {
-                sb.Append(',');
-            }
-
-            sb.Append($"\"{Escape(id)}\"");
-            first = false;
-        }
-
-        sb.Append("],\"issues\":[");
-        first = true;
-        foreach (var issue in issues)
-        {
-            if (!first)
-            {
-                sb.Append(',');
-            }
-
-            sb.Append($"{{\"kind\":\"{issue.Kind}\",\"plugin\":\"{Escape(issue.PluginId)}\",\"message\":\"{Escape(issue.Message)}\"}}");
-            first = false;
-        }
-
-        sb.Append("]}");
-        return sb.ToString();
+            running = IsRunning,
+            bundleBusy = _state.BundleBusy,
+            bundleProgress = _state.BundleProgress,
+            bundleError = _state.BundleError,
+            hostPid = IsRunning ? _state.GetRunningHost()!.Id : (int?)null,
+            hostUrl = _state.HostUrl,
+            loadOrder = EnabledInLoadOrder().ToArray(),
+            issues = issues.Select(i => new { kind = i.Kind, plugin = i.PluginId, message = i.Message }).ToArray(),
+        });
     }
 
     /// <summary>

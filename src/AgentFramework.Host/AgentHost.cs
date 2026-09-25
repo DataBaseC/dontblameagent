@@ -61,8 +61,18 @@ public sealed class AgentHost : IAsyncDisposable
     /// <summary>装配结果。留着是为了一件事：派生新会话（子 agent 走这条路）。</summary>
     private readonly Hosting.HostState _state;
 
-    /// <summary>悬空工具调用是否已修过一遍（幂等，一次会话只修一次就够）。</summary>
-    private bool _danglingRepaired;
+    /// <summary>
+    /// 串行化「首次打开会话」这一步（v3.6 审查修复）：
+    /// GetOrOpenSession 原在 _sessions 锁外新建 runtime，并发切到同一会话会各建一个，
+    /// 覆盖掉的那个日志句柄永不 Dispose。有了这把闸，「查—建—登记」只可能在闸内各做一次。
+    /// </summary>
+    private readonly object _openGate = new();
+
+    /// <summary>
+    /// 保护会话元数据（titles.json / session-meta.json）的「读—改—写」（v3.6 审查修复）：
+    /// 原先无锁读改写，并发重命名 / 新建会话会丢更新。配合 <see cref="WriteJsonAtomic"/> 一起用。
+    /// </summary>
+    private readonly object _metaGate = new();
 
     /// <summary>
     /// 退休标志（P0 竞态防线）：本宿主已被切走，日志随时会被 Dispose。
@@ -683,10 +693,12 @@ public sealed class AgentHost : IAsyncDisposable
             }
 
             // 中断自愈：补完就不会再悬空，所以每个会话只做一次（幂等）。
+            // v3.6 审查修复：修复**成功之后**才置位 —— 否则首次修复抛异常 / 被取消时标志已置 true，
+            // 此后再不重试，日志里会永久留存「有 requested 无 completed」的不一致记录。
             if (!session.DanglingRepaired)
             {
-                session.DanglingRepaired = true;
                 await RepairDanglingToolCallsAsync(session, ct).ConfigureAwait(false);
+                session.DanglingRepaired = true;
             }
 
             // HCI：模式与项目目录钉在会话上 —— 本回合的档位、工具面、记忆层级、
@@ -735,7 +747,7 @@ public sealed class AgentHost : IAsyncDisposable
                 }
             }
 
-            var recall = await BuildRecallBlockAsync(profile, MapScopes(profile.MemoryScopes, projectDir), input, ct).ConfigureAwait(false);
+            var recall = await BuildRecallBlockAsync(profile, MapScopes(profile.MemoryScopes, projectDir), input, session.SessionId, ct).ConfigureAwait(false);
             if (recall is not null)
             {
                 dynamicMessages.Add(new LlmMessage { Role = LlmRole.User, Content = "【相关记忆·非用户发言】\n" + recall });
@@ -959,14 +971,15 @@ public sealed class AgentHost : IAsyncDisposable
     /// 不再每轮把最近 N 条记忆全量灌进上下文，而是先看这一轮说了什么，再去库里捞。
     /// 闲聊模式 <c>MemoryRecallLimit = 0</c>：一次文件扫描都不做。
     /// </summary>
-    private async Task<string?> BuildRecallBlockAsync(ModeProfile profile, IReadOnlyList<string> scopes, string query, CancellationToken ct)
+    private async Task<string?> BuildRecallBlockAsync(
+        ModeProfile profile, IReadOnlyList<string> scopes, string query, string? sessionId, CancellationToken ct)
     {
         if (profile.MemoryRecallLimit <= 0 || string.IsNullOrWhiteSpace(query))
         {
             return null;
         }
 
-        var hits = new List<MemoryEntry>();
+        var hits = new List<(string Scope, MemoryEntry Entry)>();
 
         foreach (var scope in scopes)
         {
@@ -974,7 +987,7 @@ public sealed class AgentHost : IAsyncDisposable
                 .SearchAsync(query, scope, profile.MemoryRecallLimit, ct)
                 .ConfigureAwait(false);
 
-            hits.AddRange(found);
+            hits.AddRange(found.Select(e => (scope, e)));
         }
 
         if (hits.Count == 0)
@@ -986,11 +999,31 @@ public sealed class AgentHost : IAsyncDisposable
         // 这里不再按 CreatedAt 重排 —— 那会把「最相关的」换成「最新的」。
         // 只做去重（同一条记忆可能同时出现在多个 scope 的结果里）。
         var ordered = hits
-            .DistinctBy(e => e.Id, StringComparer.Ordinal)
+            .DistinctBy(x => x.Entry.Id, StringComparer.Ordinal)
             .Take(profile.MemoryRecallLimit)
             .ToList();
 
-        return MemoryBlocks.BuildRecallBlock(ordered, profile.MemoryRecallMaxChars);
+        // 隐式使用信号：这一轮"按当前输入捞出来用上了"，就算一次使用（续命，不动排序热度）。
+        // 不做的话，降档判据只看得到显式 recall_memory 的那几次 ——
+        // 「每轮都在被静默使用」的高频记忆反而会被当成冷条目，激励是反的。
+        if (profile.RecordRecallAsUse)
+        {
+            foreach (var group in ordered.GroupBy(x => x.Scope, StringComparer.Ordinal))
+            {
+                try
+                {
+                    await Memory
+                        .TouchAsync(group.Key, [.. group.Select(x => x.Entry.Id)], sessionId, ct)
+                        .ConfigureAwait(false);
+                }
+                catch
+                {
+                    // 升温是优化，绝不阻断召回（与 RecallMemoryTool 同一条纪律）。
+                }
+            }
+        }
+
+        return MemoryBlocks.BuildRecallBlock(ordered.Select(x => x.Entry), profile.MemoryRecallMaxChars);
     }
 
     /// <summary>
@@ -1177,25 +1210,31 @@ public sealed class AgentHost : IAsyncDisposable
         }
 
         var path = Path.Combine(Options.SessionsDir, "titles.json");
-        var titles = new Dictionary<string, string>(StringComparer.Ordinal);
-        if (File.Exists(path))
+
+        // v3.6 审查修复：读—改—写全程持锁 + 原子落盘 ——
+        // 原先无锁读改写，并发重命名会丢更新；写中途崩溃还会留下半截 JSON（下次读被当坏文件丢弃）。
+        lock (_metaGate)
         {
-            try
+            var titles = new Dictionary<string, string>(StringComparer.Ordinal);
+            if (File.Exists(path))
             {
-                var loaded = System.Text.Json.JsonSerializer.Deserialize<Dictionary<string, string>>(File.ReadAllText(path));
-                if (loaded is not null)
+                try
                 {
-                    titles = new Dictionary<string, string>(loaded, StringComparer.Ordinal);
+                    var loaded = System.Text.Json.JsonSerializer.Deserialize<Dictionary<string, string>>(File.ReadAllText(path));
+                    if (loaded is not null)
+                    {
+                        titles = new Dictionary<string, string>(loaded, StringComparer.Ordinal);
+                    }
+                }
+                catch (System.Text.Json.JsonException)
+                {
+                    // 坏文件当没有
                 }
             }
-            catch (System.Text.Json.JsonException)
-            {
-                // 坏文件当没有
-            }
-        }
 
-        titles[sessionId] = title.Trim();
-        File.WriteAllText(path, System.Text.Json.JsonSerializer.Serialize(titles));
+            titles[sessionId] = title.Trim();
+            WriteJsonAtomic(path, titles);
+        }
     }
 
     /// <summary>读全部会话标题（列表与导出共用）。</summary>
@@ -1232,8 +1271,16 @@ public sealed class AgentHost : IAsyncDisposable
 
         var titles = LoadTitles();
         var title = titles.TryGetValue(sessionId, out var t) ? t : sessionId;
-        var all = _sessions.TryGetValue(sessionId, out var rt)
-            ? rt.Events
+        // v3.6 审查修复：读 _sessions 必须持锁 —— 别处一律持锁读写，
+        // 并发导出与「切/开/删会话」相遇时，普通 Dictionary 被并发修改会抛异常。
+        Hosting.SessionRuntime? runtime;
+        lock (_sessions)
+        {
+            _sessions.TryGetValue(sessionId, out runtime);
+        }
+
+        var all = runtime is not null
+            ? runtime.Events
             : AgentFramework.Data.JsonlEventLog.Read(path).ToList();
 
         var sb = new System.Text.StringBuilder();
@@ -1426,19 +1473,33 @@ public sealed class AgentHost : IAsyncDisposable
             }
         }
 
-        // relayToUi: true —— 这是要显示在对话窗口里的会话；
-        // onEvent 接到宿主的事件中继，SSE 才收得到它的增量与工具卡片。
-        // 模式与项目目录从 session-meta.json 换原（会话的属性跟着会话走）。
-        SessionMetas().TryGetValue(sessionId, out var meta);
-        var created = _state.OpenSession(sessionId, onEvent: RaiseEventEmitted, relayToUi: true,
-            modeId: meta?.Mode, projectDir: meta?.ProjectDir);
-
-        lock (_sessions)
+        // v3.6 审查修复：原先在 _sessions 锁外新建 runtime —— 两个标签页同时切到**同一未打开会话**时，
+        // 两个线程都过上面那道检查，各建一个（两份内存事件表 + 两个日志句柄），登记时后写的覆盖先写的，
+        // 被覆盖的那个句柄永不 Dispose。用 _openGate 串行化「建」，闸内二次确认，保证只建一次。
+        lock (_openGate)
         {
-            _sessions[sessionId] = created;
-        }
+            lock (_sessions)
+            {
+                if (_sessions.TryGetValue(sessionId, out var raced))
+                {
+                    return raced;
+                }
+            }
 
-        return created;
+            // relayToUi: true —— 这是要显示在对话窗口里的会话；
+            // onEvent 接到宿主的事件中继，SSE 才收得到它的增量与工具卡片。
+            // 模式与项目目录从 session-meta.json 换原（会话的属性跟着会话走）。
+            SessionMetas().TryGetValue(sessionId, out var meta);
+            var created = _state.OpenSession(sessionId, onEvent: RaiseEventEmitted, relayToUi: true,
+                modeId: meta?.Mode, projectDir: meta?.ProjectDir);
+
+            lock (_sessions)
+            {
+                _sessions[sessionId] = created;
+            }
+
+            return created;
+        }
     }
 
     // ── 会话模式的持久化（modes.json，与 titles.json 同类）───
@@ -1498,15 +1559,29 @@ public sealed class AgentHost : IAsyncDisposable
 
     private void SaveSessionMeta(string sessionId, string? modeId, string? projectDir)
     {
-        var metas = new Dictionary<string, SessionMetaInfo>(SessionMetas(), StringComparer.Ordinal);
-        var existing = metas.TryGetValue(sessionId, out var m) ? m : null;
-        metas[sessionId] = new SessionMetaInfo(
-            modeId ?? existing?.Mode ?? AgentModes.IdOf(_mode),
-            projectDir ?? existing?.ProjectDir);
+        lock (_metaGate)
+        {
+            var metas = new Dictionary<string, SessionMetaInfo>(SessionMetas(), StringComparer.Ordinal);
+            var existing = metas.TryGetValue(sessionId, out var m) ? m : null;
+            metas[sessionId] = new SessionMetaInfo(
+                modeId ?? existing?.Mode ?? AgentModes.IdOf(_mode),
+                projectDir ?? existing?.ProjectDir);
 
-        Directory.CreateDirectory(Options.SessionsDir);
-        File.WriteAllText(SessionMetaPath,
-            System.Text.Json.JsonSerializer.Serialize(metas));
+            Directory.CreateDirectory(Options.SessionsDir);
+            WriteJsonAtomic(SessionMetaPath, metas);
+        }
+    }
+
+    /// <summary>
+    /// 原子写 JSON（v3.6 审查修复）：先写同目录临时文件，再覆盖式 <see cref="File.Move(string, string, bool)"/>。
+    /// 直接 <c>File.WriteAllText</c> 若在写中途崩溃/被杀，会留下半截 JSON —— 下次读被当坏文件、整份元数据丢失。
+    /// 同目录 + 覆盖式 Move 在主流文件系统上是原子替换（临时文件与目标同卷，Move 不跨设备）。
+    /// </summary>
+    private static void WriteJsonAtomic<T>(string path, T value)
+    {
+        var tmp = path + "." + Guid.NewGuid().ToString("N")[..8] + ".tmp";
+        File.WriteAllText(tmp, System.Text.Json.JsonSerializer.Serialize(value));
+        File.Move(tmp, path, overwrite: true);
     }
 
     /// <summary>

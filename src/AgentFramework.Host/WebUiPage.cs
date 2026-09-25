@@ -513,11 +513,11 @@ internal static class WebUiPage
       <div class="settings" id="memory-panel" hidden>
         <div class="row">
           <b>记忆管理</b>
-          <span style="color:var(--faint)">热度来自被引用（recall 命中 +1）；置顶常驻索引卡；归档移出主检索，原文永不删</span>
+          <span style="color:var(--faint)">巩固按「使用频率」判定（越用越新，久未使用才休眠）；置顶常驻索引卡；归档移出主检索，原文永不删</span>
         </div>
         <div class="row" style="margin-bottom:6px">
-          <button id="mem-sweep-preview" class="ghost small">清扫预览</button>
-          <button id="mem-sweep-run" class="ghost small">执行降级（30 天未用且热度≤1）</button>
+          <button id="mem-sweep-preview" class="ghost small">预览可休眠</button>
+          <button id="mem-sweep-run" class="ghost small">巩固记忆（休眠久未使用的条目）</button>
           <span id="mem-sweep-state" class="state"></span>
         </div>
         <div id="memory-list"></div>
@@ -1671,7 +1671,9 @@ async function loadMemory() {
 
         const score = document.createElement('span');
         score.className = 'mem-score';
-        score.textContent = (m.important ? '📌' : '') + '🔥' + m.score;
+        score.textContent = (m.important ? '📌' : '') + '🔥' + m.score + ' · 用过' + (m.useCount || 0) + '次';
+        score.title = '排序热度 ' + m.score + '（显式召回）· 使用次数 ' + (m.useCount || 0)
+          + (m.lastUsedAt ? ' · 最近使用 ' + m.lastUsedAt : ' · 从未按需使用（将按半衰期衰减休眠）');
 
         const spacer = document.createElement('span');
         spacer.style.flex = '1';
@@ -1736,20 +1738,20 @@ async function loadMemory() {
 
 document.getElementById('mem-sweep-preview').onclick = () => memSweep(true);
 document.getElementById('mem-sweep-run').onclick = () => {
-  if (confirm('把 30 天未写且热度≤1 的记忆全部归档？（事件化，可随时恢复）')) memSweep(false);
+  if (confirm('归档久未使用的记忆？（按使用频率判定：越用越新，久未使用才休眠；事件化，可随时恢复）')) memSweep(false);
 };
 async function memSweep(dryRun) {
   memState('mem-sweep-state', dryRun ? '统计中…' : '执行中…');
   try {
     const resp = await fetch('/api/memory/sweep', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ days: 30, maxScore: 1, dryRun })
+      body: JSON.stringify({ halfLifeDays: 30, minEffectiveScore: 0.5, dryRun })
     });
     const data = await resp.json();
     if (!data.ok) { memState('mem-sweep-state', data.error || '失败', 'var(--bad)'); return; }
     memState('mem-sweep-state', dryRun
-      ? '可归档 ' + data.total + ' 条（点「执行降级」生效）'
-      : '已归档 ' + data.total + ' 条');
+      ? '可休眠 ' + data.total + ' 条（点「巩固记忆」生效）'
+      : '已休眠 ' + data.total + ' 条');
     if (!dryRun) loadMemory();
   } catch (err) {
     memState('mem-sweep-state', '失败：' + err.message, 'var(--bad)');
@@ -2305,6 +2307,16 @@ stream.onmessage = (message) => {
   if (data.type === 'delta') onDelta(data.text);
   else if (data.type === 'reasoning') onReasoning(data.text);
   else if (data.type === 'event') { if (data.event && data.event.seq) lastSeq = data.event.seq; renderEvent(data.event); }
+  else if (data.type === 'approval') {
+    // 审批帧是外层 type=approval（不是 type=event 包一层）——
+    // 从前只在 renderEvent 里认 approval，这一支永远走不到，
+    // 卡片弹不出来 → 工具卡停在「执行中…」等满 5 分钟超时。
+    if (isCurrent) {
+      sealReasoning();
+      addApprovalCard(data);
+      setPhase('等待你确认：' + (data.toolName || '工具') + ' …');
+    }
+  }
   else if (data.type === 'sys') {
     // 温和的系统消息（如“回合已停止”）—— 也可能是一轮的最后一条，一并收口思考块
     sealReasoning();

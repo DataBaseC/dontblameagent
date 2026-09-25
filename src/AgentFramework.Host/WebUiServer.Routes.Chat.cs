@@ -426,21 +426,26 @@ public sealed partial class WebUiServer
         Map(new DelegateRoute("POST", "/api/memory/sweep", async (request, ct) =>
         {
             var body = await request.ReadBodyAsync().ConfigureAwait(false);
-            var days = 30;
-            var maxScore = 1;
+            var policy = SweepPolicy.Default;
             var dryRun = true;
 
             if (body is not null)
             {
-                if (body.Value.TryGetProperty("days", out var d) && d.ValueKind == JsonValueKind.Number)
+                var halfLife = policy.HalfLifeDays;
+                var minHeat = policy.MinEffectiveScore;
+
+                // 可选：前端想调半衰期/阈值就传；不传则用默认（30 天半衰期、阈值 0.5）。
+                if (body.Value.TryGetProperty("halfLifeDays", out var h) && h.ValueKind == JsonValueKind.Number)
                 {
-                    days = Math.Max(1, d.GetInt32());
+                    halfLife = Math.Max(0.1, h.GetDouble());
                 }
 
-                if (body.Value.TryGetProperty("maxScore", out var m) && m.ValueKind == JsonValueKind.Number)
+                if (body.Value.TryGetProperty("minEffectiveScore", out var s) && s.ValueKind == JsonValueKind.Number)
                 {
-                    maxScore = Math.Max(0, m.GetInt32());
+                    minHeat = Math.Max(0, s.GetDouble());
                 }
+
+                policy = new SweepPolicy { HalfLifeDays = halfLife, MinEffectiveScore = minHeat };
 
                 if (body.Value.TryGetProperty("dryRun", out var dr) && dr.ValueKind == JsonValueKind.False)
                 {
@@ -458,13 +463,14 @@ public sealed partial class WebUiServer
             var results = new List<object>();
             var total = 0;
 
-            // 清扫范围：全局 + 当前会话的项目作用域（多项目下不动别的项目的账）
+            // 巩固范围：全局 + 当前会话的项目作用域（多项目下不动别的项目的账）
             var projectScope = MemoryScope.ProjectFor(_host.Session?.ProjectDir ?? _host.Options.WorkspaceRoot);
             foreach (var scope in (string[]) [MemoryScope.Global, projectScope])
             {
+                // 预览与执行共用存储层同一份判据（按使用频率衰减），杜绝口径漂移。
                 var count = dryRun
-                    ? await SweepPreviewAsync(_host.Memory, scope, now, days, maxScore, ct).ConfigureAwait(false)
-                    : await _host.Memory.SweepAsync(scope, now, days, maxScore, "system", ct).ConfigureAwait(false);
+                    ? (await _host.Memory.PreviewSweepAsync(scope, now, policy, ct).ConfigureAwait(false)).Count
+                    : await _host.Memory.SweepAsync(scope, now, policy, "system", ct).ConfigureAwait(false);
                 results.Add(new { scope, count });
                 total += count;
             }
@@ -578,6 +584,10 @@ public sealed partial class WebUiServer
             id = e.Id,
             text = e.Text,
             score = e.Score,
+            // 降档判据是「使用频率」：把次数与最近使用时间也带上，面板才讲得清
+            // 「这条为什么该睡 / 为什么该留」。
+            useCount = e.UseCount,
+            lastUsedAt = e.LastUsedAt,
             important = e.IsImportant,
             slot = e.Slot,
             created = e.CreatedAt,
@@ -602,17 +612,6 @@ public sealed partial class WebUiServer
             },
         };
     }
-
-    /// <summary>
-    /// 清扫预览：只数不写（面板上的「可归档 N 条」，按当前会话的项目作用域）。
-    ///
-    /// v3.5 审查 P2：必须与 <c>IMemoryStore.SweepAsync</c> 用**同一口径**（全量视图）——
-    /// 原先预览只数最近 500 条、执行扫全量，活跃条目过 500 时两个数字对不上，面板会误导人。
-    /// </summary>
-    private static async Task<int> SweepPreviewAsync(
-        IMemoryStore store, string scope, DateTimeOffset now, int days, int maxScore, CancellationToken ct = default)
-        => (await store.LoadAsync(scope, int.MaxValue, ct).ConfigureAwait(false)).Count(e =>
-            !e.IsImportant && (now - e.CreatedAt).TotalDays >= days && e.Score <= maxScore);
 
     /// <summary>递归拷贝目录（工坊导入用；目标存在则整体替换 —— 同名导入视为更新）。</summary>
     private static void CopyDirectory(string sourceDir, string targetDir)

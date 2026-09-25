@@ -404,12 +404,91 @@ public sealed class PluginHost
         ArgumentException.ThrowIfNullOrWhiteSpace(pluginDirectory);
 
         var manifest = ReadManifest(pluginDirectory);
-        if (!string.IsNullOrWhiteSpace(manifest.Id))
+
+        // v3.6 审查修复：热重载前给旧版留一份备份。原实现「先卸后装」，新版一旦装载失败
+        // （自测不过 / 激活异常），旧版也已被撤销 —— 工作区里新旧都没有了，凭空丢能力。
+        var backup = TryBackupDirectory(pluginDirectory);
+
+        try
         {
-            await UnloadAsync(manifest.Id, ct).ConfigureAwait(false);
+            if (!string.IsNullOrWhiteSpace(manifest.Id))
+            {
+                await UnloadAsync(manifest.Id, ct).ConfigureAwait(false);
+            }
+
+            return await LoadAsync(pluginDirectory, ct).ConfigureAwait(false);
+        }
+        catch
+        {
+            // 新版装载失败 → 用备份把旧版放回去重新装载，做到「失败即回滚」。
+            if (backup is not null)
+            {
+                try
+                {
+                    RestoreBackup(backup, pluginDirectory);
+                    return await LoadAsync(pluginDirectory, ct).ConfigureAwait(false);
+                }
+                catch
+                {
+                    // 回滚也失败：抛出原始异常语义，让调用方知道该插件当前不可用
+                }
+            }
+
+            throw;
+        }
+    }
+
+    /// <summary>热重载前备份插件目录（失败返回 null，绝不影响主流程）。</summary>
+    private static string? TryBackupDirectory(string pluginDirectory)
+    {
+        try
+        {
+            if (!Directory.Exists(pluginDirectory))
+            {
+                return null;
+            }
+
+            var backup = pluginDirectory.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+                + ".bak-" + Guid.NewGuid().ToString("N")[..8];
+            CopyDirSafe(pluginDirectory, backup);
+            return backup;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    /// <summary>把备份目录放回原位（先清空目标再拷回）。</summary>
+    private static void RestoreBackup(string backup, string pluginDirectory)
+    {
+        if (Directory.Exists(pluginDirectory))
+        {
+            Directory.Delete(pluginDirectory, recursive: true);
         }
 
-        return await LoadAsync(pluginDirectory, ct).ConfigureAwait(false);
+        CopyDirSafe(backup, pluginDirectory);
+    }
+
+    /// <summary>拷贝目录，**不跟随符号链接**（防链接指到盘外 / 环状链接空转）。</summary>
+    private static void CopyDirSafe(string sourceDir, string targetDir)
+    {
+        Directory.CreateDirectory(targetDir);
+
+        foreach (var file in Directory.EnumerateFiles(sourceDir))
+        {
+            File.Copy(file, Path.Combine(targetDir, Path.GetFileName(file)), overwrite: true);
+        }
+
+        foreach (var sub in Directory.EnumerateDirectories(sourceDir))
+        {
+            if (new DirectoryInfo(sub).LinkTarget is not null)
+            {
+                continue;
+            }
+
+            CopyDirSafe(sub, Path.Combine(targetDir, Path.GetFileName(sub)));
+        }
     }
 
     /// <summary>

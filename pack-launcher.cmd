@@ -112,20 +112,25 @@ if errorlevel 1 (
 echo [5/6] Assemble green folder + embed zip ...
 if exist "%GREEN%" rmdir /s /q "%GREEN%"
 mkdir "%GREEN%"
-xcopy "%HOST_OUT%" "%GREEN%\host\" /e /i /q >nul
+rem NOTE: do not end a quoted path with backslash-quote. cmd eats the quote.
+xcopy "%HOST_OUT%" "%GREEN%\host" /e /i /q >nul
 mkdir "%GREEN%\host\desktop"
-xcopy "%DESK_OUT%" "%GREEN%\host\desktop\" /e /i /q >nul
-
-xcopy "%DESK_OUT%" "%HOST_OUT%\desktop\" /e /i /q >nul
+xcopy "%DESK_OUT%" "%GREEN%\host\desktop" /e /i /q >nul
+xcopy "%DESK_OUT%" "%HOST_OUT%\desktop" /e /i /q >nul
 
 if exist "%ZIP%" del /q "%ZIP%"
 powershell -NoProfile -ExecutionPolicy Bypass -Command "Compress-Archive -Path '%HOST_OUT%\*' -DestinationPath '%ZIP%' -Force"
-if errorlevel 1 (
-    echo   Zip failed.
-    call :maybe_pause
-    exit /b 1
-)
+if not errorlevel 1 goto zip_ok
+echo   Zip failed, file in use. Retrying ...
+call :release_locks
+if exist "%ZIP%" del /q "%ZIP%"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "Compress-Archive -Path '%HOST_OUT%\*' -DestinationPath '%ZIP%' -Force"
+if not errorlevel 1 goto zip_ok
+echo   Zip failed again. Close Host / Launcher / antivirus scan and retry.
+call :maybe_pause
+exit /b 1
 
+:zip_ok
 if not exist "%PAYLOAD_DIR%" mkdir "%PAYLOAD_DIR%"
 copy /y "%ZIP%" "%PAYLOAD_DIR%\host-bundle.zip" >nul
 
@@ -161,4 +166,9 @@ exit /b 0
 dotnet build-server shutdown >nul 2>&1
 if exist "src\AgentFramework.Contracts\obj\Release" rd /s /q "src\AgentFramework.Contracts\obj\Release" 2>nul
 if exist "src\AgentFramework.Contracts\bin\Release" rd /s /q "src\AgentFramework.Contracts\bin\Release" 2>nul
+exit /b 0
+
+:maybe_pause
+rem Always pause when double-clicked. Scripted callers can use --no-pause.
+pause
 exit /b 0

@@ -3,9 +3,9 @@ rem ============================================================
 rem  Run all 17 verify projects. Encoding MUST be ANSI/GBK.
 rem  Expect: every suite reports M failures = 0.
 rem
-rem  Build uses -m:1 (single node): parallel project builds can
-rem  race on AgentFramework.Contracts ref dll and produce CS0009
-rem  "file in use" plus a storm of fake CS0234/CS0246 errors.
+rem  Build uses -m:1 + UseSharedCompilation=false: parallel or
+rem  shared-compiler builds can race on ref dlls under obj\ and
+rem  produce CS0009 "file in use" plus fake CS0234/CS0246 errors.
 rem ============================================================
 setlocal
 cd /d "%~dp0"
@@ -15,15 +15,19 @@ echo [1/2] Building solution (Debug, single-node) ...
 rem Release file locks held by the incremental build server / VS.
 dotnet build-server shutdown >nul 2>&1
 
-dotnet build AgentFramework.sln -c Debug -m:1 --nologo -v quiet
+dotnet build AgentFramework.sln -c Debug -m:1 --nologo -v quiet /p:UseSharedCompilation=false /nodeReuse:false
 if errorlevel 1 (
     echo.
     echo   Build failed. If CS0009 "file in use" on *.dll under obj\:
-    echo   retrying once after build-server shutdown and Contracts obj wipe ...
+    echo   retrying once after build-server shutdown and ref wipe ...
     dotnet build-server shutdown >nul 2>&1
-    if exist "src\AgentFramework.Contracts\obj" rd /s /q "src\AgentFramework.Contracts\obj" 2>nul
-    if exist "src\AgentFramework.Contracts\bin" rd /s /q "src\AgentFramework.Contracts\bin" 2>nul
-    dotnet build AgentFramework.sln -c Debug -m:1 --nologo -v quiet
+    for /d /r "src" %%d in (obj) do (
+        if exist "%%d\Debug\net10.0\ref" rd /s /q "%%d\Debug\net10.0\ref" 2>nul
+    )
+    for /d /r "tests" %%d in (obj) do (
+        if exist "%%d\Debug\net10.0\ref" rd /s /q "%%d\Debug\net10.0\ref" 2>nul
+    )
+    dotnet build AgentFramework.sln -c Debug -m:1 --nologo -v quiet /p:UseSharedCompilation=false /nodeReuse:false
     if errorlevel 1 (
         echo.
         echo   Build still failed. Close Visual Studio / other builds, run clean.cmd, retry.

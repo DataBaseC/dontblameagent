@@ -97,7 +97,7 @@ public static class SessionContextBuilder
             }
         }
 
-        // ── 0.5) 悬空 / 孤儿工具调用检测（P0-2）──────────────────
+        // ── 0.5) 划分轮次（以 user 消息为界）+ 悬空 / 孤儿工具调用检测（P0-2）──
         // 「requested 已落盘、completed 未落盘」= 回合中途被杀或崩了
         // （审批等待窗口最长 5 分钟，是高发点）。直接投影会产出
         // assistant(tool_calls) → user 的**协议非法**序列，端点以 400 拒绝；
@@ -106,32 +106,16 @@ public static class SessionContextBuilder
         // 反过来的「孤儿 completed」（只有 completed、没有 requested）同样非法：
         // role=tool 消息必须对应上一条 assistant 的 tool_calls，否则端点也 400。
         // 丢弃孤儿结果 —— 等价于「这一次调用没发生过」，序列才合法。
-        var completedCallIds = new HashSet<string>(StringComparer.Ordinal);
-        foreach (var sessionEvent in all)
-        {
-            if (sessionEvent is ToolCallCompletedEvent done)
-            {
-                completedCallIds.Add(done.CallId);
-            }
-        }
-
-        var requestedCallIds = new HashSet<string>(StringComparer.Ordinal);
-        var danglingCallIds = new HashSet<string>(StringComparer.Ordinal);
-        foreach (var sessionEvent in all)
-        {
-            if (sessionEvent is ToolCallRequestedEvent req)
-            {
-                requestedCallIds.Add(req.CallId);
-                if (!completedCallIds.Contains(req.CallId))
-                {
-                    danglingCallIds.Add(req.CallId);
-                }
-            }
-        }
-
-        // ── 1) 划分轮次（以 user 消息为界）+ 工具名映射 ──────
+        //
+        // v3.6 审查修复：判定按**轮次**配对，而不是全局 CallId 集合 ——
+        // 端点跨轮复用 tool call id（本地模型常见 call_0）时，全局集合会把本轮的悬空
+        // 误判为「上轮有同 id 的 completed」→ 投影出协议非法序列 → 每轮 400（正是本段要防的病）。
+        // 键 = `{轮次}:{CallId}`，于是不同轮次的同名 id 天然隔离。
         var turnOfSeq = new Dictionary<long, int>();
         var callNames = new Dictionary<string, string>(StringComparer.Ordinal);
+        var completedCallIds = new HashSet<string>(StringComparer.Ordinal);
+        var requestedCallIds = new HashSet<string>(StringComparer.Ordinal);
+        var danglingCallIds = new HashSet<string>(StringComparer.Ordinal);
         var turn = 0;
 
         foreach (var sessionEvent in all)
@@ -145,7 +129,24 @@ public static class SessionContextBuilder
 
             if (sessionEvent is ToolCallRequestedEvent requested)
             {
-                callNames[requested.CallId] = requested.ToolName;
+                callNames[$"{turn}:{requested.CallId}"] = requested.ToolName;
+            }
+            else if (sessionEvent is ToolCallCompletedEvent completed)
+            {
+                completedCallIds.Add($"{turn}:{completed.CallId}");
+            }
+        }
+
+        foreach (var sessionEvent in all)
+        {
+            if (sessionEvent is ToolCallRequestedEvent requested)
+            {
+                var key = $"{turnOfSeq[requested.Seq]}:{requested.CallId}";
+                requestedCallIds.Add(key);
+                if (!completedCallIds.Contains(key))
+                {
+                    danglingCallIds.Add(key);
+                }
             }
         }
 
@@ -240,7 +241,8 @@ public static class SessionContextBuilder
                     // 悬空调用不进上下文：没有结果的 tool_calls 是协议非法序列。
                     // 助手消息若带正文仍照常出现（合法）；只有工具意图的那种，
                     // 整条不出现 —— 等价于「这一轮没发生过」，同样是合法序列。
-                    if (!danglingCallIds.Contains(requested.CallId))
+                    // 键按轮次配对（见上），避免跨轮复用 id 的误判。
+                    if (!danglingCallIds.Contains($"{turnOfSeq.GetValueOrDefault(requested.Seq)}:{requested.CallId}"))
                     {
                         AppendToolCall(messages, requested);
                     }
@@ -251,7 +253,8 @@ public static class SessionContextBuilder
                 {
                     // 孤儿结果：没有对应的 requested —— 投影成 role=tool 会产出
                     // 没有配对 tool_calls 的非法序列。直接丢弃。
-                    if (!requestedCallIds.Contains(completed.CallId))
+                    var completedKey = $"{turnOfSeq.GetValueOrDefault(completed.Seq)}:{completed.CallId}";
+                    if (!requestedCallIds.Contains(completedKey))
                     {
                         break;
                     }
@@ -265,7 +268,7 @@ public static class SessionContextBuilder
                     if (inScope)
                     {
                         var note = MaskNote(
-                            callNames.GetValueOrDefault(completed.CallId, "tool"),
+                            callNames.GetValueOrDefault(completedKey, "tool"),
                             completed,
                             opt.MaskedNoteMaxChars);
 

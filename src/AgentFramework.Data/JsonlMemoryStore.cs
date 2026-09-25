@@ -305,20 +305,23 @@ public sealed class JsonlMemoryStore(MemoryStoreOptions options, Func<string, st
     }
 
     /// <inheritdoc />
+    public ValueTask<IReadOnlyList<MemoryEntry>> PreviewSweepAsync(
+        string scope,
+        DateTimeOffset now,
+        SweepPolicy policy,
+        CancellationToken ct = default)
+        => ValueTask.FromResult<IReadOnlyList<MemoryEntry>>(SleepCandidates(scope, now, policy));
+
+    /// <inheritdoc />
     public async ValueTask<int> SweepAsync(
         string scope,
         DateTimeOffset now,
-        int minAgeDays,
-        int maxScore,
+        SweepPolicy policy,
         string source = "system",
         CancellationToken ct = default)
     {
         // 快照先行（每条 archive 都会失效缓存，边扫边写会自我干扰）
-        var candidates = Fold(scope).Active
-            .Where(e => !e.IsImportant
-                        && (now - e.CreatedAt).TotalDays >= minAgeDays
-                        && e.Score <= maxScore)
-            .ToList();
+        var candidates = SleepCandidates(scope, now, policy);
 
         var count = 0;
         foreach (var entry in candidates)
@@ -331,6 +334,32 @@ public sealed class JsonlMemoryStore(MemoryStoreOptions options, Func<string, st
         }
 
         return count;
+    }
+
+    /// <summary>
+    /// 休眠候选 —— 降档判据的**唯一**出处（预览与执行共用，杜绝两边口径漂移）。
+    ///
+    /// 判据是「使用频率」，不是「存了多久」：
+    ///   热度 = (1 + 使用次数) × 0.5^(闲置天数 / 半衰期) &lt; 阈值  ⇒ 休眠。
+    /// 时间只以「半衰期」的形式出现在衰减指数里，**从不单独作为门槛**：
+    ///   · 越用越新 —— 每用一次，次数 +1、衰减时钟归零 → 热度只增不减 → 老而常用永不掉线；
+    ///   · 寿命是频率的函数 —— 用过一次就把衰减阈值推后一个半衰期，不是"满 30 天必扫"。
+    /// </summary>
+    private List<MemoryEntry> SleepCandidates(string scope, DateTimeOffset now, SweepPolicy policy)
+        => Fold(scope).Active
+            .Where(e => !e.IsImportant && DecayedHeat(e, now, policy) < policy.MinEffectiveScore)
+            .ToList();
+
+    /// <summary>
+    /// 按半衰期衰减后的有效热度（纯函数，可单测；时间在此以衰减曲线参与，不作门槛）。
+    /// 公开——验证工程要直接断言频率与时间的关系。
+    /// </summary>
+    public static double DecayedHeat(MemoryEntry entry, DateTimeOffset now, SweepPolicy policy)
+    {
+        var last = entry.LastUsedAt ?? entry.CreatedAt;
+        var idleDays = Math.Max(0.0, (now - last).TotalDays);
+        var halfLife = Math.Max(0.1, policy.HalfLifeDays);
+        return (1 + entry.UseCount) * Math.Pow(0.5, idleDays / halfLife);
     }
 
     /// <summary>热升温事件（score）本身不是记忆，不进视图 —— 热度已叠加到目标条目上。</summary>
@@ -423,6 +452,52 @@ public sealed class JsonlMemoryStore(MemoryStoreOptions options, Func<string, st
 
         await WriteAsync(entry, ct).ConfigureAwait(false);
         return current with { Score = current.Score + entry.Score, IsImportant = current.IsImportant || markImportant };
+    }
+
+    /// <inheritdoc />
+    public async ValueTask<int> TouchAsync(
+        string scope,
+        IReadOnlyCollection<string> ids,
+        string? sourceSession = null,
+        CancellationToken ct = default)
+    {
+        if (ids.Count == 0)
+        {
+            return 0;
+        }
+
+        // 目标必须存在于当前视图（撤销 / 被取代的不该写垃圾事件）。
+        var live = Fold(scope).Active
+            .Where(e => ids.Contains(e.Id, StringComparer.Ordinal))
+            .ToList();
+
+        if (live.Count == 0)
+        {
+            return 0;
+        }
+
+        // delta = 0：只记「被用过」（次数 +1、刷新最近使用），**不动排序热度** ——
+        // 排序热度留给显式召回，避免常驻条目自我强化、把索引卡锁死。
+        // 一轮合成**一条 batch** 落盘（与 merge 同一套"一行多 ops"机制），多次使用只付一次 fsync。
+        var ops = live.Select(e => new MemoryEntry
+        {
+            Kind = MemoryKinds.Score,
+            Scope = scope,
+            Text = string.Empty,
+            TargetId = e.Id,
+            Score = 0,
+            SourceSession = sourceSession ?? e.SourceSession,
+            Source = "recall",
+        }).ToList();
+
+        await WriteBatchAsync(new MemoryBatch
+        {
+            Kind = "touch",
+            Scope = scope,
+            Ops = ops,
+        }, ct).ConfigureAwait(false);
+
+        return ops.Count;
     }
 
     private static IEnumerable<string> Scopes(string? scope)
@@ -572,6 +647,10 @@ public sealed class JsonlMemoryStore(MemoryStoreOptions options, Func<string, st
         var retracted = new HashSet<string>(StringComparer.Ordinal);
         var scores = new Dictionary<string, int>(StringComparer.Ordinal);
         var important = new HashSet<string>(StringComparer.Ordinal);
+        // 使用频率视图：由 score 事件折叠得出（次数 + 最近一次使用时间）—— 降档判据的主信号。
+        // 与排序热度（scores）分开：隐式消费（delta=0）只涨次数、刷新时间，不动排序热度。
+        var useCount = new Dictionary<string, int>(StringComparer.Ordinal);
+        var lastUsed = new Dictionary<string, DateTimeOffset>(StringComparer.Ordinal);
         // 归档是**最后一次事件赢**（archive → 入档；restore → 出档），可反复升降级
         var archivedIds = new HashSet<string>(StringComparer.Ordinal);
 
@@ -599,12 +678,25 @@ public sealed class JsonlMemoryStore(MemoryStoreOptions options, Func<string, st
             if (string.Equals(e.Kind, MemoryKinds.Score, StringComparison.Ordinal)
                 && !string.IsNullOrWhiteSpace(e.TargetId))
             {
-                scores.TryGetValue(e.TargetId, out var soFar);
-                scores[e.TargetId] = soFar + e.Score;
+                var target = e.TargetId;
+
+                // 排序热度：score 事件的 delta 累加（显式召回 delta>0；隐式消费 delta=0，不动它）。
+                scores.TryGetValue(target, out var soFar);
+                scores[target] = soFar + e.Score;
+
+                // 使用频率：每一次「使用事件」都算一次（不论 delta 是否为 0）。
+                useCount.TryGetValue(target, out var uses);
+                useCount[target] = uses + 1;
+
+                // 最近使用：事件自带的写入时间，就是「这次使用发生在何时」。
+                if (!lastUsed.TryGetValue(target, out var seen) || e.CreatedAt > seen)
+                {
+                    lastUsed[target] = e.CreatedAt;
+                }
 
                 if (e.IsImportant)
                 {
-                    important.Add(e.TargetId);
+                    important.Add(target);
                 }
             }
         }
@@ -620,7 +712,7 @@ public sealed class JsonlMemoryStore(MemoryStoreOptions options, Func<string, st
                 continue;
             }
 
-            var entry = ApplyTemperature(e, scores, important);
+            var entry = ApplyTemperature(e, scores, important, useCount, lastUsed);
 
             if (archivedIds.Contains(e.Id))
             {
@@ -648,21 +740,27 @@ public sealed class JsonlMemoryStore(MemoryStoreOptions options, Func<string, st
         return new FoldView(active, archived);
     }
 
-    /// <summary>把折叠出的热度叠加回条目（纯函数，只改 Score/IsImportant 两个视图字段）。</summary>
+    /// <summary>
+    /// 把折叠出的热度叠加回条目（纯函数，只改 Score/IsImportant/UseCount/LastUsedAt 四个**视图字段**，
+    /// 不落盘）。UseCount / LastUsedAt 是降档判据的主信号，与排序热度 Score 分开维护。
+    /// </summary>
     private static MemoryEntry ApplyTemperature(
         MemoryEntry entry,
         Dictionary<string, int> scores,
-        HashSet<string> important)
+        HashSet<string> important,
+        Dictionary<string, int> useCount,
+        Dictionary<string, DateTimeOffset> lastUsed)
     {
-        if (!scores.TryGetValue(entry.Id, out var bonus) && !important.Contains(entry.Id))
-        {
-            return entry;
-        }
+        scores.TryGetValue(entry.Id, out var bonus);
+        useCount.TryGetValue(entry.Id, out var uses);
+        lastUsed.TryGetValue(entry.Id, out var seen);
 
         return entry with
         {
             Score = entry.Score + bonus,
             IsImportant = entry.IsImportant || important.Contains(entry.Id),
+            UseCount = uses,
+            LastUsedAt = seen == default ? null : seen,
         };
     }
 

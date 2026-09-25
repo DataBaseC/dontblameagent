@@ -119,30 +119,44 @@ public sealed class SqliteSessionIndex : ISessionIndex
         await _gate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
+            var text = Describe(sessionEvent);
+
+            // v3.6 审查修复：水位推进与事件写入必须**原子**。
+            // 原实现先 UpsertWatermarkAsync 再 INSERT，两步之间失败（磁盘满/库被占/崩溃）时，
+            // 恢复逻辑按水位认为「已索引到这条」，于是该事件永久不在索引里、search_history 静默查不到，
+            // 也不会触发重建。包进事务后二者同成同败（对照 RebuildAsync 本就包事务）。
+            await using var transaction = await _connection.BeginTransactionAsync(ct).ConfigureAwait(false);
+
             // 水位先行：空文本事件也要推进水位。
             // 否则「最后几条恰好没有可检索文本」时 MAX(seq) 永远落后于日志，
             // 用条数/水位判断「索引是否跟上」会一直误报落后、每次启动都白重建。
-            await UpsertWatermarkAsync(sessionId, sessionEvent.Seq, ct).ConfigureAwait(false);
+            await UpsertWatermarkAsync(sessionId, sessionEvent.Seq, (SqliteTransaction)transaction, ct).ConfigureAwait(false);
 
-            var text = Describe(sessionEvent);
             if (text.Length == 0)
             {
                 // 没有可检索文本的事件（比如纯粹的会话创建）不进索引 —— 但水位已经推进
+                await transaction.CommitAsync(ct).ConfigureAwait(false);
                 return;
             }
 
-            await using var command = _connection.CreateCommand();
-            command.CommandText = """
-                INSERT INTO events(session_id, seq, type, ts, text)
-                VALUES ($session, $seq, $type, $ts, $text)
-                ON CONFLICT(session_id, seq) DO UPDATE SET type = excluded.type, text = excluded.text;
-                """;
-            Bind(command, sessionId, sessionEvent, text);
-            await command.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+            await using (var command = _connection.CreateCommand())
+            {
+                command.Transaction = (SqliteTransaction)transaction;
+                command.CommandText = """
+                    INSERT INTO events(session_id, seq, type, ts, text)
+                    VALUES ($session, $seq, $type, $ts, $text)
+                    ON CONFLICT(session_id, seq) DO UPDATE SET type = excluded.type, text = excluded.text;
+                    """;
+                Bind(command, sessionId, sessionEvent, text);
+                await command.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+            }
+
+            await transaction.CommitAsync(ct).ConfigureAwait(false);
         }
         catch (SqliteException)
         {
-            // 单条写失败不该冒泡：日志才是真相源，索引漏一条最多是检索不到它
+            // 单条写失败不该冒泡：日志才是真相源，索引漏一条最多是检索不到它。
+            // 事务未提交即回滚 —— 水位不会独自前移，下次重建/续写会补上。
         }
         finally
         {
@@ -257,9 +271,10 @@ public sealed class SqliteSessionIndex : ISessionIndex
         }
     }
 
-    private async Task UpsertWatermarkAsync(string sessionId, long seq, CancellationToken ct)
+    private async Task UpsertWatermarkAsync(string sessionId, long seq, SqliteTransaction transaction, CancellationToken ct)
     {
         await using var command = _connection.CreateCommand();
+        command.Transaction = transaction;
         command.CommandText = """
             INSERT INTO watermark(session_id, max_seq) VALUES ($session, $seq)
             ON CONFLICT(session_id) DO UPDATE SET max_seq = MAX(max_seq, excluded.max_seq);

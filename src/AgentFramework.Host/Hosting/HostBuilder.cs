@@ -53,9 +53,27 @@ public static class HostBuilder
             ? DefaultModules()
             : [.. DefaultModules().Concat(customModules)];
 
-        foreach (var module in modules.OrderBy(m => m.Order))
+        try
         {
-            await module.ConfigureAsync(state, ct).ConfigureAwait(false);
+            foreach (var module in modules.OrderBy(m => m.Order))
+            {
+                await module.ConfigureAsync(state, ct).ConfigureAwait(false);
+            }
+        }
+        catch
+        {
+            // v3.6 审查修复：装配中途失败要回收已建资源 —— 否则内核作用域、事件日志句柄、
+            // SQLite 连接、插件 ALC 都会泄漏，反复失败启动会累积。
+            try
+            {
+                kernel.DisposeKernelScopes();
+            }
+            catch
+            {
+                // 回收失败不掩盖原始异常
+            }
+
+            throw;
         }
 
         return AgentHost.CreateCore(state);
@@ -216,6 +234,10 @@ public sealed class ModelModule : IHostModule
             rephraseTargets["local"] = localClient;
         }
 
+        // v3.6 审查修复：按需造的「端点:模型」客户端要缓存复用 ——
+        // 原实现每次转述都 new 一个（各带自己的 HttpClient）且从不释放，高频转述会耗尽本地连接。
+        var adHocTargets = new Dictionary<string, ILlmClient>(StringComparer.OrdinalIgnoreCase);
+
         ILlmClient? ResolveRephraseTarget(string? name)
         {
             if (string.IsNullOrWhiteSpace(name))
@@ -241,7 +263,13 @@ public sealed class ModelModule : IHostModule
                 var modelId = parts[1].Trim();
                 if (provider is not null && !string.IsNullOrWhiteSpace(provider.BaseUrl) && modelId.Length > 0)
                 {
-                    return new OpenAiCompatibleClient(provider.Id, new OpenAiCompatibleOptions
+                    var cacheKey = provider.Id + ":" + modelId;
+                    if (adHocTargets.TryGetValue(cacheKey, out var cached))
+                    {
+                        return cached;
+                    }
+
+                    var created = new OpenAiCompatibleClient(provider.Id, new OpenAiCompatibleOptions
                     {
                         BaseUrl = provider.BaseUrl,
                         ApiKey = provider.ResolveApiKey(modelStore?.Protector ?? SecretProtectors.Default) ?? string.Empty,
@@ -249,6 +277,8 @@ public sealed class ModelModule : IHostModule
                         ReasoningStyle = string.IsNullOrWhiteSpace(provider.ReasoningStyle) ? ReasoningStyles.None : provider.ReasoningStyle,
                         ReasoningEffort = provider.ReasoningEffort ?? string.Empty,
                     });
+                    adHocTargets[cacheKey] = created;
+                    return created;
                 }
 
                 return null;

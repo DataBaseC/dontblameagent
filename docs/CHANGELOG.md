@@ -18,3 +18,7 @@
 
 > 阅读顺序建议：README（铁律与切片）→ PLAN-*（下一步）→ history/CHANGES-*（怎么演进到今天）。
 > 历史 CHANGES 里的检查数字是当时快照，**不要**拿它对今天的 `verify-all` 输出。
+
+> **降档判据修订**：记忆降档由「30 天时间线」改为「**调用频率 × 半衰期衰减**」——
+> 越用越新、老而常用永不掉线；并给「本轮检索命中」补上隐式使用信号。
+> 详见 [PLAN-memory-evolution.md](PLAN-memory-evolution.md) 第 6 节。

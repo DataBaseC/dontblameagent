@@ -183,14 +183,46 @@ public sealed class ReadFileTool(ToolkitOptions options) : ITool, IToolWithSchem
             return ValueTask.FromResult(ToolResult.Fail($"文件不存在：{path}"));
         }
 
-        var text = File.ReadAllText(fullPath);
-        if (text.Length > options.MaxReadChars)
+        // v3.6 审查修复：**流式读到上限即停**，不再先 ReadAllText 再截断 ——
+        // 否则模型把 path 指向大二进制/大日志时会先整段读进内存 → OutOfMemory。
+        var (text, truncated) = ReadCapped(fullPath, options.MaxReadChars);
+        if (truncated)
         {
-            text = string.Concat(text.AsSpan(0, options.MaxReadChars), "\n...[内容已截断]");
+            text += "\n...[内容已截断]";
         }
 
         // L2：大文件不该整段躺在上下文里被反复重发 —— 落盘，只留摘要 + 路径 + 头尾
         return ValueTask.FromResult(ToolResult.Ok(options.ShrinkResult("read_file", text)));
+    }
+
+    /// <summary>
+    /// 按字符上限**流式读取，到上限即停**（绝不整文件读入内存）。
+    /// 返回 (内容, 是否被截断)；截断点避开代理对，避免产生非法 UTF-16 写坏日志。
+    /// </summary>
+    private static (string Text, bool Truncated) ReadCapped(string path, int maxChars)
+    {
+        using var reader = new System.IO.StreamReader(path, System.Text.Encoding.UTF8);
+        var buffer = new char[Math.Max(1, Math.Min(maxChars, 8192))];
+        var sb = new System.Text.StringBuilder(Math.Min(maxChars, 8192));
+
+        while (sb.Length < maxChars)
+        {
+            var want = Math.Min(buffer.Length, maxChars - sb.Length);
+            var read = reader.Read(buffer, 0, want);
+            if (read <= 0)
+            {
+                return (sb.ToString(), false);
+            }
+
+            sb.Append(buffer, 0, read);
+        }
+
+        if (sb.Length > 0 && char.IsHighSurrogate(sb[^1]))
+        {
+            sb.Length -= 1;
+        }
+
+        return (sb.ToString(), true);
     }
 }
 

@@ -201,8 +201,18 @@ public sealed class WebFetchTool : ITool, IToolWithSchema
 
             // 限长读（加固 A）：不要先 ReadAsStringAsync 再截断 ——
             // 那样一个超大页面就已经把内存吃掉了，后面的截断只是自欺。
+            // v3.6 审查修复：这里也要 catch 超时/取消 —— 原先只有 GET 阶段被 try 包住，
+            // 读取响应体时超时会抛未捕获的 OperationCanceledException，行为与 GET 阶段不一致。
             var cap = Math.Max(1, _options.FetchMaxChars) * 2;
-            var raw = await ReadCappedAsync(response.Content, cap, timeout.Token).ConfigureAwait(false);
+            string raw;
+            try
+            {
+                raw = await ReadCappedAsync(response.Content, cap, timeout.Token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                return ToolResult.Fail($"抓取超时（{_options.FetchTimeoutMs}ms）");
+            }
 
             var text = mediaType.Contains("html", StringComparison.OrdinalIgnoreCase)
                 ? HtmlText.ToText(raw)

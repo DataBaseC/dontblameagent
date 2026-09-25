@@ -256,8 +256,18 @@ public sealed class JsonlEventLog : IDisposable
 
         if (bytes.Length > truncateTo)
         {
-            using var repair = new FileStream(path, FileMode.Open, FileAccess.Write, FileShare.None);
-            repair.SetLength(truncateTo);
+            // v3.6 审查修复：修复句柄也要宽容共享 —— 本文件读路径特意用 ReadWrite|Delete
+            // 以容忍别的实例持有写句柄；这里若要求独占，崩溃半行 + 日志正被另一实例打开时会
+            // 直接抛 IOException → 会话打不开。共享模式下截断，最坏让另一实例多扫一次坏行。
+            try
+            {
+                using var repair = new FileStream(path, FileMode.Open, FileAccess.Write, FileShare.ReadWrite | FileShare.Delete);
+                repair.SetLength(truncateTo);
+            }
+            catch (IOException)
+            {
+                // 无法安全截断时退化为「不修复、继续追加」：读端本就能跳坏行
+            }
         }
 
         return (lastSeq, count);

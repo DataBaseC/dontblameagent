@@ -143,8 +143,13 @@ public sealed class ToolkitOptions
     {
         foreach (var blocked in BlockedDomains)
         {
-            if (host.EndsWith(blocked, StringComparison.OrdinalIgnoreCase)
-                || host.Equals(blocked, StringComparison.OrdinalIgnoreCase))
+            // v3.6 审查修复：按**子域名边界**匹配 —— 原先只用 EndsWith，
+            // 屏蔽 evil.com 会把 notevil.com 一起误伤（功能性过度拦截）。
+            // 要求完全相等，或「前一个字符是 '.'」的真后缀。
+            if (host.Equals(blocked, StringComparison.OrdinalIgnoreCase)
+                || (host.Length > blocked.Length
+                    && host.EndsWith(blocked, StringComparison.OrdinalIgnoreCase)
+                    && host[host.Length - blocked.Length - 1] == '.'))
             {
                 return true;
             }
