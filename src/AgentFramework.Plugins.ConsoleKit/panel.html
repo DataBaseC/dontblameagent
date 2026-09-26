@@ -48,12 +48,9 @@
   </div>
 
   <div class="section">
-    <div class="label">阅读</div>
-    <div class="row">
-      <span>宽松阅读模式（行距与行长都放大，适合长文）</span>
-      <input type="checkbox" id="reading" style="width:16px;height:16px;accent-color:var(--accent)">
-    </div>
-    <div class="hint">只影响消息气泡，其余布局不动。</div>
+    <div class="label">阅读模式</div>
+    <div class="themes" id="readings"></div>
+    <div class="hint">只影响消息气泡与输入框字体，其余布局不动。</div>
   </div>
 
   <div class="foot">
@@ -81,8 +78,15 @@ const PRESETS = [
   { id: 'forest',  name: '护眼绿',       swatch: 'linear-gradient(135deg,#16201b,#3fa06a)' }
 ];
 
+const READING_PRESETS = [
+  { id: 'off',     name: '默认',         swatch: 'linear-gradient(135deg,#2a3140,#3d4658)' },
+  { id: 'loose',   name: '宽松长文',     swatch: 'linear-gradient(135deg,#e8d5b0,#c9a86c)' },
+  { id: 'compact', name: '紧凑',         swatch: 'linear-gradient(135deg,#4a5568,#718096)' },
+  { id: 'console', name: '极简控制台',   swatch: 'linear-gradient(135deg,#0a0,#0f0 40%,#030)' }
+];
+
 const themesEl = document.getElementById('themes');
-const readingEl = document.getElementById('reading');
+const readingsEl = document.getElementById('readings');
 const dumpEl = document.getElementById('dump');
 const scopeEl = document.getElementById('scope');
 
@@ -92,7 +96,7 @@ if (!host) {
 }
 
 function current() {
-  return host ? host.read() : { theme: 'default', reading: false };
+  return host ? host.read() : { theme: 'default', reading: 'off' };
 }
 
 function render() {
@@ -123,15 +127,33 @@ function render() {
     themesEl.appendChild(btn);
   });
 
-  readingEl.checked = state.reading;
-  dumpEl.textContent = 'theme=' + state.theme + ' · reading=' + (state.reading ? 'on' : 'off');
-}
+  readingsEl.innerHTML = '';
+  READING_PRESETS.forEach((preset) => {
+    const btn = document.createElement('button');
+    btn.className = 'theme';
+    btn.setAttribute('aria-pressed', String(state.reading === preset.id));
 
-readingEl.onchange = () => {
-  if (!host) { return; }
-  host.save({ reading: readingEl.checked });
-  render();
-};
+    const swatch = document.createElement('span');
+    swatch.className = 'swatch';
+    swatch.style.background = preset.swatch;
+
+    const name = document.createElement('span');
+    name.className = 'name';
+    name.textContent = preset.name;
+
+    btn.appendChild(swatch);
+    btn.appendChild(name);
+    btn.onclick = () => {
+      if (!host) { return; }
+      host.save({ reading: preset.id });
+      render();
+    };
+
+    readingsEl.appendChild(btn);
+  });
+
+  dumpEl.textContent = 'theme=' + state.theme + ' · reading=' + state.reading;
+}
 
 render();
 </script>

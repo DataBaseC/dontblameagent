@@ -1,7 +1,7 @@
 using System.Text;
 using AgentFramework.Contracts;
 
-namespace AgentFramework.Plugins.DevKit;
+namespace AgentFramework.Tools.FileOps;
 
 /// <summary>
 /// 按行读取（带行号）。

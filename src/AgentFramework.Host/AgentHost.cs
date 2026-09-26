@@ -686,6 +686,9 @@ public sealed class AgentHost : IAsyncDisposable
     public Task<AgentRunResult> SendAsync(string input, CancellationToken ct = default)
         => SendAsync(_session, input, ct);
 
+    public Task<AgentRunResult> SendAsync(string input, IReadOnlyList<LlmImage>? images, CancellationToken ct = default)
+        => SendAsync(_session, input, ct, images: images);
+
     /// <summary>
     /// 在**指定会话**上跑一轮（P1）。
     ///
@@ -699,7 +702,11 @@ public sealed class AgentHost : IAsyncDisposable
     /// 「不许两个回合同时跑」这条纪律本来就只针对同一会话（同一个事件流不能被交错写入）。
     /// </para>
     /// </summary>
-    public async Task<AgentRunResult> SendAsync(Hosting.SessionRuntime session, string input, CancellationToken ct = default)
+    public async Task<AgentRunResult> SendAsync(
+        Hosting.SessionRuntime session,
+        string input,
+        CancellationToken ct = default,
+        IReadOnlyList<LlmImage>? images = null)
     {
         await session.TurnGate.WaitAsync(ct).ConfigureAwait(false);
         try
@@ -797,7 +804,7 @@ public sealed class AgentHost : IAsyncDisposable
                 }
             }
 
-            return await session.Runner.RunAsync(input, assembled.Messages, ct, rephrasedText, rephraseModel)
+            return await session.Runner.RunAsync(input, assembled.Messages, ct, rephrasedText, rephraseModel, images)
                 .ConfigureAwait(false);
         }
         finally

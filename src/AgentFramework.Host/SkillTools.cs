@@ -93,8 +93,8 @@ public sealed class SkillScaffoldTool(ToolkitOptions toolkit, Action? skillsChan
 
     public string ParametersJsonSchema => """
         {"type":"object","properties":{
-          "id":{"type":"string","description":"技能目录名：字母数字或 - _"},
-          "name":{"type":"string","description":"技能显示名；不填则用 id"},
+          "id":{"type":"string","description":"技能目录名（本地骨架落在 skills/<id>/）：字母数字或 - _"},
+          "name":{"type":"string","description":"技能名；不填则用 id。须与 id 同规则（字母数字或 - _），导入时它会用作目录名"},
           "description":{"type":"string","description":"一句话说明这个技能干什么"},
           "prompt":{"type":"string","description":"技能激活时追加到提示词的说明（可空）"},
           "tools":{"type":"array","items":{"type":"string"},"description":"工具白名单（可空 = 不收窄）"}
@@ -124,6 +124,15 @@ public sealed class SkillScaffoldTool(ToolkitOptions toolkit, Action? skillsChan
         if (string.IsNullOrWhiteSpace(name))
         {
             name = id;
+        }
+
+        // name 与 id 同一白名单 —— 它在导入时会当目录名用。
+        // 从前 scaffold 只校 id、validate 却卡 name，必然产出「自检不过」的包。
+        if (!SkillValidator.IsValidName(name))
+        {
+            return ValueTask.FromResult(ToolResult.Fail(
+                $"技能名「{name}」不合法（只允许字母数字 - _ ，≤64 字符）。" +
+                "它在导入时会用作目录名；要显示空格请改用连字符（如 Smoke-Test-Skill），或省略 name 直接用 id。"));
         }
 
         var tools = SkillToolArgs.StringArray(SkillToolArgs.Get(invocation, "tools"));
@@ -260,7 +269,7 @@ public sealed class SkillValidateTool(
 
         if (!SkillValidator.IsValidName(skill.Name))
         {
-            errors.Add($"name「{skill.Name}」不合法：只允许字母数字与 - _ ，≤64 字符（它会被用作目录名）");
+            errors.Add($"name「{skill.Name}」不合法：只允许字母数字与 - _ ，≤64 字符（导入时它会用作目录名，与 scaffold 的 id 同规则）");
         }
 
         var unknown = SkillValidator.UnknownTools(skill, registeredTools());

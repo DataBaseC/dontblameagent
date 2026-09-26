@@ -630,6 +630,9 @@ public sealed partial class WebUiServer : IDisposable, IApprovalPrompt
                         // 任务 6：区分「显式标注」与「启发式猜的」—— 界面据此展示「已支持 / 未知 / 不支持」，
                         // 「未知」要显示「自动/端点默认」，不能假装能调。
                         reasoningKnown = m.SupportsReasoning is not null,
+                        // 视觉：界面据此启用/禁用贴图入口（禁用而不是隐藏，免得用户找不到）
+                        vision = m.SupportsVision ?? ModelCapabilities.GuessSupportsVision(m.Id),
+                        visionKnown = m.SupportsVision is not null,
                     }).ToList(),
                 }).ToList(),
         };
@@ -1072,6 +1075,35 @@ public sealed partial class WebUiServer : IDisposable, IApprovalPrompt
         => element.TryGetProperty(property, out var value) && value.ValueKind == JsonValueKind.String
             ? value.GetString()
             : null;
+
+    /// <summary>
+    /// 读 <c>images</c> 数组：每项是 data URL 字符串（<c>data:image/png;base64,…</c>）。
+    /// 非法项跳过 —— 坏附件不该把整条消息拒掉。
+    /// </summary>
+    private static List<LlmImage>? ReadImages(JsonElement element, string property)
+    {
+        if (!element.TryGetProperty(property, out var node) || node.ValueKind != JsonValueKind.Array)
+        {
+            return null;
+        }
+
+        List<LlmImage>? list = null;
+        foreach (var item in node.EnumerateArray())
+        {
+            if (item.ValueKind != JsonValueKind.String)
+            {
+                continue;
+            }
+
+            var image = LlmImage.TryParseDataUrl(item.GetString());
+            if (image is not null)
+            {
+                (list ??= []).Add(image);
+            }
+        }
+
+        return list;
+    }
 
     private static bool TryReadBool(JsonElement element, string property, out bool value)
     {

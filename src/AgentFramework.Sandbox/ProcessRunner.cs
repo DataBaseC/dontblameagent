@@ -22,16 +22,19 @@ internal static class ProcessRunner
         SandboxLimits Limits,
         IReadOnlyList<string> Notes,
         Action<Process>? OnStarted,
-        Action? OnTerminate);
+        Action? OnTerminate,
+        /// <summary>会话钉死的 shell。null = 自动解析（优先 POSIX，只解析这一次的调用方应自己缓存）。</summary>
+        ShellSpec? Shell = null);
 
     public static async Task<SandboxOutcome> RunAsync(RunOptions run, CancellationToken ct)
     {
         var notes = new List<string>(run.Notes);
 
-        var isWindows = OperatingSystem.IsWindows();
+        var shell = run.Shell ?? ShellResolver.Resolve();
+
         var startInfo = new ProcessStartInfo
         {
-            FileName = isWindows ? "cmd.exe" : "/bin/sh",
+            FileName = shell.FileName,
             WorkingDirectory = run.WorkingDirectory,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
@@ -39,7 +42,14 @@ internal static class ProcessRunner
             CreateNoWindow = true,
         };
 
-        if (isWindows)
+        if (shell.IsPosix)
+        {
+            // ArgumentList 的 Win32 引号规则只服务 CreateProcess；POSIX shell 走 -c 一个字符串
+            // 时把整条命令交给 shell 自己解析，语义稳定。
+            startInfo.ArgumentList.Add("-c");
+            startInfo.ArgumentList.Add(run.Command);
+        }
+        else if (shell.Id == "cmd")
         {
             // ★ ArgumentList 的 Win32 引号规则 cmd.exe 不认（.NET 官方文档明确警告不要
             //   对 cmd/bat 用 ArgumentList）：含引号的命令会被解析成畸形转义。
@@ -48,7 +58,10 @@ internal static class ProcessRunner
         }
         else
         {
-            startInfo.ArgumentList.Add("-c");
+            // powershell / pwsh：-Command 收整条命令
+            startInfo.ArgumentList.Add("-NoProfile");
+            startInfo.ArgumentList.Add("-NonInteractive");
+            startInfo.ArgumentList.Add("-Command");
             startInfo.ArgumentList.Add(run.Command);
         }
 
@@ -57,7 +70,7 @@ internal static class ProcessRunner
         // `echo %VAR%`，密钥就外带了 —— 「密钥不出门」必须覆盖命令通道。
         // 整表清空后只放行命令行工具真正需要的那几个变量。
         startInfo.Environment.Clear();
-        foreach (var (key, value) in SafeEnvironment(isWindows))
+        foreach (var (key, value) in SafeEnvironment(shell))
         {
             startInfo.Environment[key] = value;
         }
@@ -75,6 +88,25 @@ internal static class ProcessRunner
         }
 
         using var process = new Process { StartInfo = startInfo };
+
+        // Windows cmd 的 stdout/stderr 是 OEM 码页（中文机=GBK/936）字节流。
+        // Process 默认按 UTF-8 解 → 「'pwd' 不是内部或外部命令」变乱码。
+        // POSIX shell（Git Bash 等）与 PowerShell 默认 UTF-8，别用 OEM 去解。
+        if (!shell.IsPosix && shell.Id == "cmd")
+        {
+            try
+            {
+                System.Text.Encoding.RegisterProvider(System.Text.CodePagesEncodingProvider.Instance);
+                var oem = Encoding.GetEncoding(
+                    System.Globalization.CultureInfo.CurrentCulture.TextInfo.OEMCodePage);
+                startInfo.StandardOutputEncoding = oem;
+                startInfo.StandardErrorEncoding = oem;
+            }
+            catch
+            {
+                // 缺码页包 / 非典型区域设置：退回 UTF-8，至少别让命令跑挂
+            }
+        }
 
         var stdout = new StringBuilder();
         var stderr = new StringBuilder();
@@ -221,11 +253,13 @@ internal static class ProcessRunner
     /// 命令进程可见的环境白名单：只放行 shell / 常见工具链真正需要的变量。
     /// 模型密钥、代理凭证、云厂商 token 等一律不进子进程。
     /// </summary>
-    private static IEnumerable<KeyValuePair<string, string>> SafeEnvironment(bool isWindows)
+    private static IEnumerable<KeyValuePair<string, string>> SafeEnvironment(ShellSpec shell)
     {
-        string[] allow = isWindows
-            ? ["PATH", "SystemRoot", "SYSTEMROOT", "ComSpec", "COMSPEC", "PATHEXT", "windir", "WINDIR", "SystemDrive", "SYSTEMDRIVE", "NUMBER_OF_PROCESSORS", "PROCESSOR_ARCHITECTURE"]
-            : ["PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "LC_ALL", "LC_CTYPE", "TERM", "TZ"];
+        string[] allow = shell.IsPosix || shell.Id is "pwsh" or "powershell"
+            ? ["PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "LC_ALL", "LC_CTYPE", "TERM", "TZ",
+               // Git Bash / MSYS 靠这几个找到挂载点与系统目录
+               "TMP", "TEMP", "TMPDIR", "SystemRoot", "SYSTEMROOT", "ComSpec", "COMSPEC", "PATHEXT", "windir", "WINDIR", "SystemDrive", "SYSTEMDRIVE"]
+            : ["PATH", "SystemRoot", "SYSTEMROOT", "ComSpec", "COMSPEC", "PATHEXT", "windir", "WINDIR", "SystemDrive", "SYSTEMDRIVE", "NUMBER_OF_PROCESSORS", "PROCESSOR_ARCHITECTURE"];
 
         foreach (var name in allow)
         {

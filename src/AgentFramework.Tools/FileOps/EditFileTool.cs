@@ -1,7 +1,7 @@
 using System.Text;
 using AgentFramework.Contracts;
 
-namespace AgentFramework.Plugins.DevKit;
+namespace AgentFramework.Tools.FileOps;
 
 /// <summary>
 /// 精确替换 —— agent 编辑代码的主工具。

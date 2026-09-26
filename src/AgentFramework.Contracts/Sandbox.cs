@@ -59,12 +59,40 @@ public sealed class SandboxLimits
     public int MaxCpuSeconds { get; set; }
 }
 
+/// <summary>
+/// 一次会话钉死的 shell 选择。
+///
+/// <para>
+/// 命令语义跟着 shell 走：同一会话里一会儿 cmd 一会儿 bash，模型写对了也会跑错。
+/// 所以 shell 在<strong>会话第一次跑命令时定一次</strong>，之后原样复用。
+/// </para>
+/// </summary>
+public sealed record ShellSpec(
+    /// <summary>稳定 id：<c>bash</c> / <c>sh</c> / <c>cmd</c> / <c>powershell</c> / <c>pwsh</c>。</summary>
+    string Id,
+    /// <summary>传给 <c>ProcessStartInfo.FileName</c> 的路径或名字。</summary>
+    string FileName,
+    /// <summary>是否 POSIX 语义（决定参数传递与输出码页）。</summary>
+    bool IsPosix,
+    /// <summary>给人看的一句话：哪来的、要不要降级。</summary>
+    string Note)
+{
+    public override string ToString() => $"{Id} ({FileName})";
+}
+
 /// <summary>一次沙箱执行的请求。</summary>
 public sealed record SandboxRequest(
     string Command,
     string WorkingDirectory,
     string? TempDirectory,
-    SandboxLimits Limits);
+    SandboxLimits Limits)
+{
+    /// <summary>
+    /// 会话钉死的 shell（可选）。null = 由后端自动解析。
+    /// 宿主应在第一次解析后把结果缓存并写回，保证同一会话内 shell 不再变。
+    /// </summary>
+    public ShellSpec? Shell { get; init; }
+}
 
 /// <summary>一次沙箱执行的结果。</summary>
 public sealed record SandboxOutcome(

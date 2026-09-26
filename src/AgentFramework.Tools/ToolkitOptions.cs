@@ -74,6 +74,22 @@ public sealed class ToolkitOptions
     public int MaxWriteChars { get; set; } = 1_000_000;
 
     // ── 命令 ─────────────────────────────────────────────
+
+    /// <summary>
+    /// shell 偏好：<c>bash</c>/<c>sh</c>/<c>cmd</c>/<c>powershell</c>/<c>pwsh</c> / 显式路径 /
+    /// <c>auto</c>（默认，优先 POSIX）。<b>会话级一次决定</b> —— 见 <see cref="EffectiveShell"/>。
+    /// </summary>
+    public string? Shell { get; set; }
+
+    private Contracts.ShellSpec? _effectiveShell;
+
+    /// <summary>
+    /// 会话钉死的 shell：第一次跑命令时解析一次，之后原样复用。
+    /// 优先 POSIX（bash → sh）；Windows 找不到才回落 cmd，并在 Note 里写明。
+    /// </summary>
+    public Contracts.ShellSpec EffectiveShell
+        => _effectiveShell ??= Contracts.ShellResolver.Resolve(Shell);
+
     public int CommandTimeoutSeconds { get; set; } = 30;
 
     public int MaxCommandOutputChars { get; set; } = 50_000;

@@ -23,7 +23,7 @@ public sealed class UpdateNotesTool(Func<string> notesPathProvider) : ITool, ITo
         + "只改指定小节，人写的内容会被保留。开工时写「目标」「计划」，推进中更新「进度」，想到什么记「随手记」。";
 
     public string ParametersJsonSchema =>
-        """{"type":"object","properties":{"section":{"type":"string","description":"小节名：目标 / 计划 / 进度 / 随手记 / 阻塞"},"content":{"type":"string","description":"该小节的新内容（Markdown 列表即可）"},"append":{"type":"boolean","description":"true = 追加到该小节末尾（随手记常用）；false = 整体替换该小节（默认）"}},"required":["section","content"]}""";
+        """{"type":"object","properties":{"section":{"type":"string","description":"小节名：目标 / 计划 / 进度 / 随手记 / 阻塞"},"content":{"type":"string","description":"该小节的新内容（Markdown 列表即可）；空字符串 = 清空本小节"},"append":{"type":"boolean","description":"true = 追加到该小节末尾（随手记常用）；false = 整体替换该小节（默认）"}},"required":["section","content"]}""";
 
     public async ValueTask<ToolResult> InvokeAsync(ToolInvocation invocation, CancellationToken ct = default)
     {
@@ -32,10 +32,14 @@ public sealed class UpdateNotesTool(Func<string> notesPathProvider) : ITool, ITo
             return ToolResult.Fail("缺少参数 section");
         }
 
-        if (!invocation.Arguments.TryGetValue("content", out var content) || string.IsNullOrWhiteSpace(content))
+        // content 允许空串 —— 那是「清空本小节」的合法意图。
+        // 只有**没传** content 才算缺参；空字符串 ≠ 缺参。
+        if (!invocation.Arguments.TryGetValue("content", out var content))
         {
-            return ToolResult.Fail("缺少参数 content");
+            return ToolResult.Fail("缺少参数 content（空字符串 = 清空本小节）");
         }
+
+        content ??= string.Empty;
 
         // append 可选；缺省或解析不出就按「替换」处理（保守：不猜用户意图）
         var append = invocation.Arguments.TryGetValue("append", out var raw)

@@ -9,12 +9,73 @@ public static class LlmRole
     public const string Tool = "tool";
 }
 
+/// <summary>
+/// 一张进模型上下文的图（视觉模型的多模态输入）。
+/// 自带 base64 正文 —— 事件真相源与请求体都不依赖外链，回放时「模型可见即已记录」。
+/// </summary>
+public sealed record LlmImage
+{
+    /// <summary>MIME：image/png · image/jpeg · image/webp · image/gif。</summary>
+    public required string MediaType { get; init; }
+
+    /// <summary>base64 正文（不含 data: 前缀）。</summary>
+    public required string Base64Data { get; init; }
+
+    /// <summary>可选文件名（展示用）。</summary>
+    public string? FileName { get; init; }
+
+    /// <summary>OpenAI 系的 <c>image_url</c> data URL 形态。</summary>
+    public string ToDataUrl() => $"data:{MediaType};base64,{Base64Data}";
+
+    /// <summary>从 data URL 解析；失败返回 null。</summary>
+    public static LlmImage? TryParseDataUrl(string? dataUrl, string? fileName = null)
+    {
+        if (string.IsNullOrWhiteSpace(dataUrl))
+        {
+            return null;
+        }
+
+        const string prefix = "data:";
+        if (!dataUrl.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+        {
+            return null;
+        }
+
+        var comma = dataUrl.IndexOf(',');
+        if (comma <= prefix.Length)
+        {
+            return null;
+        }
+
+        var meta = dataUrl[prefix.Length..comma];
+        var base64 = dataUrl[(comma + 1)..];
+        var mediaType = meta.Split(';')[0].Trim();
+        if (mediaType.Length == 0)
+        {
+            mediaType = "image/png";
+        }
+
+        if (!mediaType.StartsWith("image/", StringComparison.OrdinalIgnoreCase))
+        {
+            return null;
+        }
+
+        return new LlmImage { MediaType = mediaType, Base64Data = base64, FileName = fileName };
+    }
+}
+
 /// <summary>模型调用请求。</summary>
 public sealed record LlmMessage
 {
     public required string Role { get; init; }
 
     public string? Content { get; init; }
+
+    /// <summary>
+    /// 随本条消息进上下文的图（视觉输入）。空 = 纯文本消息。
+    /// 请求体里会展开成 OpenAI 多模态 content 数组。
+    /// </summary>
+    public IReadOnlyList<LlmImage>? Images { get; init; }
 
     /// <summary>role=tool 时，指的是哪次工具调用的结果。</summary>
     public string? ToolCallId { get; init; }

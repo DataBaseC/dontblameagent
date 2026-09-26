@@ -31,6 +31,12 @@ public sealed class HostOptions
     public string? Sandbox { get; set; }
 
     /// <summary>
+    /// shell 偏好（会话级一次决定）：<c>bash</c>/<c>sh</c>/<c>cmd</c>/<c>powershell</c>/<c>pwsh</c> /
+    /// 显式路径 / <c>auto</c>（默认，优先 POSIX）。空 = 自动解析并钉死到会话结束。
+    /// </summary>
+    public string? Shell { get; set; }
+
+    /// <summary>
     /// 启动时就关掉的<b>工具包</b>。默认空 = 全部开启。
     ///
     /// <para>
@@ -214,6 +220,8 @@ public sealed class HostOptions
         PluginsDir = PluginsDir,
         // 沙箱档位是「这台机器的安全边界」，切会话不该把它悄悄换回默认。
         Sandbox = Sandbox,
+        // shell 同理会话级钉死：换会话不该每条命令重新猜。
+        Shell = Shell,
         // 关掉的工具包同理：它是「这次干活要背着多少东西」，不该随会话漂移。
         DisabledToolsets = DisabledToolsets,
         SessionId = sessionId,

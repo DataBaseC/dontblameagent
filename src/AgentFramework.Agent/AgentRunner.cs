@@ -83,7 +83,8 @@ public sealed class AgentRunner
         IReadOnlyList<LlmMessage>? priorContext = null,
         CancellationToken ct = default,
         string? rephrasedText = null,
-        string? rephraseModel = null)
+        string? rephraseModel = null,
+        IReadOnlyList<LlmImage>? images = null)
     {
         var history = priorContext is null
             ? new List<LlmMessage>()
@@ -102,9 +103,15 @@ public sealed class AgentRunner
                 Text = userInput,
                 RephrasedText = rephrasedText,
                 RephraseModel = rephraseModel,
+                Images = images is { Count: > 0 } ? [.. images] : null,
             }, ct).ConfigureAwait(false);
 
-        history.Add(new LlmMessage { Role = LlmRole.User, Content = modelVisibleText });
+        history.Add(new LlmMessage
+        {
+            Role = LlmRole.User,
+            Content = modelVisibleText,
+            Images = images is { Count: > 0 } ? images : null,
+        });
 
         for (var step = 1; step <= _options.MaxSteps; step++)
         {
@@ -350,6 +357,18 @@ public sealed class AgentRunner
                     ToolCallId = call.CallId,
                     Content = result.Success ? result.Output : $"ERROR: {result.Error}",
                 });
+
+                // 视觉工具（read_image 等）随结果带图：OpenAI 系 tool 角色不收图，
+                // 紧跟一条 user 多模态消息注入 —— 文本标明来源，图进 content 数组。
+                if (result.Attachments is { Count: > 0 })
+                {
+                    history.Add(new LlmMessage
+                    {
+                        Role = LlmRole.User,
+                        Content = $"（上一步工具「{call.ToolName}」附带了 {result.Attachments.Count} 张图，请结合图像继续）",
+                        Images = result.Attachments,
+                    });
+                }
             }
         }
 
@@ -373,6 +392,7 @@ public sealed class AgentRunner
             Success = result.Success,
             Output = result.Output,
             Error = result.Error,
+            Images = result.Attachments is { Count: > 0 } ? [.. result.Attachments] : null,
         }, ct).ConfigureAwait(false);
 
     /// <summary>

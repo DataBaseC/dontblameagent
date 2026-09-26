@@ -554,7 +554,8 @@ public static class AgentModes
     };
 
     /// <summary>
-    /// 编程模式（任务 4）：提示词偏「读代码 → 改代码 → 跑测试」；默认开 exec + plan + search + 编程工具包。
+    /// 编程模式（任务 4）：提示词偏「读代码 → 改代码 → 跑测试」；
+    /// 文件链/记忆/计划已收进 core，这里只额外开 exec。
     /// 用 <see cref="ModeProfile.CustomId"/> 标识（字符串 id 钉会话），**不改 <see cref="AgentMode"/> 枚举**。
     /// </summary>
     public static ModeProfile Code { get; } = new()
@@ -565,8 +566,7 @@ public static class AgentModes
         AllowedTools = null,
         AllowedToolsets =
         [
-            BuiltinToolsets.Core, BuiltinToolsets.Memory, BuiltinToolsets.Exec,
-            BuiltinToolsets.Plan, BuiltinToolsets.Search, BuiltinToolsets.DevKit,
+            BuiltinToolsets.Core, BuiltinToolsets.Exec,
         ],
         InjectTaskCard = true,
         ContextGovernance = true,
@@ -591,8 +591,7 @@ public static class AgentModes
         AllowedTools = null,
         AllowedToolsets =
         [
-            BuiltinToolsets.Core, BuiltinToolsets.Memory,
-            BuiltinToolsets.Search, BuiltinToolsets.WritingKit,
+            BuiltinToolsets.Core, BuiltinToolsets.WritingKit,
         ],
         InjectTaskCard = true,
         ContextGovernance = true,

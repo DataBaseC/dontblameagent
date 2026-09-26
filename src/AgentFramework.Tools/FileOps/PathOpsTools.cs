@@ -1,6 +1,6 @@
 using AgentFramework.Contracts;
 
-namespace AgentFramework.Plugins.DevKit;
+namespace AgentFramework.Tools.FileOps;
 
 /// <summary>
 /// 建目录。<c>write_file</c> 虽然会自动建父目录，但「只想要一个空目录」这件事

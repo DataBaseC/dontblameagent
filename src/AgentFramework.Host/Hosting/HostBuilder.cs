@@ -612,6 +612,7 @@ public sealed class ToolModule : IHostModule
             SearxngBaseUrl = options.SearxngBaseUrl,
             // 命令沙箱档位（auto / off / process / job / 插件注册的后端名）
             SandboxName = options.Sandbox,
+            Shell = options.Shell,
         };
         state.Toolkit = toolkit;
 
@@ -645,6 +646,13 @@ public sealed class ToolModule : IHostModule
         tools.Add(new ReadFileTool(toolkit));
         tools.Add(new WriteFileTool(toolkit));
         tools.Add(new ListDirTool(toolkit));
+        tools.Add(new ReadImageTool(new WorkspaceService(toolkit)));
+
+        // 文件链补齐（2026-09 上收 core）：改/行读/建/移/删/搜内容/找文件。
+        // 从前这些在 devkit 插件包里 —— 模型要先 use_toolset 才能改文件，
+        // 多一轮且容易猜错包。实现类保持 internal，经 CoreFileOps 一次收齐。
+        foreach (var t in AgentFramework.Tools.FileOps.CoreFileOps.CreateAll(new WorkspaceService(toolkit)))
+            tools.Add(t);
         tools.Add(new RunCommandTool(toolkit, sandbox));
         tools.Add(new WebSearchTool(toolkit, BuildSearchProvider(toolkit)));
         tools.Add(new WebFetchTool(toolkit, http: null, summarizer: summarizer));
@@ -792,45 +800,51 @@ public sealed class ToolModule : IHostModule
     /// <summary>
     /// 官方工具 → 工具包。
     /// 表里没有的工具会落进与注册来源同名的包（<c>official-tools</c>）。
+    ///
+    /// 2026-09 重划：<b>日常干活链全收 core</b>（完整文件链 + 记忆 + 计划 + 历史），
+    /// 模型不必先 use_toolset 才能改文件；可关包只留安全收窄（exec）与领域扩展。
     /// </summary>
     private static Dictionary<string, string> OfficialToolsetMap() => new(StringComparer.Ordinal)
     {
-        // core（不可关）：读、写、列目录、问用户 —— 少了这些，agent 就不再是 agent
+        // core（不可关）：完整文件链 + 问用户 + 记忆 + 计划/笔记 + 历史 + 派活
         ["read_file"] = BuiltinToolsets.Core,
         ["write_file"] = BuiltinToolsets.Core,
         ["list_dir"] = BuiltinToolsets.Core,
+        ["read_image"] = BuiltinToolsets.Core,
+        ["edit_file"] = BuiltinToolsets.Core,
+        ["read_lines"] = BuiltinToolsets.Core,
+        ["make_dir"] = BuiltinToolsets.Core,
+        ["move_path"] = BuiltinToolsets.Core,
+        ["delete_path"] = BuiltinToolsets.Core,
+        ["grep_files"] = BuiltinToolsets.Core,
+        ["find_files"] = BuiltinToolsets.Core,
         ["ask_user"] = BuiltinToolsets.Core,
+        ["remember"] = BuiltinToolsets.Core,
+        ["forget"] = BuiltinToolsets.Core,
+        ["recall_memory"] = BuiltinToolsets.Core,
+        ["search_history"] = BuiltinToolsets.Core,
+        ["update_plan"] = BuiltinToolsets.Core,
+        ["update_notes"] = BuiltinToolsets.Core,
+        ["spawn_subagent"] = BuiltinToolsets.Core,
 
         // exec（可关）：跑命令单独成包 ——「这次不许它跑命令」得有出口
         ["run_command"] = BuiltinToolsets.Exec,
 
-        // 其余按能力域分包
-        ["remember"] = BuiltinToolsets.Memory,
-        ["forget"] = BuiltinToolsets.Memory,
-        ["recall_memory"] = BuiltinToolsets.Memory,
-
-        ["search_history"] = BuiltinToolsets.Search,
-
-        ["update_plan"] = BuiltinToolsets.Plan,
-        ["update_notes"] = BuiltinToolsets.Plan,
-        ["spawn_subagent"] = BuiltinToolsets.Plan,
-
         ["web_search"] = BuiltinToolsets.Web,
         ["web_fetch"] = BuiltinToolsets.Web,
 
+        // 实验/转换：纯函数，进 core（单工具包无开关价值）
+        ["csv_to_json"] = BuiltinToolsets.Core,
+
+        // 自我升级：插件四件套 + 技能工坊（都是「给自己长能力」）
         ["plugin_write"] = BuiltinToolsets.Self,
         ["plugin_reload"] = BuiltinToolsets.Self,
         ["plugin_uninstall"] = BuiltinToolsets.Self,
         ["plugin_list"] = BuiltinToolsets.Self,
-
-        // 技能工坊（可关）：生成 / 校验 / 提炼 / 由工具包转化技能
-        ["skill_scaffold"] = BuiltinToolsets.Skill,
-        ["skill_validate"] = BuiltinToolsets.Skill,
-        ["skill_extract"] = BuiltinToolsets.Skill,
-        ["skill_from_toolset"] = BuiltinToolsets.Skill,
-
-        // 实验包（可关）：新工具类型的官方样例
-        ["csv_to_json"] = BuiltinToolsets.Lab,
+        ["skill_scaffold"] = BuiltinToolsets.Self,
+        ["skill_validate"] = BuiltinToolsets.Self,
+        ["skill_extract"] = BuiltinToolsets.Self,
+        ["skill_from_toolset"] = BuiltinToolsets.Self,
 
         // meta（不可关）：看/开关工具包本身 —— 关了就再也开不回来
         ["toolsets"] = BuiltinToolsets.Meta,
@@ -841,16 +855,18 @@ public sealed class ToolModule : IHostModule
     /// <summary>内置包的显示名与说明（界面开关与诊断面都读它）。</summary>
     private static IEnumerable<ToolsetDescriptor> BuiltinToolsetDescriptors()
     {
-        yield return new() { Id = BuiltinToolsets.Core, Name = "核心", Description = "读文件、写文件、列目录、问用户（不可关闭）", Protected = true, Source = "core" };
+        yield return new()
+        {
+            Id = BuiltinToolsets.Core,
+            Name = "核心",
+            Description = "完整文件链 + 问用户 + 记忆 + 计划/笔记 + 历史 + 派子 Agent + 结构化转换（不可关闭）",
+            Protected = true,
+            Source = "core",
+        };
         yield return new() { Id = BuiltinToolsets.Meta, Name = "工具包管理", Description = "查看与开关工具包（不可关闭）", Protected = true, Source = "core" };
         yield return new() { Id = BuiltinToolsets.Exec, Name = "执行命令", Description = "在工作区里跑 shell 命令（受命令沙箱保护）", Source = "core" };
-        yield return new() { Id = BuiltinToolsets.Memory, Name = "记忆", Description = "记住 / 遗忘 / 检索长期记忆", Source = "core" };
-        yield return new() { Id = BuiltinToolsets.Search, Name = "历史检索", Description = "把被上下文折叠掉的旧内容捞回来", Source = "core" };
-        yield return new() { Id = BuiltinToolsets.Plan, Name = "计划与派活", Description = "计划、小本本、派子 Agent", Source = "core" };
         yield return new() { Id = BuiltinToolsets.Web, Name = "联网", Description = "网页搜索与抓取", Source = "core" };
-        yield return new() { Id = BuiltinToolsets.Self, Name = "自我升级", Description = "写插件、热重装、卸载、列插件", Source = "core" };
-        yield return new() { Id = BuiltinToolsets.Skill, Name = "技能工坊", Description = "生成 / 校验 / 提炼技能包", Source = "core" };
-        yield return new() { Id = BuiltinToolsets.Lab, Name = "实验工具", Description = "新工具类型的官方样例（结构化输出等）", Source = "core" };
+        yield return new() { Id = BuiltinToolsets.Self, Name = "自我升级", Description = "写插件、热重装、卸载、列插件 + 技能工坊", Source = "core" };
     }
 }
 

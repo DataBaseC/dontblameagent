@@ -226,6 +226,23 @@ internal static class WebUiPage
           border: 2px solid var(--border2); border-top-color: var(--accent-2);
           animation: spin .8s linear infinite; }
   .composer { max-width: 860px; margin: 0 auto; display: flex; gap: 10px; align-items: flex-end; }
+  .attach-strip { max-width: 860px; margin: 6px auto 0; display: flex; gap: 8px; flex-wrap: wrap; }
+  .attach-strip img { width: 56px; height: 56px; object-fit: contain; border-radius: 6px; border: 1px solid var(--line); background: #0d1017; }
+  .attach-strip .rm { cursor: pointer; color: var(--faint); font-size: 11px; }
+  .tool-photos { max-width: 860px; margin: 8px auto; display: flex; gap: 10px; flex-wrap: wrap; align-items: flex-start; }
+  .tool-photos .cap { width: 100%; color: var(--faint); font-size: 12px; }
+  /* 完整显示：等比缩放、不裁切；点开有全屏 */
+  .tool-photos img {
+    max-width: min(520px, 92vw); max-height: 420px;
+    width: auto; height: auto; object-fit: contain;
+    border-radius: 8px; border: 1px solid var(--line); background: #0d1017;
+    cursor: zoom-in; flex: 0 1 auto;
+  }
+  .photo-lightbox {
+    position: fixed; inset: 0; z-index: 50; background: rgba(0,0,0,.82);
+    display: flex; align-items: center; justify-content: center; cursor: zoom-out;
+  }
+  .photo-lightbox img { max-width: 94vw; max-height: 92vh; object-fit: contain; border-radius: 6px; }
   textarea { flex: 1; resize: none; min-height: 46px; max-height: 160px; padding: 12px 14px;
              border-radius: 10px; border: 1px solid var(--border2); background: var(--bg1); color: var(--text);
              font-family: inherit; font-size: 14px; line-height: 1.5; outline: none;
@@ -478,11 +495,14 @@ internal static class WebUiPage
       <!-- 阶段指示：agent 干活的每一步（思考 / 调用工具 / 生成）都在这行可见 -->
       <div id="phase" hidden><span class="spin"></span><span id="phase-text"></span></div>
       <div class="composer">
-        <textarea id="input" rows="1" placeholder="说点什么…（Enter 发送 / Shift+Enter 换行）"></textarea>
+        <textarea id="input" rows="1" placeholder="说点什么…（Enter 发送 / Shift+Enter 换行 / Ctrl+V 贴图）"></textarea>
+        <button id="attach" class="ghost" title="附上图片给视觉模型看（也可 Ctrl+V 粘贴截图）">🖼 图</button>
+        <input id="attach-file" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple hidden>
         <button id="optimize" class="ghost"
                 title="让转述模型把这段话改得更清楚，再交给主模型（结果回填输入框，可撤销）">✨ 优化</button>
         <button id="send">发送</button>
       </div>
+      <div id="attach-strip" class="attach-strip" hidden></div>
 
       <div class="settings" id="settings" hidden>
         <div class="row">
@@ -934,6 +954,60 @@ function addToolCard(evt) {
   return card;
 }
 
+// 把事件里的图转成 data URL（兼容 {MediaType,Base64Data} 与 data URL 字符串）
+function imageDataUrl(im) {
+  if (typeof im === 'string') return im;
+  const b64 = im.base64Data || im.Base64Data || '';
+  if (!b64) return '';
+  return 'data:' + (im.mediaType || im.MediaType || 'image/png') + ';base64,' + b64;
+}
+
+// 用户贴图：直接嵌进气泡，完整等比显示，点开全屏
+function showUserImages(bubble, images) {
+  const box = document.createElement('div');
+  box.className = 'tool-photos';
+  box.style.margin = '8px 0 0';
+  for (const im of images) {
+    const src = imageDataUrl(im);
+    if (!src) continue;
+    const img = document.createElement('img');
+    img.src = src;
+    img.alt = im.fileName || im.FileName || '贴图';
+    img.title = im.fileName || im.FileName || '点击放大';
+    img.onclick = () => openPhotoLightbox(src);
+    box.appendChild(img);
+  }
+  if (box.childElementCount) bubble.appendChild(box);
+}
+
+// 工具带图（read_image）：模型刚看过，聊天里也临时展示一份，免得用户只能猜
+function showToolImages(images) {
+  const box = document.createElement('div');
+  box.className = 'tool-photos';
+  box.innerHTML = '<div class="cap">🖼 工具带入 ' + images.length + ' 张图（已给模型看，点击可放大）</div>';
+  for (const im of images) {
+    const src = imageDataUrl(im);
+    if (!src) continue;
+    const img = document.createElement('img');
+    img.src = src;
+    img.title = im.fileName || im.FileName || '点击放大';
+    img.onclick = () => openPhotoLightbox(src);
+    box.appendChild(img);
+  }
+  wrap.appendChild(box);
+  toBottom();
+}
+
+function openPhotoLightbox(src) {
+  const lb = document.createElement('div');
+  lb.className = 'photo-lightbox';
+  const big = document.createElement('img');
+  big.src = src;
+  lb.appendChild(big);
+  lb.onclick = () => lb.remove();
+  document.body.appendChild(lb);
+}
+
 function addApprovalCard(a) {
   const card = document.createElement('div');
   card.className = 'approval';
@@ -1087,9 +1161,12 @@ function renderEvent(e) {
       sealReasoning();
       addApprovalCard(e);
       break;
-    case 'user-message':
-      addBubble('user', e.text);
+    case 'user-message': {
+      const ub = addBubble('user', e.text || '');
+      // 贴图直接画在气泡里（完整等比，点开全屏），别只标「📷 × N」
+      if (e.images && e.images.length) showUserImages(ub, e.images);
       break;
+    }
     case 'user-input-rephrased':
       // 自动转述也让人**看见**改成了什么（从前只落日志，界面无感）
       if (e.rephrased) {
@@ -1132,13 +1209,18 @@ function renderEvent(e) {
         meta.className = 'meta ' + (e.success ? 'ok' : 'bad');
         card.querySelector('.body').textContent +=
           '\n\n结果：' + (e.success ? (e.output || '(空)') : (e.error || '失败'));
-        card.classList.add('open');
+        // 默认收起：完成/失败只改角标；要看参数与结果再点标题展开。
+        // （从前完成时强制 open，长输出会把对话冲得只剩工具卡。）
         // 工具失败 ≠ 回合结束：多步还会再调模型。不写清楚的话，
         // 状态栏停在「✗ 失败」看起来像整轮已死，实际大模型仍在工作。
         const toolLabel = card.dataset.tool || '工具';
         setPhase(turnRunning
           ? toolLabel + (e.success ? ' ✓ 完成' : ' ✗ 失败') + ' · 大模型仍在工作…'
           : toolLabel + (e.success ? ' ✓ 完成' : ' ✗ 失败'));
+        // 视觉：工具带的图临时贴在聊天里（模型刚看过，用户也该看见）
+        if (e.images && e.images.length) {
+          showToolImages(e.images);
+        }
       }
       // B2：非当前会话的轮次到不了这里（onmessage 已分流），
       // 当前会话这里也不需要再做什么 —— 忙标记统一在 assistant-message 清。
@@ -1438,15 +1520,17 @@ async function saveRephrase(payload) {
 
 async function send() {
   const text = input.value.trim();
-  if (!text) return;
+  const images = pendingImages.slice();
+  if (!text && images.length === 0) return;
   input.value = '';
   input.style.height = 'auto';
   hint.textContent = '';
+  clearPendingImages();
   try {
     const response = await fetch('/api/send', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text })
+      body: JSON.stringify({ text, images })
     });
     if (!response.ok) {
       hint.textContent = '发送失败：HTTP ' + response.status;
@@ -1800,6 +1884,81 @@ async function loadHistory() {
 }
 
 sendBtn.onclick = () => (turnRunning ? stopTurn() : send());
+
+// ── 视觉附件：选文件 / Ctrl+V 贴图，随下一条消息发出 ──────────
+const pendingImages = [];   // data URL 字符串
+const attachBtn = document.getElementById('attach');
+const attachFile = document.getElementById('attach-file');
+const attachStrip = document.getElementById('attach-strip');
+
+function renderAttachStrip() {
+  attachStrip.innerHTML = '';
+  if (!pendingImages.length) { attachStrip.hidden = true; return; }
+  attachStrip.hidden = false;
+  pendingImages.forEach((url, i) => {
+    const box = document.createElement('div');
+    const img = document.createElement('img');
+    img.src = url;
+    const rm = document.createElement('div');
+    rm.className = 'rm';
+    rm.textContent = '移除';
+    rm.onclick = () => { pendingImages.splice(i, 1); renderAttachStrip(); };
+    box.appendChild(img);
+    box.appendChild(rm);
+    attachStrip.appendChild(box);
+  });
+}
+
+function clearPendingImages() {
+  pendingImages.length = 0;
+  renderAttachStrip();
+}
+
+function addImageFiles(files) {
+  for (const f of files) {
+    if (!f.type || !f.type.startsWith('image/')) continue;
+    if (f.size > 8 * 1024 * 1024) {
+      hint.textContent = '图片过大（>8MB）：' + f.name;
+      continue;
+    }
+    const r = new FileReader();
+    r.onload = () => { pendingImages.push(r.result); renderAttachStrip(); };
+    r.readAsDataURL(f);
+  }
+}
+
+attachBtn.onclick = () => attachFile.click();
+attachFile.onchange = () => { addImageFiles(attachFile.files); attachFile.value = ''; };
+input.addEventListener('paste', (ev) => {
+  const items = ev.clipboardData && ev.clipboardData.files;
+  if (items && items.length) {
+    ev.preventDefault();
+    addImageFiles(items);
+  }
+});
+
+// 按当前模型能力启停贴图入口：不能看图就禁用（不隐藏 —— 用户找得到入口，也知道为何灰）
+function activeModelSupportsVision() {
+  if (!modelInfo || !modelInfo.providers) return true; // 未知 = 不挡
+  const active = modelInfo.active;
+  if (!active) return true;
+  for (const p of modelInfo.providers) {
+    if (p.id !== active.providerId) continue;
+    for (const m of p.models || []) {
+      if (m.id === active.modelId) return m.vision !== false;
+    }
+  }
+  return true;
+}
+
+function updateAttachGate() {
+  const ok = activeModelSupportsVision();
+  attachBtn.disabled = !ok;
+  attachBtn.title = ok
+    ? '附上图片给视觉模型看（也可 Ctrl+V 粘贴截图）'
+    : '当前模型不支持看图（可在模型管理里换视觉模型或标注 SupportsVision）';
+  if (!ok) clearPendingImages();
+}
 optimizeBtn.onclick = optimize;
 document.getElementById('new-session').onclick = newSession;
 
@@ -2440,6 +2599,7 @@ function renderModels() {
 
   renderRephraseModelOptions();
   if (rephraseInfo && rephraseInfo.model) rpModel.value = rephraseInfo.model;
+  updateAttachGate();
 }
 
 function openEditor(provider) {
@@ -2580,6 +2740,7 @@ async function switchModel(value) {
   modelInfo = data.models;
   renderModels();
   loadStatus();
+  updateAttachGate();
 }
 
 mdActive.onchange = () => switchModel(mdActive.value);

@@ -72,22 +72,8 @@ if errorlevel 1 (
     )
 )
 
-echo [3/6] Publish sample plugin ...
+echo [3/6] Publish base plugins (writing-kit / console-kit) ...
 if exist "%HOST_OUT%\plugins" rmdir /s /q "%HOST_OUT%\plugins"
-"%DOTNET%" publish src\AgentFramework.SamplePlugin\AgentFramework.SamplePlugin.csproj -c Release -o "%HOST_OUT%\plugins\hello" --nologo -v quiet
-if errorlevel 1 (
-    echo   Sample plugin publish failed.
-    call :maybe_pause
-    exit /b 1
-)
-
-echo [3b/6] Publish base plugins (devkit / writing-kit / console-kit) ...
-"%DOTNET%" publish src\AgentFramework.Plugins.DevKit\AgentFramework.Plugins.DevKit.csproj -c Release -m:1 -o "%HOST_OUT%\plugins\devkit" --nologo -v quiet
-if errorlevel 1 (
-    echo   devkit publish failed.
-    call :maybe_pause
-    exit /b 1
-)
 "%DOTNET%" publish src\AgentFramework.Plugins.WritingKit\AgentFramework.Plugins.WritingKit.csproj -c Release -m:1 -o "%HOST_OUT%\plugins\writing-kit" --nologo -v quiet
 if errorlevel 1 (
     echo   writing-kit publish failed.

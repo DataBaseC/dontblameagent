@@ -86,6 +86,12 @@ public sealed class ModelEntry
     /// </summary>
     public bool? SupportsReasoning { get; set; }
 
+    /// <summary>
+    /// 是否接受图像输入（视觉）。null = 没标注，按名字启发式猜。
+    /// 界面据此决定要不要显示「贴图」入口。
+    /// </summary>
+    public bool? SupportsVision { get; set; }
+
     /// <summary>上下文窗口（token）；未知则不填。</summary>
     public int? ContextWindow { get; set; }
 
@@ -116,6 +122,13 @@ public static class ModelCapabilities
         "qwq", "deepseek-r", "magistral", "gpt-5", "gemini-2.5", "claude-3-7", "claude-4",
     ];
 
+    private static readonly string[] VisionHints =
+    [
+        "vision", "vl", "-vl", "vl-", "qwen-vl", "qwen2-vl", "qwen2.5-vl", "internvl",
+        "minicpm-v", "llava", "cogvlm", "glm-4v", "gpt-4o", "gpt-4.1", "gpt-5",
+        "claude-3", "claude-4", "gemini", "pixtral", "molmo", "gemma-3",
+    ];
+
     /// <summary>猜这个模型有没有思考通道。</summary>
     public static bool GuessSupportsReasoning(string? modelId)
     {
@@ -126,5 +139,17 @@ public static class ModelCapabilities
 
         var id = modelId.ToLowerInvariant();
         return ReasoningHints.Any(hint => id.Contains(hint, StringComparison.Ordinal));
+    }
+
+    /// <summary>猜这个模型能不能看图。可被 ModelEntry.SupportsVision 覆盖。</summary>
+    public static bool GuessSupportsVision(string? modelId)
+    {
+        if (string.IsNullOrWhiteSpace(modelId))
+        {
+            return false;
+        }
+
+        var id = modelId.ToLowerInvariant();
+        return VisionHints.Any(hint => id.Contains(hint, StringComparison.Ordinal));
     }
 }

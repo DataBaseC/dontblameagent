@@ -74,21 +74,24 @@ public sealed class ToolsetDeclaration
 /// 内置包 id 与保留名单。
 ///
 /// <para>
-/// 切分口径：<b>按能力的用途</b>，而不是按代码来源 ——
-/// 「写小说时才用的那些」和「天天要用的那些」必须能分开开关，
-/// 这正是主人要的「真实工作时有的选择地开」。
+/// 切分口径（2026-09 重划 · 降工具调用压力）：<b>能收 core 的全收 core</b> ——
+/// 读/写/改/检索/搬移/删/问用户/记忆/计划/笔记/历史/派活/技能/转换是一条完整工作流，
+/// 拆包会让模型先 <c>use_toolset</c> 再干活（多一轮、多一次猜包），
+/// 也逼主人记住「哪个文件操作在哪个包」。
+/// 可关的包只留「安全收窄」与「出网」：exec（跑命令）/ web / self（含技能工坊）。
+/// 领域扩展由基石插件自带（如 writing-kit）。
 /// </para>
 /// </summary>
 public static class BuiltinToolsets
 {
-    /// <summary>核心：读、写、列目录、问用户。**不可关**。（跑命令属 <c>exec</c>，可关）</summary>
+    /// <summary>
+    /// 核心：完整文件链（读/写/列/改/行读/建/移/删/搜内容/找文件）、问用户、
+    /// 记忆、计划与小本本、历史检索、派子 Agent、结构化转换。<b>不可关</b>。
+    /// </summary>
     public const string Core = "core";
 
     /// <summary>元能力：看/开关工具包本身。**不可关**（关了就没法开回来）。</summary>
     public const string Meta = "meta";
-
-    /// <summary>记忆：记住 / 遗忘 / 检索。</summary>
-    public const string Memory = "memory";
 
     /// <summary>
     /// 执行命令。<b>刻意单独成包</b> —— 「这次不想让它跑命令」是个合理诉求，
@@ -96,29 +99,17 @@ public static class BuiltinToolsets
     /// </summary>
     public const string Exec = "exec";
 
-    /// <summary>历史检索：把被上下文折叠掉的东西捞回来。</summary>
-    public const string Search = "search";
-
-    /// <summary>计划与派活：计划、小本本、子 agent。</summary>
-    public const string Plan = "plan";
-
     /// <summary>联网：搜索与抓取。</summary>
     public const string Web = "web";
 
-    /// <summary>自我升级：写插件 / 热重装 / 卸载 / 列插件。</summary>
+    /// <summary>
+    /// 自我升级：写插件 / 热重装 / 卸载 / 列插件 + 技能工坊（生成/校验/提炼技能）。
+    /// 两者都是「给自己长能力」，合成一包省一次开关。
+    /// </summary>
     public const string Self = "self";
 
-    /// <summary>编程扩展（基石插件 devkit）。</summary>
-    public const string DevKit = "devkit";
-
-    /// <summary>写作扩展（基石插件 writing-kit）。</summary>
+    /// <summary>写作扩展（基石插件 writing-kit）。领域包，随插件清单进表。</summary>
     public const string WritingKit = "writing-kit";
-
-    /// <summary>技能工坊：生成 / 校验 / 提炼技能包（任务 2）。</summary>
-    public const string Skill = "skill";
-
-    /// <summary>实验包：新工具类型的官方样例（任务 2）。</summary>
-    public const string Lab = "lab";
 
     /// <summary>不许关闭的包（宿主会拒绝这类开关请求）。</summary>
     public static IReadOnlySet<string> Protected { get; } =

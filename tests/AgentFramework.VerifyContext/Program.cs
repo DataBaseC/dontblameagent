@@ -245,10 +245,10 @@ var plainRead = await new ReadFileTool(new ToolkitOptions { WorkspaceRoot = wsRo
     .InvokeAsync(new ToolInvocation("read_file", new Dictionary<string, string?> { ["path"] = "big.txt" }));
 Check("关掉落盘开关时原样返回", plainRead.Output!.Length == big.Length);
 
-// Windows 的 run_command 走 cmd.exe，bash 循环跑不动 —— 按平台给等价命令。
-var bigEchoCommand = OperatingSystem.IsWindows()
-    ? "for /l %i in (1,1,400) do @echo line-%i-aaaaaaaaaaaaaaaaaaaaaa"
-    : "for i in $(seq 1 400); do echo line-$i-aaaaaaaaaaaaaaaaaaaaaa; done";
+// shell 会话级一次决定（优先 POSIX）：命令语法跟着 shell 走，不能按 OS 猜。
+var bigEchoCommand = AgentFramework.Contracts.ShellResolver.Resolve().IsPosix
+    ? "for i in $(seq 1 400); do echo line-$i-aaaaaaaaaaaaaaaaaaaaaa; done"
+    : "for /l %i in (1,1,400) do @echo line-%i-aaaaaaaaaaaaaaaaaaaaaa";
 var commandResult = await new RunCommandTool(toolkit, new AgentFramework.Sandbox.SandboxRegistry()).InvokeAsync(
     new ToolInvocation("run_command", new Dictionary<string, string?>
     {

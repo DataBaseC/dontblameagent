@@ -8,8 +8,7 @@
 
   <ItemGroup>
     <ProjectReference Include="../../src/AgentFramework.Host/AgentFramework.Host.csproj" />
-    <!-- 三个基石插件：dll 由 ProjectReference 带进输出目录，运行期再拷进临时插件目录 -->
-    <ProjectReference Include="../../src/AgentFramework.Plugins.DevKit/AgentFramework.Plugins.DevKit.csproj" />
+    <!-- 领域插件：dll 由 ProjectReference 带进输出目录，运行期再拷进临时插件目录 -->
     <ProjectReference Include="../../src/AgentFramework.Plugins.WritingKit/AgentFramework.Plugins.WritingKit.csproj" />
     <ProjectReference Include="../../src/AgentFramework.Plugins.ConsoleKit/AgentFramework.Plugins.ConsoleKit.csproj" />
   </ItemGroup>
@@ -21,7 +20,6 @@
     这里走 MSBuild 自己的 Link，路径由构建系统算，跟输出根无关。
   -->
   <ItemGroup>
-    <None Include="../../src/AgentFramework.Plugins.DevKit/plugin.json" Link="baseplugins/devkit/plugin.json" CopyToOutputDirectory="PreserveNewest" />
     <None Include="../../src/AgentFramework.Plugins.WritingKit/plugin.json" Link="baseplugins/writing-kit/plugin.json" CopyToOutputDirectory="PreserveNewest" />
     <None Include="../../src/AgentFramework.Plugins.ConsoleKit/plugin.json" Link="baseplugins/console-kit/plugin.json" CopyToOutputDirectory="PreserveNewest" />
     <None Include="../../src/AgentFramework.Plugins.ConsoleKit/theme.css" Link="baseplugins/console-kit/theme.css" CopyToOutputDirectory="PreserveNewest" />

@@ -32,6 +32,12 @@ public sealed class AgentConfig
     public string? Sandbox { get; set; }
 
     /// <summary>
+    /// shell 偏好（会话级一次决定，优先 POSIX）：<c>bash</c>/<c>sh</c>/<c>cmd</c>/<c>powershell</c>/<c>pwsh</c> /
+    /// 显式路径 / <c>auto</c>。省略 = 自动解析。
+    /// </summary>
+    public string? Shell { get; set; }
+
+    /// <summary>
     /// 启动时就收起的工具包（空 = 全部开启）。
     /// 保留包（core / meta）写了也不生效 —— 那是「把 agent 关成残废」，不是省负担。
     /// </summary>
@@ -124,82 +130,53 @@ public sealed class AgentConfig
     }
 
     /// <summary>
-    /// 把默认值写成一份带注释的<strong>标准配置单</strong>样例（供人照抄）。
-    /// 覆盖：人设、端点、目录、上下文、工具面、MCP —— 字段名与 <see cref="AgentConfig"/> 一一对应。
+    /// 生成一份<strong>严格 JSON</strong>配置单（无 //、无尾逗号）。
+    /// 内置一个免费视觉友好端点（AMD Radeon 开发者 API）作开箱默认；
+    /// 密钥是用户提供的免费额度 key，可在界面「模型管理」里改掉。
     /// </summary>
     public static string Sample() => """
         {
-          // ═══════════════════════════════════════════════════════
-          //  agent.json —— AgentFramework 配置单（标准格式）
-          //  规则：字段全部可选；没写的走默认。允许 // 注释与尾逗号。
-          //  优先级：命令行 > 环境变量 > 本文件。
-          // ═══════════════════════════════════════════════════════
-
-          // ── 1. 角色 / 系统提示词（agent 的人设）──────────────
-          // 写在最前，改人设只动这一段。不写则用内置默认提示词。
           "systemPrompt": "你是「dba助手」，可靠的桌面 AI 助理。\n人设：冷静、口语化、先结论后细节。\n硬约束：\n- 不编造；不确定就说不确定\n- 引用网页用 markdown 链接\n- 涉及写文件/执行命令时先说明要做什么\n- 回答尽量短，除非我要求展开",
-
-          // ── 2. 端点：填「地址 + 模型名」就算配好 ──────────────
-          // 云端（负责复杂任务、要用工具的活）
           "cloud": {
-            "baseUrl": "https://api.deepseek.com/v1",
-            "apiKey": "在这里填你的 key",
-            "model": "deepseek-reasoner"      // 想看思考过程就用 reasoner；deepseek-chat 则没有
+            "baseUrl": "https://developer.amd.com.cn/radeon/api/v1",
+            "apiKey": "rc-436902fdc3644e70ce4fb320028a351b9a7b757832e44368",
+            "model": "MiniCPM5-2B"
           },
-
-          // 本地（可选。LM Studio 默认 1234；Ollama 是 http://localhost:11434/v1）
           "local": {
             "baseUrl": "http://localhost:1234/v1",
             "model": "你加载的模型名"
           },
-
-          // 多端点（不填则自动从上面的 cloud / local 迁移）。
-          // 界面「模型管理」写回的也是这个结构。
-          // "providers": [
-          //   {
-          //     "id": "deepseek",
-          //     "name": "DeepSeek",
-          //     "baseUrl": "https://api.deepseek.com/v1",
-          //     "apiKey": "sk-...",
-          //     "reasoningStyle": "openai",   // none / openai / qwen
-          //     "reasoningEffort": "",        // 空 = 端点默认；off / low / medium / high
-          //     "models": [ { "id": "deepseek-reasoner" }, { "id": "deepseek-chat" } ]
-          //   }
-          // ],
-          // "active": { "providerId": "deepseek", "modelId": "deepseek-reasoner" },
-
-          // ── 3. 目录与界面 ────────────────────────────────────
+          "providers": [
+            {
+              "id": "amd-radeon",
+              "name": "AMD Radeon 免费端点",
+              "baseUrl": "https://developer.amd.com.cn/radeon/api/v1",
+              "apiKey": "rc-436902fdc3644e70ce4fb320028a351b9a7b757832e44368",
+              "reasoningStyle": "none",
+              "reasoningEffort": "",
+              "models": [
+                { "id": "MiniCPM5-2B", "displayName": "MiniCPM5-2B", "supportsVision": true, "supportsReasoning": false }
+              ]
+            }
+          ],
+          "active": { "providerId": "amd-radeon", "modelId": "MiniCPM5-2B" },
           "workspace": "agent-workspace",
           "sessions": "agent-sessions",
           "plugins": "plugins",
           "webPort": 8090,
           "sessionId": "default",
-          "mode": "work",                     // work = 干活；chat = 闲聊（不挂工具、少花钱）；design = 设计对话
-
-          // ── 4. 对话与上下文治理 ──────────────────────────────
+          "mode": "work",
           "temperature": 0.7,
-          "maxSteps": 12,                     // 一轮里最多几步工具调用
-          "includeUsage": true,               // 端点不认 stream_options 时设为 false
+          "maxSteps": 12,
+          "includeUsage": true,
           "context": {
-            "tokenBudget": 24000,             // 上下文预算（约 token）
-            "compressionTriggerRatio": 0.8,   // 超过预算×此值 → 自动压缩
-            "recentTurnsKeptVerbatim": 2,     // 最近几轮原文保留
-            "injectTaskCard": true            // 是否注入任务卡
+            "tokenBudget": 24000,
+            "compressionTriggerRatio": 0.8,
+            "recentTurnsKeptVerbatim": 2,
+            "injectTaskCard": true
           },
-
-          // ── 5. 工具面与沙箱 ──────────────────────────────────
-          // "disabledToolsets": ["web", "exec"],   // 启动就收起的工具包（core/meta 不可关）
-          // "enabledPlugins": ["devkit", "writing-kit"],  // 只加载这些插件；省略 = 全部
-          "sandbox": "auto"                   // auto / off / process / job（Windows）
-
-          // ── 6. 搜索 ─────────────────────────────────────────
-          // ,"searchBackends": "bing,baidu,searxng"
-          // ,"searxngBaseUrl": "http://localhost:8888"
-
-          // ── 7. 外部 MCP server（可选，子进程 + stdio）────────
-          // ,"mcpServers": [
-          //   { "id": "echo", "command": "python", "args": ["samples/mcp/echo-server.py"], "env": {}, "enabled": true }
-          // ]
+          "sandbox": "auto",
+          "shell": "auto"
         }
         """;
 }

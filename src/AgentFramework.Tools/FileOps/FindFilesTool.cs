@@ -1,7 +1,7 @@
 using System.Text;
 using AgentFramework.Contracts;
 
-namespace AgentFramework.Plugins.DevKit;
+namespace AgentFramework.Tools.FileOps;
 
 /// <summary>
 /// 按名字找文件（glob）。

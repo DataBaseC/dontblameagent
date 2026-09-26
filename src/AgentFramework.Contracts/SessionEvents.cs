@@ -87,6 +87,12 @@ public sealed class UserMessageEvent : SessionEvent
     /// <summary>产出转述的模型标识（仅诊断与展示用）。</summary>
     public string? RephraseModel { get; set; }
 
+    /// <summary>
+    /// 随这条消息发给模型的图（视觉输入）。空/缺省 = 纯文本。
+    /// 自带 base64，JSONL 自包含 —— 回放不依赖外链文件。
+    /// </summary>
+    public List<LlmImage>? Images { get; set; }
+
     /// <summary>模型实际看到的文本。</summary>
     public string ModelVisibleText =>
         string.IsNullOrWhiteSpace(RephrasedText) ? Text : RephrasedText!;
@@ -318,6 +324,12 @@ public sealed class ToolCallCompletedEvent : SessionEvent
     public string Output { get; set; } = "";
 
     public string? Error { get; set; }
+
+    /// <summary>
+    /// 随结果进上下文的图（read_image 等）。UI 在工具卡下回显；
+    /// 投影时在 tool 消息之后以 user 多模态注入（tool 角色不收图）。
+    /// </summary>
+    public List<LlmImage>? Images { get; set; }
 }
 
 /// <summary>任务创建（任务不是容器，只是会话产出的一个待办条目）。</summary>

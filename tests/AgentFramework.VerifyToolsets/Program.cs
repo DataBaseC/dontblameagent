@@ -34,10 +34,9 @@ Directory.CreateDirectory(workspace);
 
 Console.WriteLine("═══ 工具包与暴露面验证 ═══");
 
-// ── 0. 准备插件目录（基石插件 → 各自的包）──
+// ── 0. 准备插件目录（领域插件）──
 (string Id, string Dll)[] binaries =
 [
-    ("devkit", "AgentFramework.Plugins.DevKit.dll"),
     ("writing-kit", "AgentFramework.Plugins.WritingKit.dll"),
     ("console-kit", "AgentFramework.Plugins.ConsoleKit.dll"),
 ];
@@ -73,8 +72,9 @@ await using var host = await AgentHost.CreateAsync(options);
 // ═══ 1. 包归属 ═══
 Console.WriteLine("\n── 1. 工具包与归属 ──");
 var ids = host.Toolsets.Select(t => t.Id).ToList();
-string[] expected = ["core", "meta", "exec", "memory", "search", "plan", "web", "self", "skill", "lab", "devkit", "writing-kit"];
-Check("★ 内置 10 个包 + 基石插件 2 个包都在",
+// 2026-09 重划：日常链全收 core；可关包只留 exec/web/self + 领域插件 writing-kit
+string[] expected = ["core", "meta", "exec", "web", "self", "writing-kit"];
+Check("★ 内置包收敛到 5 个 + writing-kit（降工具调用压力）",
     expected.All(ids.Contains),
     string.Join(",", ids));
 
@@ -83,20 +83,23 @@ Check("★ 内置 10 个包 + 基石插件 2 个包都在",
     ("read_file", "core"),
     ("write_file", "core"),
     ("ask_user", "core"),
+    ("edit_file", "core"),
+    ("read_lines", "core"),
+    ("grep_files", "core"),
+    ("find_files", "core"),
+    ("csv_to_json", "core"),
     ("run_command", "exec"),
-    ("remember", "memory"),
-    ("search_history", "search"),
-    ("update_plan", "plan"),
+    ("remember", "core"),
+    ("search_history", "core"),
+    ("update_plan", "core"),
+    ("spawn_subagent", "core"),
     ("web_search", "web"),
     ("plugin_write", "self"),
+    ("skill_scaffold", "self"),
+    ("skill_validate", "self"),
     ("toolsets", "meta"),
     ("use_toolset", "meta"),
-    ("skill_scaffold", "skill"),
-    ("skill_validate", "skill"),
-    ("skill_extract", "skill"),
     ("tool_catalog", "meta"),
-    ("csv_to_json", "lab"),
-    ("edit_file", "devkit"),
     ("word_count", "writing-kit"),
 ];
 
@@ -107,13 +110,19 @@ var wrongOwners = expectedOwners
 
 Check("★ 每个工具都落在正确的包里", wrongOwners.Count == 0, string.Join("；", wrongOwners));
 
-var devkit = host.Toolsets.First(t => t.Id == "devkit");
-Check("★ 插件包的显示名来自清单（界面上看得懂）",
-    devkit.Name == "编程扩展工具包",
-    devkit.Name);
-Check("插件包的工具数与实际一致",
-    devkit.Tools.Count == 7 && devkit.Tools.Contains("edit_file"),
-    $"{devkit.Tools.Count} 个");
+var writing = host.Toolsets.First(t => t.Id == "writing-kit");
+Check("★ 领域插件包的显示名来自清单（界面上看得懂）",
+    writing.Name == "写作扩展工具包",
+    writing.Name);
+Check("writing-kit 带着 5 个写作工具",
+    writing.Tools.Count == 5 && writing.Tools.Contains("word_count"),
+    $"{writing.Tools.Count} 个");
+Check("core 收齐文件链（关掉插件不断手）",
+    host.Toolsets.First(t => t.Id == "core").Tools.Contains("edit_file")
+    && host.Toolsets.First(t => t.Id == "core").Tools.Contains("read_lines")
+    && host.Toolsets.First(t => t.Id == "core").Tools.Contains("grep_files"),
+    string.Join(",", host.Toolsets.First(t => t.Id == "core").Tools.Where(t =>
+        t is "edit_file" or "read_lines" or "grep_files" or "find_files" or "make_dir")));
 
 var coreView = host.Toolsets.First(t => t.Id == "core");
 Check("保留包被标出来（core / meta）",
@@ -142,7 +151,7 @@ Check("★ 关掉「执行命令」包 → run_command 不可见（但读写文�
     && !host.ExposedToolNames.Contains("run_command")
     && host.ExposedToolNames.Contains("write_file"));
 
-Check("★ 关掉写作包 → 5 个写作工具全不可见，编程包不受影响",
+Check("★ 关掉写作包 → 5 个写作工具全不可见，core 文件链不受影响",
     host.SetToolsetEnabled("writing-kit", false)
     && !host.ExposedToolNames.Contains("word_count")
     && !host.ExposedToolNames.Contains("outline")
@@ -228,11 +237,12 @@ Check("★ skill_scaffold → skill_validate 闭环通过", validateOk.Success, 
 var validateBad = await host.Plugins.InvokeToolAsync("skill_validate", Args(("id", "no-such-skill")));
 Check("skill_validate 对不存在的技能报错", !validateBad.Success && validateBad.Error!.Contains("没找到"));
 
-var catalog = await host.Plugins.InvokeToolAsync("tool_catalog", Args(("toolset", "skill")));
-Check("tool_catalog 按包列出工具", catalog.Success && catalog.Output.Contains("skill_scaffold"), catalog.Output.Split('\n')[0]);
+var catalog = await host.Plugins.InvokeToolAsync("tool_catalog", Args(("toolset", "self")));
+Check("tool_catalog 按包列出工具（skill 工坊并入 self）",
+    catalog.Success && catalog.Output.Contains("skill_scaffold"), catalog.Output.Split('\n')[0]);
 
 var lab = await host.Plugins.InvokeToolAsync("csv_to_json", Args(("csv", "a,b\n1,2")));
-Check("★ csv_to_json（结构化输出样例）解析成功", lab.Success && lab.Output.Contains("\"a\""), lab.Output.Replace("\n", " "));
+Check("★ csv_to_json（结构化转换）解析成功且归属 core", lab.Success && lab.Output.Contains("\"a\""), lab.Output.Replace("\n", " "));
 
 // ═══ 7. 配置层面 ═══
 Console.WriteLine("\n── 7. 配置层面（启动即收起）──");
@@ -244,18 +254,19 @@ var configured = new HostOptions
     PluginsDir = pluginsDir,
     Sandbox = "off",
     // 故意把保留包一起写进去：它必须被忽略
-    DisabledToolsets = ["web", "plan", "core"],
+    DisabledToolsets = ["web", "exec", "core"],
     ApprovalPolicy = static _ => ApprovalDecision.Allow,
 };
 
 await using var configuredHost = await AgentHost.CreateAsync(configured);
 Check("★ 配置里写的包启动就是关的",
     !configuredHost.ExposedToolNames.Contains("web_search")
-    && !configuredHost.ExposedToolNames.Contains("update_plan"),
+    && !configuredHost.ExposedToolNames.Contains("run_command"),
     $"关了 {configuredHost.DisabledToolsets.Count} 个");
 Check("★ 配置里写保留包也不会生效（core 照旧暴露）",
     !configuredHost.DisabledToolsets.Contains("core")
-    && configuredHost.ExposedToolNames.Contains("read_file"),
+    && configuredHost.ExposedToolNames.Contains("read_file")
+    && configuredHost.ExposedToolNames.Contains("edit_file"),
     string.Join(",", configuredHost.DisabledToolsets));
 
 // ═══ 8. HTTP 端点 ═══

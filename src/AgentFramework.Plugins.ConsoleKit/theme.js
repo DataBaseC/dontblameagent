@@ -13,17 +13,22 @@
   var KEY_THEME = 'ck.theme';
   var KEY_READING = 'ck.reading';
   var THEMES = ['default', 'light', 'ink', 'forest'];
+  // 阅读档：off / loose（宽松长文）/ compact（紧凑）/ console（极简控制台）
+  var READINGS = ['off', 'loose', 'compact', 'console'];
 
   function read() {
     try {
       var theme = localStorage.getItem(KEY_THEME) || 'default';
+      var raw = localStorage.getItem(KEY_READING) || 'off';
+      // 老键 on/off → loose
+      if (raw === 'on') { raw = 'loose'; }
       return {
         theme: THEMES.indexOf(theme) >= 0 ? theme : 'default',
-        reading: localStorage.getItem(KEY_READING) === 'on'
+        reading: READINGS.indexOf(raw) >= 0 ? raw : 'off'
       };
     } catch (e) {
       // 隐私模式等场景下 localStorage 可能不可用 —— 那就退回默认外观，别把界面搞挂
-      return { theme: 'default', reading: false };
+      return { theme: 'default', reading: 'off' };
     }
   }
 
@@ -36,8 +41,8 @@
       root.removeAttribute('data-ck-theme');
     }
 
-    if (state.reading) {
-      root.setAttribute('data-ck-reading', 'on');
+    if (state.reading && state.reading !== 'off') {
+      root.setAttribute('data-ck-reading', state.reading);
     } else {
       root.removeAttribute('data-ck-reading');
     }
@@ -46,10 +51,11 @@
   function save(partial) {
     var next = Object.assign(read(), partial || {});
     if (THEMES.indexOf(next.theme) < 0) { next.theme = 'default'; }
+    if (READINGS.indexOf(next.reading) < 0) { next.reading = 'off'; }
 
     try {
       localStorage.setItem(KEY_THEME, next.theme);
-      localStorage.setItem(KEY_READING, next.reading ? 'on' : 'off');
+      localStorage.setItem(KEY_READING, next.reading);
     } catch (e) { /* 存不下就只在本次生效 */ }
 
     apply(next);
@@ -59,6 +65,7 @@
   // 面板（同源 iframe）通过它读写父窗口的状态 —— 只暴露这两件事，不递 DOM 出去
   window.ConsoleKit = {
     themes: THEMES.slice(),
+    readings: READINGS.slice(),
     read: read,
     apply: apply,
     save: save

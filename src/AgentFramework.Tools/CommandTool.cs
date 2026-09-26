@@ -33,7 +33,9 @@ public sealed class RunCommandTool(ToolkitOptions options, ISandboxRegistry sand
 
     public string Name => "run_command";
 
-    public string Description => "在工作区目录下执行一条 shell 命令并返回标准输出与退出码。属危险操作。";
+    public string Description =>
+        "在工作区目录下执行一条 shell 命令并返回标准输出与退出码。属危险操作。" +
+        "shell 为会话级固定选择（优先 POSIX bash），报告里的 shell= 行标明当前语义。";
 
     public string ParametersJsonSchema =>
         """{"type":"object","properties":{"command":{"type":"string","description":"要执行的完整命令"}},"required":["command"]}""";
@@ -47,6 +49,7 @@ public sealed class RunCommandTool(ToolkitOptions options, ISandboxRegistry sand
 
         var root = Path.GetFullPath(options.EffectiveRoot);
         var backend = sandbox.Resolve(options.SandboxName);
+        var shell = options.EffectiveShell;   // 会话级一次决定，不在这里重猜
 
         var limits = new SandboxLimits
         {
@@ -62,7 +65,7 @@ public sealed class RunCommandTool(ToolkitOptions options, ISandboxRegistry sand
         var tempDirectory = Path.Combine(root, ".agent-sandbox", "tmp");
 
         var outcome = await backend.RunAsync(
-            new SandboxRequest(command, root, tempDirectory, limits),
+            new SandboxRequest(command, root, tempDirectory, limits) { Shell = shell },
             ct).ConfigureAwait(false);
 
         if (outcome.Cancelled)
@@ -72,12 +75,23 @@ public sealed class RunCommandTool(ToolkitOptions options, ISandboxRegistry sand
 
         if (outcome.TimedOut)
         {
-            return ToolResult.Fail($"命令超时（{limits.TimeoutSeconds}s），已连同子孙进程终止（沙箱 {backend.Name}）");
+            return ToolResult.Fail($"命令超时（{limits.TimeoutSeconds}s），已连同子孙进程终止（沙箱 {backend.Name} · shell {shell.Id}）");
         }
 
         var report = new StringBuilder();
         report.Append("exit=").Append(outcome.ExitCode).Append('\n');
         report.Append("sandbox=").Append(backend.Name);
+        report.Append(" shell=").Append(shell.Id);
+        if (!shell.IsPosix)
+        {
+            report.Append("(非 POSIX)");
+        }
+
+        // shell 选得不理想时说一句（正常路径不加长文 —— 与沙箱降级同一纪律）
+        if (shell.Note.Contains("回落") || shell.Note.Contains("不可用") || shell.Note.Contains("显式"))
+        {
+            report.Append("（").Append(shell.Note).Append('）');
+        }
 
         // 只在「发生了回落/降级」时才展开细节 —— 正常路径上这行必须够短。
         // 否则每跑一条命令都要在上下文里塞一段沙箱说明书。

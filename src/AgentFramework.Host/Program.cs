@@ -70,6 +70,8 @@ var options = new HostOptions
     PluginsDir = Pick(GetArg("--plugins"), "AGENT_PLUGINS", config?.Plugins),
     // 命令沙箱档位：auto（默认）/ off / process / job，或插件注册的后端名
     Sandbox = Pick(GetArg("--sandbox"), "AGENT_SANDBOX", config?.Sandbox),
+    // shell：会话级一次决定，优先 POSIX。auto / bash / sh / cmd / powershell / pwsh / 路径
+    Shell = Pick(GetArg("--shell"), "AGENT_SHELL", config?.Shell),
     // 启动时就收起的工具包（逗号分隔）。留空 = 全部开启；保留包写了不生效。
     DisabledToolsets = (IReadOnlyCollection<string>?)GetArg("--disable-toolsets")?.Split(
         ',',

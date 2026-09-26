@@ -37,13 +37,19 @@ void Skip(string name, string why)
 
 var isWindows = OperatingSystem.IsWindows();
 var platform = isWindows ? "Windows" : "非 Windows";
-var timeoutCmd = isWindows ? "exit /b 3" : "exit 3";
-var workDirCmd = isWindows ? "cd" : "pwd";
-var tempDirCmd = isWindows ? "echo %TEMP%" : "echo $TMPDIR";
-var floodCmd = isWindows ? "for /l %i in (1,1,3000) do @echo line-%i" : "seq 1 3000";
-var (busyCmd, busyProcName) = isWindows
-    ? ("start /b ping -n 60 127.0.0.1 > nul & ping -n 60 127.0.0.1 > nul", "PING")
-    : ("sleep 60 & sleep 60", "sleep");
+
+// shell 会话级一次决定（优先 POSIX）：测试命令必须跟着选中的 shell 走，不能再按 OS 猜。
+var shell = ShellResolver.Resolve();
+var posix = shell.IsPosix;
+Console.WriteLine($"shell：{shell.Id} ({shell.FileName})  {shell.Note}");
+
+var timeoutCmd = posix ? "exit 3" : "exit /b 3";
+var workDirCmd = posix ? "pwd" : "cd";
+var tempDirCmd = posix ? "echo $TMPDIR" : "echo %TEMP%";
+var floodCmd = posix ? "seq 1 3000" : "for /l %i in (1,1,3000) do @echo line-%i";
+var (busyCmd, busyProcName) = posix
+    ? ("sleep 60 & sleep 60", "sleep")
+    : ("start /b ping -n 60 127.0.0.1 > nul & ping -n 60 127.0.0.1 > nul", "PING");
 
 var root = Path.Combine(Path.GetTempPath(), "af-sandbox-verify", Guid.NewGuid().ToString("N")[..8]);
 var workspace = Path.Combine(root, "workspace");

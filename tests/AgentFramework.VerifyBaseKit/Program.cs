@@ -41,7 +41,6 @@ Console.WriteLine($"工作目录：{root}");
 // ── 0. 组装插件目录（dll 走 ProjectReference 产物，静态文件走 baseplugins/）──
 (string Id, string Dll)[] binaries =
 [
-    ("devkit", "AgentFramework.Plugins.DevKit.dll"),
     ("writing-kit", "AgentFramework.Plugins.WritingKit.dll"),
     ("console-kit", "AgentFramework.Plugins.ConsoleKit.dll"),
 ];
@@ -83,14 +82,13 @@ Check("★ 宿主向内核提供了 IWorkspaceService（插件唯一的文件正
     kernel.ProvidedServiceTypes.Contains(typeof(IWorkspaceService)),
     string.Join(",", kernel.ProvidedServiceTypes.Select(t => t.Name)));
 
-// ═══ 2. 三个基石插件装载 ═══
-Console.WriteLine("\n── 2. 基石插件装载（A 通道 · 程序集插件）──");
+// ═══ 2. 领域插件装载 ═══
+Console.WriteLine("\n── 2. 领域插件装载（A 通道 · 程序集插件）──");
 var loaded = host.LoadedPlugins.Select(p => p.Id).ToList();
-Check("★ devkit 装载成功", loaded.Contains("devkit"), string.Join(",", host.FailedPlugins));
 Check("★ writing-kit 装载成功", loaded.Contains("writing-kit"), string.Join(",", host.FailedPlugins));
 Check("★ console-kit 装载成功", loaded.Contains("console-kit"), string.Join(",", host.FailedPlugins));
 
-string[] devkitTools =
+string[] coreFileTools =
 [
     "edit_file", "grep_files", "find_files", "read_lines", "make_dir", "move_path", "delete_path",
 ];
@@ -99,17 +97,17 @@ string[] writingTools =
     "word_count", "paragraph_report", "repeat_words", "check_punctuation", "outline",
 ];
 
-Check("devkit 注册了 7 个编程工具",
-    devkitTools.All(host.ToolNames.Contains),
-    string.Join(",", devkitTools.Where(t => !host.ToolNames.Contains(t))));
+Check("★ core 收齐文件链（插件卸了也不断手）",
+    coreFileTools.All(host.ToolNames.Contains),
+    string.Join(",", coreFileTools.Where(t => !host.ToolNames.Contains(t))));
 Check("writing-kit 注册了 5 个写作工具",
     writingTools.All(host.ToolNames.Contains),
     string.Join(",", writingTools.Where(t => !host.ToolNames.Contains(t))));
-Check("console-kit 不注册工具（纯界面插件，验证契约的另一半）",
-    host.ToolSources.GetValueOrDefault("edit_file") == "devkit"
+Check("工具来源正确：文件链=官方 core，写作=writing-kit",
+    host.ToolSources.GetValueOrDefault("edit_file")?.Contains("official") == true
     && host.ToolSources.GetValueOrDefault("word_count") == "writing-kit");
 
-// ═══ 3. devkit · 编辑 ═══
+// ═══ 3. 文件链 · 编辑 ═══
 Console.WriteLine("\n── 3. edit_file（agent 从「整篇重写」升级为「局部改」）──");
 var sample = Path.Combine(workspace, "sample.cs");
 File.WriteAllText(sample, "line one\nvar a = 1;\nvar b = 2;\n");
@@ -148,7 +146,7 @@ Check("★ 插件写操作越界被拒（写只能落在工作区内）",
     !escape.Success && escape.Error!.Contains("越出工作区") && File.ReadAllText(outsideFile) == "secret",
     escape.Error ?? escape.Output);
 
-// ═══ 4. devkit · 检索与读 ═══
+// ═══ 4. 文件链 · 检索与读 ═══
 Console.WriteLine("\n── 4. grep / find / read_lines ──");
 Directory.CreateDirectory(Path.Combine(workspace, "src"));
 File.WriteAllText(Path.Combine(workspace, "src", "a.cs"), "class A\n{\n    void Go() { }\n}\n");
@@ -184,7 +182,7 @@ Check("find_files 按 glob 找文件名（*.cs 跨目录命中）",
     find.Success && find.Output.Contains("src/a.cs") && !find.Output.Contains("b.md"),
     find.Output.Split('\n')[0]);
 
-// ═══ 5. devkit · 搬移 ═══
+// ═══ 5. 文件链 · 搬移 ═══
 Console.WriteLine("\n── 5. 目录与搬移 ──");
 var makeDir = await kernel.InvokeToolAsync("make_dir", Args(("path", "out/dir")));
 Check("make_dir 建目录（含中间层级）",
@@ -306,15 +304,16 @@ Check("插件面板 panel.html 仍走原通道可用",
     $"{panel.Length} 字符");
 
 // ═══ 8. 生命周期 ═══
-Console.WriteLine("\n── 8. 卸载即撤销 ──");
-var unloaded = await kernel.UnloadAsync("devkit");
-Check("★ 卸载 devkit 后它的 7 个工具立刻从工具表消失",
-    unloaded && devkitTools.All(t => !host.ToolNames.Contains(t)),
-    string.Join(",", devkitTools.Where(host.ToolNames.Contains)));
+Console.WriteLine("\n── 8. 卸载即撤销（core 文件链不随插件走）──");
+var unloaded = await kernel.UnloadAsync("writing-kit");
+Check("★ 卸载 writing-kit 后它的 5 个写作工具立刻从工具表消失",
+    unloaded && writingTools.All(t => !host.ToolNames.Contains(t)),
+    string.Join(",", writingTools.Where(host.ToolNames.Contains)));
+Check("★ core 文件链不受插件卸载影响（关掉插件不断手）",
+    coreFileTools.All(host.ToolNames.Contains),
+    string.Join(",", coreFileTools.Where(t => !host.ToolNames.Contains(t))));
 Check("官方工具不受影响（只撤插件自己挂的）",
     host.ToolNames.Contains("read_file") && host.ToolNames.Contains("write_file"));
-Check("兄弟插件不受影响",
-    host.ToolNames.Contains("word_count"));
 
 Console.WriteLine($"\n结果：{passes} 通过 / {failures} 失败");
 

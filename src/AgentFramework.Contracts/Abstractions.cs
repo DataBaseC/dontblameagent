@@ -136,9 +136,18 @@ public sealed record ToolInvocation(string ToolName, IReadOnlyDictionary<string,
 /// <summary>工具调用结果。</summary>
 public sealed record ToolResult(bool Success, string Output, string? Error = null)
 {
+    /// <summary>
+    /// 随结果注入上下文的图（如 <c>read_image</c>）。
+    /// 主循环在 tool 消息之后以 **user 多模态消息**注入 —— OpenAI 系 tool 角色不收图。
+    /// </summary>
+    public IReadOnlyList<LlmImage>? Attachments { get; init; }
+
     public static ToolResult Ok(string output) => new(true, output);
 
     public static ToolResult Fail(string error) => new(false, string.Empty, error);
+
+    public static ToolResult OkWithImages(string output, IReadOnlyList<LlmImage> images)
+        => new(true, output) { Attachments = images };
 }
 
 /// <summary>内核提供、插件消费的基础服务（seam 三角色的最小演示）。</summary>

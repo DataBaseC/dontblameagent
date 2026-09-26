@@ -308,6 +308,37 @@ Check("工具参数跨帧拼完整",
     capturedCalls is { Count: 1 } && capturedCalls[0].ArgumentsJson.Contains("a.txt"),
     capturedCalls is { Count: 1 } ? capturedCalls[0].ArgumentsJson : "");
 
+// ── 2.8 视觉：多模态 content 数组（须在 listener.Stop 之前）──
+Console.WriteLine("\n── 2.8 视觉输入（image_url）──");
+
+var tinyPng = Convert.ToBase64String([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]);
+capturedPayload = null;
+await DrainAsync(openaiClient, new LlmRequest
+{
+    Model = "auto",
+    Messages =
+    [
+        new LlmMessage
+        {
+            Role = LlmRole.User,
+            Content = "这图里是什么？",
+            Images = [new LlmImage { MediaType = "image/png", Base64Data = tinyPng, FileName = "a.png" }],
+        },
+    ],
+});
+var decodedVision = capturedPayload is null ? null : System.Text.RegularExpressions.Regex.Unescape(capturedPayload);
+Check("★ 带图消息展开成 content 数组", decodedVision?.Contains("\"type\":\"image_url\"") == true, "含 image_url");
+Check("★ data URL 带 media 与 base64", decodedVision?.Contains("data:image/png;base64,") == true);
+Check("文本部分仍在数组里", decodedVision?.Contains("\"type\":\"text\"") == true && decodedVision?.Contains("这图里是什么？") == true);
+
+capturedPayload = null;
+await DrainAsync(openaiClient, new LlmRequest
+{
+    Model = "auto",
+    Messages = [new LlmMessage { Role = LlmRole.User, Content = "plain" }],
+});
+Check("无图时 content 仍是字符串", capturedPayload?.Contains("\"content\":\"plain\"") == true, "保持 string 形态");
+
 listener.Stop();
 
 // ── 3. HTML 搜索解析 ────────────────────────────────────────

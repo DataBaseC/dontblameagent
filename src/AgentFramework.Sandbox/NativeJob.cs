@@ -213,7 +213,8 @@ public sealed class WindowsJobSandboxBackend : ISandboxBackend
                     request.Limits,
                     notes,
                     OnStarted: null,
-                    OnTerminate: null),
+                    OnTerminate: null,
+                    Shell: request.Shell),
                 ct).ConfigureAwait(false);
         }
 
@@ -234,7 +235,8 @@ public sealed class WindowsJobSandboxBackend : ISandboxBackend
                                 $"AssignProcessToJobObject 失败（Win32 {Marshal.GetLastWin32Error()}）—— 配额未生效");
                         }
                     },
-                    OnTerminate: () => NativeJob.Terminate(job)),
+                    OnTerminate: () => NativeJob.Terminate(job),
+                    Shell: request.Shell),
                 ct).ConfigureAwait(false);
 
             return outcome;

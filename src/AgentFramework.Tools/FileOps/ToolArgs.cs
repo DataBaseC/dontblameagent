@@ -1,4 +1,4 @@
-namespace AgentFramework.Plugins.DevKit;
+namespace AgentFramework.Tools.FileOps;
 
 /// <summary>
 /// 工具入参读取helpers。

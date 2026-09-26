@@ -208,6 +208,22 @@ Check("没写配置单时返回 null（走默认值）",
 await File.WriteAllTextAsync(configPath, "{ 这不是合法 json");
 Check("★ 坏配置单不阻断启动（提示一声后按默认继续）", AgentConfig.TryLoad(configPath) is null);
 
+// 生成物必须是严格 JSON（无 //、无尾逗号），并内置免费端点
+var sample = AgentConfig.Sample();
+var sampleOk = false;
+try
+{
+    using var doc = System.Text.Json.JsonDocument.Parse(sample);
+    sampleOk = doc.RootElement.TryGetProperty("cloud", out var cloud)
+        && cloud.GetProperty("baseUrl").GetString()?.Contains("developer.amd.com.cn") == true
+        && cloud.GetProperty("model").GetString() == "MiniCPM5-2B";
+}
+catch (System.Text.Json.JsonException)
+{
+    sampleOk = false;
+}
+Check("★ Sample() 是严格 JSON 且内置免费端点（AMD MiniCPM5-2B）", sampleOk);
+
 // ── 7. 架构地基（模块 / 工具注册表 / 交互缝 / 会话派生）────
 Console.WriteLine("\n── 7. 架构地基 ──");
 

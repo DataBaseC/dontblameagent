@@ -24,7 +24,8 @@ public sealed class OffSandboxBackend : ISandboxBackend
                 request.Limits,
                 [Describe()],
                 OnStarted: null,
-                OnTerminate: null),
+                OnTerminate: null,
+                Shell: request.Shell),
             ct);
 }
 
@@ -63,6 +64,7 @@ public sealed class PortableSandboxBackend : ISandboxBackend
                 request.Limits,
                 [Describe()],
                 OnStarted: null,
-                OnTerminate: null),
+                OnTerminate: null,
+                Shell: request.Shell),
             ct);
 }

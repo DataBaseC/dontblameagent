@@ -498,7 +498,32 @@ public sealed class OpenAiCompatibleClient : ILlmClient, IDisposable
 
             var node = new JsonObject { ["role"] = message.Role };
 
-            if (message.Content is not null)
+            // 视觉：带图时 content 必须是多模态数组（OpenAI 系 image_url）；
+            // 纯文本保持 string，兼容只认字符串的本地端点。
+            if (message.Images is { Count: > 0 })
+            {
+                var parts = new JsonArray();
+                if (!string.IsNullOrEmpty(message.Content))
+                {
+                    parts.Add(new JsonObject { ["type"] = "text", ["text"] = message.Content });
+                }
+                else
+                {
+                    parts.Add(new JsonObject { ["type"] = "text", ["text"] = "（见下图）" });
+                }
+
+                foreach (var image in message.Images)
+                {
+                    parts.Add(new JsonObject
+                    {
+                        ["type"] = "image_url",
+                        ["image_url"] = new JsonObject { ["url"] = image.ToDataUrl() },
+                    });
+                }
+
+                node["content"] = parts;
+            }
+            else if (message.Content is not null)
             {
                 node["content"] = message.Content;
             }

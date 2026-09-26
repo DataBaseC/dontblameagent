@@ -42,17 +42,14 @@ if errorlevel 1 (
 )
 
 rem Base plugins are separate projects; they must land in .\plugins\ to be loaded.
-rem Keep this list in sync with pack-launcher.cmd (devkit / writing-kit / console-kit).
+rem Keep this list in sync with pack-launcher.cmd (writing-kit / console-kit).
 echo [2/3] Sync base plugins to plugins\ ...
 if not exist "plugins" mkdir "plugins"
-dotnet build src\AgentFramework.Plugins.DevKit -c Debug -m:1 --nologo -v quiet
 dotnet build src\AgentFramework.Plugins.WritingKit -c Debug -m:1 --nologo -v quiet
 dotnet build src\AgentFramework.Plugins.ConsoleKit -c Debug -m:1 --nologo -v quiet
 
-if not exist "plugins\devkit" mkdir "plugins\devkit"
 if not exist "plugins\writing-kit" mkdir "plugins\writing-kit"
 if not exist "plugins\console-kit" mkdir "plugins\console-kit"
-xcopy /y /q "src\AgentFramework.Plugins.DevKit\bin\Debug\net10.0\*" "plugins\devkit" >nul
 xcopy /y /q "src\AgentFramework.Plugins.WritingKit\bin\Debug\net10.0\*" "plugins\writing-kit" >nul
 xcopy /y /q "src\AgentFramework.Plugins.ConsoleKit\bin\Debug\net10.0\*" "plugins\console-kit" >nul
 

@@ -32,12 +32,16 @@ public sealed partial class WebUiServer
         {
             var body = await request.ReadBodyAsync().ConfigureAwait(false);
             var text = body is null ? null : ReadString(body.Value, "text");
+            var images = body is null ? null : ReadImages(body.Value, "images");
 
-            if (string.IsNullOrWhiteSpace(text))
+            // 纯贴图、无文字也合法（视觉模型常这么用）
+            if (string.IsNullOrWhiteSpace(text) && images is not { Count: > 0 })
             {
-                request.Json(new { ok = false, error = "text 不能为空" }, 400);
+                request.Json(new { ok = false, error = "text 不能为空（或至少附一张图）" }, 400);
                 return;
             }
+
+            text ??= string.Empty;
 
             // ★ 把「回合归属」在 POST 这一刻就定下来（P1）：
             //   不只是捕获宿主（宿主现在根本不换），还要捕获**会话** ——
@@ -56,7 +60,7 @@ public sealed partial class WebUiServer
             {
                 try
                 {
-                    await host.SendAsync(session, text, cts.Token).ConfigureAwait(false);
+                    await host.SendAsync(session, text, cts.Token, images).ConfigureAwait(false);
                 }
                 catch (OperationCanceledException)
                 {

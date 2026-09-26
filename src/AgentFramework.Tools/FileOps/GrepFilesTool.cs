@@ -2,7 +2,7 @@ using System.Text;
 using System.Text.RegularExpressions;
 using AgentFramework.Contracts;
 
-namespace AgentFramework.Plugins.DevKit;
+namespace AgentFramework.Tools.FileOps;
 
 /// <summary>
 /// 内容检索（grep）—— 「这行字在哪儿出现过」。

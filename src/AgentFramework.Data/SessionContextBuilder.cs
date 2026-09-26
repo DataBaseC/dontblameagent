@@ -200,7 +200,12 @@ public static class SessionContextBuilder
             switch (sessionEvent)
             {
                 case UserMessageEvent user:
-                    messages.Add(new LlmMessage { Role = LlmRole.User, Content = user.ModelVisibleText });
+                    messages.Add(new LlmMessage
+                    {
+                        Role = LlmRole.User,
+                        Content = user.ModelVisibleText,
+                        Images = user.Images is { Count: > 0 } imgs ? imgs : null,
+                    });
                     break;
 
                 case AssistantMessageEvent assistant:
@@ -293,6 +298,17 @@ public static class SessionContextBuilder
                         ToolCallId = completed.CallId,
                         Content = raw,
                     });
+
+                    // 视觉：tool 角色不收图，紧跟一条 user 多模态（与 AgentRunner 在环内同一手法）
+                    if (completed.Images is { Count: > 0 })
+                    {
+                        messages.Add(new LlmMessage
+                        {
+                            Role = LlmRole.User,
+                            Content = $"（工具附带了 {completed.Images.Count} 张图，请结合图像继续）",
+                            Images = completed.Images,
+                        });
+                    }
 
                     break;
                 }
