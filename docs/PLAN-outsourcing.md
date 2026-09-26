@@ -1,10 +1,13 @@
-# 外包任务书 · 六项功能扩展
+# 外包任务书 · 八项功能扩展与修复
 
 > 用途：拆给外包实施的**需求提示**。每项自包含，可单独粘贴给一个外包。
 > 本文只写「做成什么样 / 验收怎么过 / 哪里不许动」，不规定内部实现细节。
 >
 > 源码根：`AgentFramework-src-v3.5`（C# / .NET 10，Windows 桌面）。
 > 设计文档：`README.md`、`docs/PLAN-toolset-exposure.md`、`docs/PLAN-memory-evolution.md`、`docs/PLUGIN-SDK.md`。
+>
+> **新增（2026-09 批）**：任务 **7 ask_user 提问卡片修复**、任务 **8 缓存命中率提升**。
+> 这两项优先于装饰性 UI；7 必须在**真实 green 包**上手测通过，不能只跑单测。
 
 ---
 
@@ -261,18 +264,126 @@
 
 ---
 
+## 7. 修复 ask_user 提问卡片（用户实测仍失败，优先修）
+
+### 需求意图（用户原话）
+> 「ask_user 调用失败」——模型调用 `ask_user` 时，用户仍看不到可回答的卡片 / 工具失败 / 答不回去。
+
+**目标**：在真实 Web 界面里，模型调用 `ask_user` → **弹出提问卡片** → 用户输入或点选项 → 答案回到工具结果 → 模型继续。全链路可观察、失败有明确文案。
+
+### 现状（已有一版实现，但用户实测仍失败 —— 请先复现再修，勿只改表面）
+| 项 | 位置 |
+|---|---|
+| 工具 | `AskUserTool`（`src/AgentFramework.Tools/AskUserTool.cs`）——参数 `question`/`options`/`context` |
+| 交互缝 | `Contracts.IUserInteraction`（`src/AgentFramework.Contracts/UserInteraction.cs`）：`CanInteract` / `AskAsync` |
+| 无界面降级 | `NullUserInteraction` / `ApprovalPromptInteraction.AskAsync` 固定 `AskUserAnswer.None`（「问不出去」） |
+| 宿主装配 | `HostBuilder.cs:692`：`AskUserTool(() => state.InteractionProvider?.Invoke() ?? Null…)` |
+| 宿主回填 | `AgentHost.CreateCore` 设 `state.InteractionProvider = () => host.EffectiveInteraction`；`UserInteraction` 显式注入优先 |
+| Web 侧（本批已写） | `WebUiServer.Attach` → `host.UserInteraction = new WebUiInteraction`；`AskUserAsync` 广播 SSE `type:"ask-user"` 并等 `_pendingAsks` |
+| 回执 API | `POST /api/ask-user`（`WebUiServer.Routes.Chat.cs`） |
+| UI 卡片 | `WebUiPage.cs` `addAskUserCard` + `stream.onmessage` 的 `type === 'ask-user'` |
+| 审批对照 | 审批帧是**外层** `type:"approval"`（不是 `type:"event"` 包一层）—— ask-user 必须同层，否则 `renderEvent` 收不到 |
+| 超时 | `AskUserAsync` 120s → `AskUserAnswer.None`（**绝不编答案**） |
+
+### 已知可疑点（按优先级排查，找到根因再改）
+1. **跑的不是新构建**：`pack-launcher.cmd` 会清 `build\pack`；手测必须看页头 BuildInfo 时间戳。Debug 半成品与 green 混用会「修了没生效」。
+2. **SSE 帧未达前端**：外层 `type` 是否被 `stream.onmessage` 显式分支处理；非当前会话分流逻辑（`isCurrent`）是否误吞 ask-user。
+3. **`EffectiveInteraction` 解析成 Null**：`Attach` 时序、`UserInteraction` 被覆盖回 null、子会话/SubAgent 是否拿到不同 host。
+4. **工具调用前就失败**：参数 schema、`ToolCallRequested`/`Completed` 配对、审批策略是否把 `ask_user` 当敏感工具拦下（默认应 `Allow`）。
+5. **卡片能弹但答案回不去**：`/api/ask-user` 的 id 对不上 `_pendingAsks`、TCS 先超时、锁竞争。
+6. **双通路污染**：工具结果/思考/正文混渲染，看起来像「失败」实则是展示问题。
+
+### 要做什么
+1. **先复现**：在 green 包或 `build-host` 的 Web UI 里让模型调一次 `ask_user`，记录是哪一层断了（工具错误文案 / 无卡片 / 卡片不能提交 / 答案未回模型）。
+2. **按根因修复**；若当前实现方向正确则补齐缺口，不要推倒重写。
+3. **失败文案必须可诊断**：「问不出去」「等待回答超时」「提交失败」分开，禁止统一显示「失败」。
+4. **补自动化**：`VerifyWeb` / `VerifyHost` 至少覆盖：
+   - 交互缝注入后 `ask_user` 成功返回用户答案；
+   - 未注入时如实「问不出去」；
+   - `POST /api/ask-user` 合法 id → 200；未知/超时 id → 404；
+   - SSE 广播帧形状：`{type:"ask-user", id, question, options?, context?}`。
+5. **手测清单**（必须截图或录屏/文字记录）：
+   - [ ] 模型调用 `ask_user` → 弹「💬 模型在问你」卡片；
+   - [ ] 自由输入并发送 → 工具结果含该文本 → 对话继续；
+   - [ ] 点选项按钮 → 同上；
+   - [ ] 2 分钟不答 → 工具失败文案为「未答复」类，**不是**假装用户答过；
+   - [ ] 多标签页/切会话时提问卡归属正确（不串会话）。
+
+### 验收
+- [ ] 真实 Web UI 全链路手测通过（见上清单）。
+- [ ] `verify-all.cmd` 0 失败；新增断言进对应 `Verify*`。
+- [ ] 不破坏审批卡（`type:"approval"`）与工具卡 completed 收口。
+- [ ] 变更说明写清：根因是什么、为何从前失败、如何避免回归。
+
+### 禁止
+- 不要只加 UI 卡片而后端仍走 `ApprovalPromptInteraction.AskAsync` 的「问不出去」。
+- 不要在超时/取消时编造用户答案。
+- 不要破坏 `ToolCallRequested`↔`Completed` 配对（ask_user 也要成对发）。
+- 不要改压缩算法 / 事件真相源来「绕过」交互问题。
+
+---
+
+## 8. 提升提示词缓存命中率（前缀稳定 + 可度量）
+
+### 需求意图
+多轮对话里 `cached_tokens` 偏低、`cache_creation_input_tokens` 偏高 —— **前缀经常被打掉**。要提升 prompt cache 命中，并让命中率**可度量**（界面上能看到「本轮命中 / 写入」）。
+
+背景：cache write 往往按约 **1.25×** 计费；断点打得差**比不用缓存更贵**。前缀一旦在中间变字节，后面全部 miss。
+
+### 现状（架构已为缓存留好口子，缺的是稳定与度量）
+| 项 | 位置 |
+|---|---|
+| 冻结段 / 动态段装配 | `src/AgentFramework.Data/ContextAssembler.cs` —— **只有会话内不变的内容进冻结段**；动态段永远在其后 |
+| 冻结段来源 | `AgentHost.BuildFrozenBlockAsync`（模式说明、记忆索引卡）；「这一轮用得上的细节」走 `BuildRecallBlockAsync`（动态） |
+| 索引卡约束 | `MemoryBlocks.cs`：常驻索引卡**会话内冻结**；索引卡一变就打掉前缀缓存 |
+| 系统消息位置 | Qwen/vLLM：`BuildPayload` 合并 system 到 **index 0**（`OpenAiCompatibleClient.cs`）；近因锚点用 user +「非用户发言」前缀 |
+| 用量字段 | `ModelUsage.CachedTokens` / `CacheWriteTokens`（`AgentRunner.cs:183`、`OpenAiCompatibleClient.cs:640`） |
+| 投影/裁剪 | `SessionContextBuilder`（遮蔽、冻结 seq）；压缩换投影函数 —— **勿与缓存断点绑成一个触发点** |
+
+### 要做什么
+1. **度量先行**
+   - `/api/status`（或 `/api/context`）增加**本轮与会话累计**：`prompt_tokens` / `cached_tokens` / `cache_write_tokens` / **命中率**（`cached / prompt`）。
+   - 时间线或工具卡旁可只读展示「命中 N / 写入 M」；不要求新做大屏。
+2. **前缀稳定审计（按杀伤力排序，逐条证伪或修）**
+   - 冻结段是否含**时间戳、随机数、每次变化的标题、会话 id** → 必须挪到动态段或去掉。
+   - 记忆索引卡是否被频繁重建导致字节抖动 → 会话内应冻结；变化只在**新会话**或显式重建后生效。
+   - 动态段是否有内容被插到冻结段**之前**（`Insert(0)` 类）→ 违规。
+   - system 合并后角色是否仍稳定（防中段残留 system 触发 Jinja 500 + 打乱前缀）。
+   - 工具消息 / `assistant` 空 `content` 补位形状是否每轮稳定。
+   - 压缩/checkpoint 触发后前缀**必然**重建 —— 这是预期 miss，要在度量里区分「压缩导致的 miss」与「字节抖动导致的 miss」。
+3. **可选增强（有余力再做）**
+   - 为兼容端点透传 cache 相关请求字段（若端点支持且不破坏现有 payload）。
+   - 「稳定段字节哈希」诊断：两次请求的冻结段哈希不一致时打日志（开发开关，默认关）。
+
+### 验收
+- [ ] 连续多轮无压缩对话中，第 2 轮起 `cached_tokens` **明显大于 0** 且命中率可读（给出实测数字对比：改前 vs 改后）。
+- [ ] 冻结段在会话内**逐字节稳定**（连续 3 轮哈希相同）；有意变更（切模式）才变。
+- [ ] 度量字段出现在 API 与 UI；压缩后 miss 能与普通 miss 区分（或至少文档写清口径）。
+- [ ] `verify-all.cmd` 0 失败；为「冻结段稳定」「动态段不前插」补断言（`Verify*` 自选合适套件）。
+- [ ] Qwen/vLLM system 仍在 messages 最前；无 Jinja 500 回归。
+
+### 禁止
+- 不要把每轮变化的召回块/任务卡/时间戳塞进冻结段「骗命中」。
+- 不要为提命中改压缩算法或真相源（JSONL 仅追加）。
+- 不要只改计费展示数字而不改真实请求形状（禁止假命中率）。
+
+---
+
 ## 附录 A · 建议拆分与合并顺序
 
 | 顺序 | 任务 | 主要文件面 | 与其它项冲突 |
 |---|---|---|---|
-| A | 任务 3 UI 布局/流畅度 | `WebUiPage.cs` 为主 | 与 1/4/5 抢 `WebUiPage` —— **先做 3 或最后合** |
-| B | 任务 1 上下文设置 | `HostOptions`/`Context*`/新 API/`WebUiPage` 面板 | 与 A 协调 |
-| C | 任务 5 审批档位 | `Approval.cs`/`HostOptions`/审批 UI | 与 B 都要改设置区 |
+| **0** | **任务 7 ask_user 卡片修复** | `WebUiServer*.cs` / `WebUiPage.cs` / `Approval.cs` / `AskUserTool` | 抢 `WebUiPage`/`WebUiServer` —— **优先独占做，先合** |
+| **0** | **任务 8 缓存命中** | `ContextAssembler` / `AgentHost` 冻结段 / `OpenAiCompatibleClient` / status API | 与 7 低冲突；别和压缩改造同人 |
+| A | 任务 3 UI 布局/流畅度 | `WebUiPage.cs` 为主 | 与 1/4/5/7 抢 `WebUiPage` —— **3 最后合或与 7 串行** |
+| B | 任务 1 上下文设置 | `HostOptions`/`Context*`/新 API/`WebUiPage` 面板 | 与 A 协调；与 8 共享 context 度量展示 |
+| C | 任务 5 审批档位 | `Approval.cs`/`HostOptions`/审批 UI | 与 B 都要改设置区；与 7 共享审批/交互缝 |
 | D | 任务 4 模式扩展 | `Memory.cs`（ModeProfile）/`Chat` 路由/新建会话 UI | 中等 |
 | E | 任务 2 工具扩展 | `Tools/` / `HostBuilder` / `PLUGIN-SDK.md` | 相对独立 |
 | F | 任务 6 思考判定 | `ModelProfile`/`OpenAiCompatibleClient`/模型面板 | 相对独立 |
 
-**推荐**：E、F 可并行；A 一人收口 UI；B、C 在 A 之后合入设置区；D 可与 E 并行。
+**推荐**：**7 先修完再动 UI**；8 可与 E/F 并行；A、B、C 在 7 之后按设置区合并；D 可与 E 并行。
+**2026-09 用户实测未过**：7（ask_user）、8（缓存）为当前优先。
 
 ## 附录 B · 统一验收命令
 
@@ -291,6 +402,8 @@ build\pack\green\AgentFramework.Launcher.exe
 
 - 回归基线：当前仓库 `verify-all` 应 **0 失败**（若见共享 `DevKit.dll` 锁的假失败，间隔 2s 重跑）。
 - UI 改动需手测：审批卡弹出、工具卡 completed 收口、底部按钮可达、模式切换即时生效。
+- **任务 7 附加手测**：`ask_user` 弹卡 → 输入/选项 → 答案回模型；超时文案正确。必须在 **green 包**（`pack-launcher.cmd` 产物）上测，页头 BuildInfo 时间戳核对构建时间。
+- **任务 8 附加手测**：连续 2+ 轮对话后查看命中率数字；第 2 轮起 `cached_tokens > 0`。
 
 ## 附录 C · 交付物（每项外包统一交）
 
