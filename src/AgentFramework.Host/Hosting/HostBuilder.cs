@@ -258,11 +258,50 @@ public sealed class ModelModule : IHostModule
         // 原实现每次转述都 new 一个（各带自己的 HttpClient）且从不释放，高频转述会耗尽本地连接。
         var adHocTargets = new Dictionary<string, ILlmClient>(StringComparer.OrdinalIgnoreCase);
 
+        // ★ 解析不到就回退 active 端点（P0）：配了 providers（如 amd-radeon）时
+        //   local/cloud 直连客户端为空，硬编码 "local" 默认值会静默失效。
+        //   回退到当前生效端点，转述/摘要才在多端点配置下可用。
+        ILlmClient? FallbackActive()
+        {
+            if (modelSettings is null)
+            {
+                return null;
+            }
+
+            var active = modelSettings.ActiveProvider;
+            if (active is null || string.IsNullOrWhiteSpace(active.BaseUrl))
+            {
+                return null;
+            }
+
+            if (adHocTargets.TryGetValue("active-fallback", out var hit))
+            {
+                return hit;
+            }
+
+            var activeModelId = modelSettings.ActiveModel?.Id;
+            if (string.IsNullOrWhiteSpace(activeModelId))
+            {
+                activeModelId = active.Models.FirstOrDefault()?.Id;
+            }
+
+            var created = new OpenAiCompatibleClient(active.Id, new OpenAiCompatibleOptions
+            {
+                BaseUrl = active.BaseUrl,
+                ApiKey = active.ResolveApiKey(modelStore?.Protector ?? SecretProtectors.Default) ?? string.Empty,
+                DefaultModel = string.IsNullOrWhiteSpace(activeModelId) ? "auto" : activeModelId!,
+                ReasoningStyle = string.IsNullOrWhiteSpace(active.ReasoningStyle) ? ReasoningStyles.None : active.ReasoningStyle,
+                ReasoningEffort = active.ReasoningEffort ?? string.Empty,
+            });
+            adHocTargets["active-fallback"] = created;
+            return created;
+        }
+
         ILlmClient? ResolveRephraseTarget(string? name)
         {
             if (string.IsNullOrWhiteSpace(name))
             {
-                return null;
+                return FallbackActive();
             }
 
             if (rephraseTargets.TryGetValue(name.Trim(), out var direct))
@@ -272,7 +311,7 @@ public sealed class ModelModule : IHostModule
 
             if (modelSettings is null)
             {
-                return null;
+                return FallbackActive();
             }
 
             // "端点:模型" 形态（如 "deepseek:deepseek-chat"）→ 指到具体模型的客户端
@@ -304,7 +343,7 @@ public sealed class ModelModule : IHostModule
                     return created;
                 }
 
-                return null;
+                return FallbackActive();
             }
 
             // 只写端点 id（"deepseek"）→ 用该端点的默认/首个模型。
@@ -323,7 +362,9 @@ public sealed class ModelModule : IHostModule
                 });
             }
 
-            return null;
+            // ★ 最终兜底：名字完全认不出（典型是默认 "local" 而端点叫 amd-radeon）——
+            //   转述不该因此彻底不可用，回退到 active 端点。
+            return FallbackActive();
         }
 
         var rephraser = options.RephraserOverride
@@ -331,12 +372,17 @@ public sealed class ModelModule : IHostModule
                 ? null
                 : new LlmUserInputRephraser(ResolveRephraseTarget));
 
-        // L5 上下文摘要器（可选，默认关 —— 实证性价比低，只在显式开启时才被调用）。
-        // 与抓取摘要同理：只挂本地端点，摘要才不出机。
+        // L5 上下文摘要器：与转述共用同一套解析（local/cloud/端点 id/端点:模型），
+        // 认不出时回退 active 端点 —— 多端点配置（如 amd-radeon）下摘要才不会静默失效。
+        // 只挂 localClient 的老写法在「配了 providers 就没有 localClient」时恒为 null，
+        // 于是 SummarizeOlderHistory 再怎么开也永远生不出摘要（压缩只剩遮蔽、不折叠）。
+        var summarizerClient = ResolveRephraseTarget("local")
+            ?? ResolveRephraseTarget("cloud")
+            ?? FallbackActive();
         var contextSummarizer = options.ContextSummarizerOverride
-            ?? (localClient is null
+            ?? (summarizerClient is null
                 ? null
-                : new LlmContextSummarizer(localClient, new LlmContextSummarizerOptions()));
+                : new LlmContextSummarizer(summarizerClient, new LlmContextSummarizerOptions()));
 
         state.ModelStore = modelStore;
         state.ModelSettings = modelSettings;

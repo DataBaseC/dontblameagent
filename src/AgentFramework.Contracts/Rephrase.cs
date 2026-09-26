@@ -38,7 +38,7 @@ public sealed class RephraseOptions
     public double Temperature { get; set; } = 0.2;
 
     /// <summary>超时即回退原文 —— 转述不许把发消息卡住。</summary>
-    public int TimeoutMs { get; set; } = 8000;
+    public int TimeoutMs { get; set; } = 120_000;
 
     /// <summary>低于这个长度不转述（"继续" / "好的" 这类没什么可澄清的）。</summary>
     public int MinChars { get; set; } = 8;

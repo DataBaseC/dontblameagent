@@ -51,27 +51,35 @@ public static class SessionContextBuilder
         => Build(JsonlEventLog.Read(path));
 
     /// <summary>带治理的投影。</summary>
-    public static ContextProjection Project(IEnumerable<SessionEvent> events, ContextOptions? options = null)
+    /// <param name="forceCollapse">
+    /// 超预算且无摘要时是否仍折叠旧轮（P0）：折叠掉放一句如实占位，
+    /// 好过让正文永远不收缩、水位永远降不下来。
+    /// </param>
+    public static ContextProjection Project(
+        IEnumerable<SessionEvent> events,
+        ContextOptions? options = null,
+        bool forceCollapse = false)
     {
         var opt = options ?? new ContextOptions();
         var all = events as IReadOnlyList<SessionEvent> ?? [.. events];
 
         // L6 两遍投影：第一遍不骨架化 —— 无压力时零信息损失；
         // 估算水位超限才用骨架化再投影一遍（纯函数、无 IO，成本是常数次遍历）。
-        var first = ProjectCore(all, opt, skeletonize: false);
+        var first = ProjectCore(all, opt, skeletonize: false, forceCollapse);
         if (!opt.SkeletonizeOldAssistant || !first.NeedsCompression)
         {
             return first;
         }
 
-        var second = ProjectCore(all, opt, skeletonize: true);
+        var second = ProjectCore(all, opt, skeletonize: true, forceCollapse);
         return second.EstimatedTokens < first.EstimatedTokens ? second : first;
     }
 
     private static ContextProjection ProjectCore(
         IReadOnlyList<SessionEvent> all,
         ContextOptions opt,
-        bool skeletonize)
+        bool skeletonize,
+        bool forceCollapse)
     {
         // ── 0) 先读历史压缩留痕 ─────────────────────────────
         //   · MaskedSeqs：钉死遮蔽态 —— 「当时遮蔽过的，之后不会又展开」
@@ -154,8 +162,11 @@ public static class SessionContextBuilder
         var keptTurns = Math.Clamp(opt.RecentTurnsKeptVerbatim, 0, totalTurns);
         var cutoff = totalTurns - keptTurns;
 
-        // 只有"窗口外确实有轮次"且"确实有摘要"时才折叠；否则老轮次照样逐字保留
-        var collapseOld = summary is not null && cutoff > 0;
+        // 折叠条件：窗口外确实有轮次，且「有摘要」或「显式强制」。
+        // 从前要求「有摘要才折叠」—— 摘要器没接上时（多端点配置下 localClient 恒 null 是常态）
+        // 老轮次永远逐字保留，上下文永不收缩，水位永远降不下来。
+        // 现在：超预算时由外层 Project 带 forceCollapse 进来，无摘要则给一段如实的占位说明。
+        var collapseOld = cutoff > 0 && (summary is not null || forceCollapse);
 
         var messages = new List<LlmMessage>();
         var maskedSeqs = new List<long>();
@@ -166,7 +177,11 @@ public static class SessionContextBuilder
             messages.Add(new LlmMessage
             {
                 Role = LlmRole.User,
-                Content = "【早期对话摘要·非用户发言】原始事件仍在会话日志中，需要细节时可回到原文检索。\n" + summary,
+                Content = summary is not null
+                    ? "【早期对话摘要·非用户发言】原始事件仍在会话日志中，需要细节时可回到原文检索。\n" + summary
+                    : "【早期对话已折叠·非用户发言】以下为最近几轮对话。更早的 "
+                      + cutoff
+                      + " 轮已折叠以节省上下文；原始事件仍在会话日志中，需要细节时用 search_history 检索，或向用户确认。",
             });
         }
 

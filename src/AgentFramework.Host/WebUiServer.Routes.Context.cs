@@ -144,6 +144,20 @@ public sealed partial class WebUiServer
 
             request.Json(ContextPayload());
         }));
+
+        // 手动压缩（「立即压缩」按钮）
+        Map(new DelegateRoute("POST", "/api/context/compact", async (request, _) =>
+        {
+            var result = await _host.ManualCompactAsync().ConfigureAwait(false);
+            request.Json(new
+            {
+                ok = result.ok,
+                summary = result.summary,
+                preTokens = result.preTokens,
+                postTokens = result.postTokens,
+                error = result.error,
+            });
+        }));
     }
 
     /// <summary>当前设置 + 水位 + 最近一次 compaction / checkpoint 摘要。</summary>
@@ -188,7 +202,19 @@ public sealed partial class WebUiServer
             waterLevel = ContextStatus(),
             lastCompaction = lastCompaction is null
                 ? null
-                : new { seq = lastCompaction.Seq, at = lastCompaction.Timestamp, strategy = lastCompaction.Trigger },
+                : new
+                {
+                    seq = lastCompaction.Seq,
+                    at = lastCompaction.Timestamp,
+                    strategy = lastCompaction.Trigger,
+                    // 摘要正文必须回给面板 —— 只回 seq/at 时用户「看不到摘要」，
+                    // 而摘要本该是压缩后 Agent 与人共有的那份「早期对话替身」。
+                    summary = lastCompaction.Summary,
+                    maskedCount = lastCompaction.MaskedCount,
+                    collapsedTurns = lastCompaction.CollapsedTurns,
+                    preTokens = lastCompaction.PreTokens,
+                    postTokens = lastCompaction.PostTokens,
+                },
             lastCheckpoint = lastCheckpoint is null
                 ? null
                 : new
@@ -199,6 +225,8 @@ public sealed partial class WebUiServer
                     intent = lastCheckpoint.Intent,
                     nextAction = lastCheckpoint.NextAction,
                 },
+            // 任务卡：用户可见的工作状态卡（模型每轮看到的就是这份）
+            taskCard = AgentFramework.Data.TaskCardBuilder.Build(events, context),
         };
     }
 

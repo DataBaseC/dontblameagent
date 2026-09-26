@@ -70,7 +70,7 @@ public sealed class ContextOptions
     public int TaskCardMaxChars { get; set; } = 1_200;
 
     /// <summary>是否用模型摘要早期历史（L5）。**默认关**，有实证理由。</summary>
-    public bool SummarizeOlderHistory { get; set; }
+    public bool SummarizeOlderHistory { get; set; } = true;
 
     /// <summary>压缩后最多保留多少条任务卡级别的进度条目。</summary>
     public int TaskCardMaxItems { get; set; } = 8;
@@ -105,7 +105,7 @@ public sealed class ContextOptions
         MaskOldToolResults = false,
         SkeletonizeOldAssistant = false,
         InjectTaskCard = false,
-        SummarizeOlderHistory = false,
+        SummarizeOlderHistory = true,
     };
 }
 

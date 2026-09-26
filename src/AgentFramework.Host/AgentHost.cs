@@ -30,8 +30,8 @@ public sealed class AgentHost : IAsyncDisposable
     // 注：不再持有"启动时的插件快照"—— 插件名单一律实时读内核，
     // 否则 agent 运行期装上的插件会被界面和关闭流程双双漏掉。
     private readonly SnapshotProjectionCache _projectionCache;
-    private readonly IUserInputRephraser? _rephraser;
-    private readonly IContextSummarizer? _contextSummarizer;
+    private IUserInputRephraser? _rephraser;
+    private IContextSummarizer? _contextSummarizer;
 
     /// <summary>
     /// **当前**会话的运行态：日志 + 事件出口 + 主循环 + 它自己的回合闸。
@@ -171,10 +171,10 @@ public sealed class AgentHost : IAsyncDisposable
     public PluginHost Plugins => _plugins;
 
     /// <summary>true 表示当前用的是离线演示模型（没配任何端点）。</summary>
-    public bool UsingOfflineDemo { get; }
+    public bool UsingOfflineDemo { get; private set; }
 
     /// <summary>true 表示抓取正文会先经本地小模型压缩（配了本地端点时）。</summary>
-    public bool SummarizationEnabled { get; }
+    public bool SummarizationEnabled { get; private set; }
 
     /// <summary>true 表示有可用的转述端点（至少配了一个模型端点）。</summary>
     public bool RephraserAvailable => _rephraser is not null;
@@ -328,7 +328,82 @@ public sealed class AgentHost : IAsyncDisposable
         if (_switchable is not null && Hosting.ModelModule.TryBuildActive(settings, Models.Protector, out var client))
         {
             _switchable.Switch(client);
+            // 端点配好了 → 不再是离线演示
+            UsingOfflineDemo = false;
         }
+
+        // ★ 启动后首次配置端点时，转述器/摘要器还是 null（构造时没有端点）。
+        //   这里检测并重建，否则「✨ 优化」和自动摘要永远不可用直到重启。
+        if (_rephraser is null && settings.Providers.Count > 0)
+        {
+            _rephraser = new LlmUserInputRephraser(BuildRuntimeRephraseResolver(settings));
+        }
+
+        if (_contextSummarizer is null && settings.Providers.Count > 0
+            && Hosting.ModelModule.TryBuildActive(settings, Models?.Protector ?? SecretProtectors.Default, out var summarizerClient))
+        {
+            _contextSummarizer = new LlmContextSummarizer(summarizerClient);
+            SummarizationEnabled = true;
+        }
+    }
+
+    /// <summary>
+    /// 运行期构建转述/摘要解析器 —— <see cref="ApplyModelSettings"/> 时调用。
+    /// 与 HostBuilder 的 ResolveRephraseTarget 逻辑等价，但用运行期 ModelSettings。
+    /// </summary>
+    private Func<string, ILlmClient?> BuildRuntimeRephraseResolver(ModelSettings settings)
+    {
+        var protector = Models?.Protector ?? SecretProtectors.Default;
+        ILlmClient? resolver(string name)
+        {
+            // active 端点兜底
+            ILlmClient? BuildActiveFallback()
+            {
+                if (Hosting.ModelModule.TryBuildActive(settings, protector, out var activeClient))
+                    return activeClient;
+                return null;
+            }
+
+            if (string.IsNullOrWhiteSpace(name))
+                return BuildActiveFallback();
+
+            // "local"/"cloud" 直连（老配置）
+            // 不在运行期重建里支持 —— 多端点体系下走 provider 即可。
+
+            // "端点:模型" 形态
+            var parts = name.Split(':', 2);
+            if (parts.Length == 2)
+            {
+                var provider = settings.FindProvider(parts[0].Trim());
+                var modelId = parts[1].Trim();
+                if (provider is not null && !string.IsNullOrWhiteSpace(provider.BaseUrl) && modelId.Length > 0)
+                {
+                    return new OpenAiCompatibleClient(provider.Id, new OpenAiCompatibleOptions
+                    {
+                        BaseUrl = provider.BaseUrl,
+                        ApiKey = provider.ResolveApiKey(protector) ?? string.Empty,
+                        DefaultModel = modelId,
+                    });
+                }
+                return BuildActiveFallback();
+            }
+
+            // 只写端点 id
+            var whole = settings.FindProvider(name.Trim());
+            if (whole is not null && !string.IsNullOrWhiteSpace(whole.BaseUrl))
+            {
+                var fallbackModel = whole.Models.FirstOrDefault()?.Id;
+                return new OpenAiCompatibleClient(whole.Id, new OpenAiCompatibleOptions
+                {
+                    BaseUrl = whole.BaseUrl,
+                    ApiKey = whole.ResolveApiKey(protector) ?? string.Empty,
+                    DefaultModel = string.IsNullOrWhiteSpace(fallbackModel) ? "auto" : fallbackModel!,
+                });
+            }
+
+            return BuildActiveFallback();
+        }
+        return resolver;
     }
 
     /// <summary>在某个端点内换个模型（其余配置不动）。</summary>
@@ -740,7 +815,9 @@ public sealed class AgentHost : IAsyncDisposable
             // 带治理的投影 —— **不是全量回灌**，那正是 dsh 长任务变差的根因。
             // events 现在直接来自会话的**内存事件表**（P2），不再每轮重读 JSONL。
             var events = session.Events;
-            var projection = SessionContextBuilder.Project(events, contextOptions);
+            // forceCollapse：超预算且摘要器没能给出摘要时，仍折叠旧轮（放一句如实占位）——
+            // 否则「没摘要就不折叠」会让上下文永远不收缩，水位永远降不下来。
+            var projection = SessionContextBuilder.Project(events, contextOptions, forceCollapse: true);
 
             // 水位超了才压：压缩必然打断前缀缓存，所以宁晚不频。
             // 闲聊模式直接不做这件事 —— 闲聊没有长任务，省掉每轮的投影比较与压缩决策。
@@ -760,6 +837,9 @@ public sealed class AgentHost : IAsyncDisposable
 
             // 工作小本本摘要（DESIGN.md 4.17）—— 与任务卡并列的那份「复述」：
             // 计划必须放在末尾，放在中部会被淹没。本子不存在就什么都不加（默认零成本）。
+            // ★ 注入 dynamicMessages 保留在投影的 Dynamic 段（测试可观测）。
+            //   前缀缓存问题：notes/recall 每轮变，确实会打穿同槽位前缀；
+            //   后续通过事件化（落成事件进投影）解决，当前保持投影可观测。
             if (profile.InjectNotes)
             {
                 var notesPath = Path.Combine(Options.WorkspaceRoot, WorkNotes.DefaultFileName);
@@ -877,6 +957,68 @@ public sealed class AgentHost : IAsyncDisposable
     }
 
     /// <summary>
+    /// 手动压缩 —— 界面上「立即压缩」按钮走这里。
+    /// 与自动压缩走同一条链路，只是触发源不同。
+    /// </summary>
+    public async Task<(bool ok, string? summary, int? preTokens, int? postTokens, string? error)> ManualCompactAsync(CancellationToken ct = default)
+    {
+        var session = _session;
+        if (session is null) return (false, null, null, null, "没有活跃会话");
+
+        var events = session.Events;
+        var contextOptions = EffectiveContextOptions(_state.CurrentProfile);
+        var projection = SessionContextBuilder.Project(events, contextOptions);
+
+        var plan = ContextCompactor.Plan(events, contextOptions);
+        if (plan is null)
+        {
+            var estimated = projection.EstimatedTokens;
+            var budget = contextOptions.TokenBudget;
+            if (estimated > budget)
+            {
+                return (true, null, null, null,
+                    $"当前上下文约 {estimated} tokens，已超过预算 {budget}，但压缩无法进一步缩减。"
+                    + "建议在上下文设置中调大预算，或开新会话。");
+            }
+            return (true, null, null, null, "当前上下文不需要压缩（未达压缩阈值）");
+        }
+
+        string? summary = null;
+        if (contextOptions.SummarizeOlderHistory
+            && _contextSummarizer is not null
+            && plan.OlderMessages.Count > 0)
+        {
+            try
+            {
+                var produced = await _contextSummarizer
+                    .SummarizeHistoryAsync(plan.OlderMessages, plan.After.TaskCard, ct)
+                    .ConfigureAwait(false);
+                summary = string.IsNullOrWhiteSpace(produced) ? null : produced;
+            }
+            catch
+            {
+                summary = null;
+            }
+        }
+
+        await session.Sink.EmitAsync(new ContextCompactedEvent
+        {
+            SessionId = session.SessionId,
+            Trigger = CompactionTrigger.Manual,
+            PreTokens = plan.Before.EstimatedTokens,
+            PostTokens = plan.After.EstimatedTokens,
+            MaskedSeqs = [.. plan.MaskedSeqs],
+            MaskedCount = plan.After.MaskedResults,
+            CollapsedTurns = plan.CollapsedTurns,
+            TightenedTurns = plan.Tightened.RecentTurnsKeptVerbatim,
+            Summary = summary,
+            TaskCard = plan.After.TaskCard,
+        }, ct).ConfigureAwait(false);
+
+        return (true, summary, plan.Before.EstimatedTokens, plan.After.EstimatedTokens, null);
+    }
+
+    /// <summary>
     /// 手动转述 —— 界面上「✨ 优化」按钮走这里。
     ///
     /// 结果**只回填输入框**：此刻尚未发送，仍属草稿，不进模型上下文。
@@ -954,7 +1096,8 @@ public sealed class AgentHost : IAsyncDisposable
         if (!profile.ContextGovernance)
         {
             effective.MaskOldToolResults = false;
-            effective.TokenBudget = int.MaxValue;   // 永不触发压缩
+            // 从前设 TokenBudget=int.MaxValue 导致闲聊模式永不压缩；
+            // 闲聊也会积累长上下文，保留默认预算（24K × 0.8 触发）。
         }
 
         return effective;

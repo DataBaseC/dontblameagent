@@ -139,6 +139,7 @@ internal static class WebUiPage
   #stream { flex: 1; overflow-y: auto; padding: 22px 20px 8px; scroll-behavior: auto; }
   .wrap { max-width: 860px; margin: 0 auto; display: flex; flex-direction: column; gap: 12px; }
   .row { display: flex; animation: rise var(--anim) ease-out both; }
+  .row[hidden] { display: none; animation: none; }
   .row.user { justify-content: flex-end; }
   .bubble { max-width: 78%; padding: 11px 15px; border-radius: var(--radius); font-size: 14px;
             line-height: 1.65; white-space: pre-wrap; word-break: break-word; }
@@ -151,10 +152,13 @@ internal static class WebUiPage
 
   /* 等首字的思考点 —— 回合已受理、模型还没开口的那一小段 */
   .dots { display: inline-flex; gap: 5px; align-items: center; padding: 14px 16px; }
-  .dots span { width: 6px; height: 6px; border-radius: 50%; background: var(--faint);
-               animation: bounce 1.2s ease-in-out infinite; }
-  .dots span:nth-child(2) { animation-delay: .15s; }
-  .dots span:nth-child(3) { animation-delay: .3s; }
+  .dots span.dot { width: 6px; height: 6px; border-radius: 50%; background: var(--faint);
+                animation: bounce 1.2s ease-in-out infinite; }
+  .dots span.dot:nth-child(2) { animation-delay: .15s; }
+  .dots span.dot:nth-child(3) { animation-delay: .3s; }
+  .dots .dot-label { font-size: 11px; color: var(--faint); margin-left: 4px;
+                     animation: dotPulse 1.5s ease-in-out infinite; }
+  @keyframes dotPulse { 0%, 100% { opacity: .4; } 50% { opacity: 1; } }
 
   /* ── 工具卡片：agent 工作过程的可见性核心 ─────────── */
   .tool { max-width: 82%; font-size: 12.5px; background: var(--surface); border: 1px solid #2a2f39;
@@ -552,10 +556,19 @@ internal static class WebUiPage
           <button id="ctx-advanced-toggle" class="ghost small">高级</button>
           <button id="ctx-save" class="ghost small">保存</button>
           <button id="ctx-reset" class="ghost small">恢复默认</button>
+          <button id="ctx-compact-now" class="ghost small" title="立即触发一次上下文压缩（等同于手动 checkpoint + compaction）">立即压缩</button>
           <span id="ctx-state" class="state"></span>
         </div>
         <div class="row" style="margin-bottom:0; color:var(--faint)">
           <span id="ctx-last"></span>
+        </div>
+        <div class="row" style="margin-bottom:0">
+          <pre id="ctx-summary" hidden style="white-space:pre-wrap; font-size:11px; color:var(--dim); max-height:160px; overflow:auto; margin:6px 0 0"></pre>
+        </div>
+        <div class="row" style="margin-bottom:0">
+          <details id="ctx-taskcard" hidden style="margin:6px 0 0"><summary style="cursor:pointer;font-size:11px;color:var(--faint)">任务卡（模型看到的工作状态）</summary>
+            <pre id="ctx-taskcard-text" style="white-space:pre-wrap; font-size:11px; color:var(--dim); max-height:200px; overflow:auto; margin:4px 0 0"></pre>
+          </details>
         </div>
       </div>
 
@@ -853,7 +866,7 @@ function showDots() {
   dotsEl.className = 'row assistant';
   const bubble = document.createElement('div');
   bubble.className = 'bubble dots';
-  bubble.innerHTML = '<span></span><span></span><span></span>';
+  bubble.innerHTML = '<span class="dot"></span><span class="dot"></span><span class="dot"></span><span class="dot-label">思考中…</span>';
   dotsEl.appendChild(bubble);
   wrap.appendChild(dotsEl);
   toBottom();
@@ -884,6 +897,9 @@ function clearMessages() {
 }
 
 function addBubble(role, text) {
+  // 空白气泡不画（模型返回纯空格/空内容时不应有空白气泡）
+  if (role === 'assistant' && (!text || !text.trim())) return null;
+
   const emptyHint = wrap.querySelector('.empty');
   if (emptyHint) emptyHint.remove();
 
@@ -1431,16 +1447,7 @@ function renderRephraseModelOptions() {
   const previous = rpModel.value;
   rpModel.innerHTML = '';
 
-  const legacy = [
-    ['local', 'local（本地 · 便宜）'],
-    ['cloud', 'cloud（联网 · 贵）'],
-  ];
-  legacy.forEach(([value, label]) => {
-    const option = document.createElement('option');
-    option.value = value;
-    option.textContent = label;
-    rpModel.appendChild(option);
-  });
+  // 端点列表来自模型管理（不再放 local/cloud 占位项）
 
   if (modelInfo && modelInfo.providers) {
     modelInfo.providers.forEach((p) => {
@@ -1479,6 +1486,11 @@ function paintRephrase() {
     rpAuto.disabled = true;
     optimizeBtn.disabled = true;
     optimizeBtn.title = '没有可用端点：请先在「模型」里配置至少一个端点';
+  } else {
+    rpEnabled.disabled = false;
+    rpAuto.disabled = false;
+    optimizeBtn.disabled = false;
+    optimizeBtn.title = '把输入框里的文字优化成更清晰的任务描述';
   }
 }
 
@@ -1854,7 +1866,7 @@ async function loadStatus() {
       ctxPill.className = 'pill' + (status.context.waterLevel >= 0.8 ? ' hot' : '');
       ctxPill.title = '上下文约 ' + fmtNum(status.context.tokens) + ' / ' + fmtNum(status.context.budget)
         + ' tokens · 保留 ' + status.context.keptTurns + ' 轮 · 已压缩 ' + status.context.compactions + ' 次'
-        + (status.context.waterLevel >= 0.8 ? '\n已超 80% —— 下一轮会触发压缩（历史折叠为占位符，可用 search_history 捞回）' : '');
+        + (status.context.waterLevel >= 0.8 ? '\n已超 80% —— 下一轮会触发压缩（生成早期摘要并遮蔽旧工具结果，可用 search_history 捞回）' : '');
     } else {
       ctxPill.textContent = 'ctx —';
       ctxPill.title = '上下文水位（当前模式未启用治理或无历史）';
@@ -2125,9 +2137,9 @@ async function loadMemory() {
 
     const renderScope = (scopeLabel, scopePayload, isProject) => {
       // v3.5 审查 P1-3：这个 scope 是「本分组对应的记忆作用域 id」——
-      // 全局层恒为 'global'，项目层用后端算好的 data.scope（形如 project:{目录}）。
-      // 之前这里漏了声明，loadMemory() 渲染第一行就抛 ReferenceError，整个面板不可用。
-      const scope = isProject ? data.scope : 'global';
+      // 全局层恒为 'global'，项目层用后端算好的 memory.scope（形如 project:{目录}）。
+      // 注意载荷形状是 { ok, memory: { scope, project, global } } —— scope 在 memory 下，不在顶层。
+      const scope = isProject ? data.memory.scope : 'global';
       const title = document.createElement('div');
       title.className = 'mem-section-title';
       title.textContent = scopeLabel + '（活跃 ' + scopePayload.active.length + ' · 归档 ' + scopePayload.archived.length + '）';
@@ -2598,7 +2610,15 @@ function renderModels() {
   }
 
   renderRephraseModelOptions();
-  if (rephraseInfo && rephraseInfo.model) rpModel.value = rephraseInfo.model;
+  if (rephraseInfo && rephraseInfo.model) {
+    rpModel.value = rephraseInfo.model;
+    // 「local」是老默认值；没有 local 端点时，自动切到 active 端点（避免选了个不存在的端点）
+    if (rpModel.value === 'local' && modelInfo && modelInfo.providers
+        && !modelInfo.providers.some(p => p.id === 'local')) {
+      const active = modelInfo.providers.find(p => p.id === modelInfo.active?.providerId);
+      if (active) rpModel.value = active.id;
+    }
+  }
   updateAttachGate();
 }
 
@@ -2793,6 +2813,30 @@ function renderContext() {
   ctxWater.textContent = '当前水位 ' + level + '%';
   const lc = contextInfo.lastCompaction, lk = contextInfo.lastCheckpoint;
   ctxLast.textContent = (lc ? '最近压缩 #' + lc.seq : '尚未压缩') + ' · ' + (lk ? '最近写盘 #' + lk.seq : '尚未写盘');
+  // 摘要正文直接摊开：压缩后用户要能看见 Agent 记住了什么，而不是只给一个序号
+  const ctxSummary = document.getElementById('ctx-summary');
+  if (ctxSummary) {
+    if (lc && lc.summary) {
+      ctxSummary.textContent = '摘要（折叠 ' + (lc.collapsedTurns || 0) + ' 轮 · 遮蔽 ' + (lc.maskedCount || 0)
+        + ' 条工具结果 · ' + (lc.preTokens || '?') + ' → ' + (lc.postTokens || '?') + ' tokens）：\n' + lc.summary;
+      ctxSummary.hidden = false;
+    } else if (lc) {
+      ctxSummary.textContent = '最近一次压缩未生成摘要（只做了工具结果遮蔽）。'
+        + '遮蔽 ' + (lc.maskedCount || 0) + ' 条 · ' + (lc.preTokens || '?') + ' → ' + (lc.postTokens || '?') + ' tokens';
+      ctxSummary.hidden = false;
+    } else {
+      ctxSummary.hidden = true;
+    }
+  }
+  // 任务卡：显示模型看到的工作状态
+  const tcEl = document.getElementById('ctx-taskcard');
+  const tcText = document.getElementById('ctx-taskcard-text');
+  if (tcEl && tcText && contextInfo.taskCard) {
+    tcText.textContent = contextInfo.taskCard;
+    tcEl.hidden = false;
+  } else if (tcEl) {
+    tcEl.hidden = true;
+  }
 }
 
 async function saveContext() {
@@ -2844,6 +2888,31 @@ document.getElementById('pill-ctx').onclick = () => {
 document.getElementById('ctx-advanced-toggle').onclick = () => { ctxAdvanced.hidden = !ctxAdvanced.hidden; };
 ctxSave.onclick = saveContext;
 ctxReset.onclick = resetContext;
+document.getElementById('ctx-compact-now').onclick = async function() {
+  const btn = this;
+  btn.disabled = true;
+  btn.textContent = '压缩中…';
+  try {
+    const r = await fetch('/api/context/compact', { method: 'POST' });
+    const d = await r.json();
+    if (d.ok) {
+      if (d.preTokens != null) {
+        document.getElementById('ctx-state').textContent = '压缩完成 · ' + d.preTokens + '→' + d.postTokens + ' tokens'
+          + (d.summary ? '（已生成摘要）' : '（仅遮蔽旧工具结果）');
+      } else {
+        document.getElementById('ctx-state').textContent = d.error || '当前不需要压缩';
+      }
+      loadContext();
+    } else {
+      document.getElementById('ctx-state').textContent = '压缩失败：' + (d.error || '未知');
+    }
+  } catch (e) {
+    document.getElementById('ctx-state').textContent = '压缩失败：' + e.message;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '立即压缩';
+  }
+};
 
 // ── 审批档位（任务 5）：徽章常显、一键切档、Yolo 有横幅与收回 ──
 const approvalPanel = document.getElementById('approval-panel');
@@ -3040,7 +3109,7 @@ stream.onmessage = (message) => {
   }
   else if (data.type === 'session-switched') afterSessionChange();
   else if (data.type === 'mode-changed') loadStatus();
-  else if (data.type === 'models-changed') { loadStatus(); if (!modelPanel.hidden) loadModels(); }
+  else if (data.type === 'models-changed') { loadStatus(); loadRephrase(); if (!modelPanel.hidden) loadModels(); }
 };
 stream.onerror = () => setConn(false);
 
@@ -3053,6 +3122,9 @@ stream.onerror = () => setConn(false);
   await loadRephrase();
   await loadHistory();
   input.focus();
+
+  // 定期刷新状态栏（工具数/插件数/模式等），避免事件遗漏导致数字滞后
+  setInterval(loadStatus, 30000);
 
   // ── 顶栏按钮「已打开」激活态（v3.16 打磨层）────────────────
   // 原有各 pill.onclick 一律保持不动（它负责切换 hidden 并拉数据）；

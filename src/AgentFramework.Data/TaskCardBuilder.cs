@@ -32,6 +32,15 @@ public static class TaskCardBuilder
             sb.Append("最初目标：").AppendLine(Truncate(OneLine(firstUser.Text), 180));
         }
 
+        // 最近一条实质性用户消息（排除纯指令/极短输入），反映当前方向
+        var lastSubstantive = state.Messages
+            .Where(m => m.Role == "user" && m.Text.Length > 10)
+            .LastOrDefault();
+        if (lastSubstantive is not null && lastSubstantive != firstUser)
+        {
+            sb.Append("当前方向：").AppendLine(Truncate(OneLine(lastSubstantive.Text), 180));
+        }
+
         if (!string.IsNullOrWhiteSpace(state.Title))
         {
             sb.Append("会话标题：").AppendLine(Truncate(OneLine(state.Title), 80));

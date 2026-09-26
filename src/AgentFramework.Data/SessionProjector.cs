@@ -179,6 +179,12 @@ public static class SessionProjector
                     {
                         record.Success = completed.Success;
                         record.Output = completed.Output;
+                        // 失败时 Error 字段才是错误正文；Output 可能为空。
+                        // 投影进 Output 以便任务卡等消费方能直接看到失败原因。
+                        if (!completed.Success && string.IsNullOrWhiteSpace(record.Output) && !string.IsNullOrWhiteSpace(completed.Error))
+                        {
+                            record.Output = completed.Error;
+                        }
                     }
                     else
                     {

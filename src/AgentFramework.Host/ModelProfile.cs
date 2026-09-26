@@ -125,7 +125,7 @@ public static class ModelCapabilities
     private static readonly string[] VisionHints =
     [
         "vision", "vl", "-vl", "vl-", "qwen-vl", "qwen2-vl", "qwen2.5-vl", "internvl",
-        "minicpm-v", "llava", "cogvlm", "glm-4v", "gpt-4o", "gpt-4.1", "gpt-5",
+        "minicpm-v", "minicpm", "llava", "cogvlm", "glm-4v", "gpt-4o", "gpt-4.1", "gpt-5",
         "claude-3", "claude-4", "gemini", "pixtral", "molmo", "gemma-3",
     ];
 
