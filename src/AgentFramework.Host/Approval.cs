@@ -63,6 +63,15 @@ public sealed class ApprovalPromptInteraction(
 {
     public bool CanInteract => true;
 
+    /// <summary>
+    /// 只懂「批准 / 拒绝」，**不能真正提问** —— 覆写为 false。
+    ///
+    /// 否则 <c>ask_user</c> 会看到 CanInteract=true 而调 <see cref="AskAsync"/>，
+    /// 拿回一个 <see cref="Contracts.AskUserAnswer.None"/>，最终显示成误导性的
+    /// 「用户没有回答」；而真相是「这里根本问不出去」。
+    /// </summary>
+    public bool CanAsk => false;
+
     public async ValueTask<bool> ConfirmAsync(Contracts.ToolPreExecuteEvent toolCall, CancellationToken ct = default)
     {
         var answer = await prompt.AskDetailedAsync(toolCall, ct).ConfigureAwait(false);

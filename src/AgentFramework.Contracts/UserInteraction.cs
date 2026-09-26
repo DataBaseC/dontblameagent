@@ -23,6 +23,15 @@ public sealed record AskUserAnswer(bool Answered, string? Text)
     public static AskUserAnswer None { get; } = new(false, null);
 
     public static AskUserAnswer Of(string text) => new(true, text);
+
+    /// <summary>
+    /// 是否因**等待超时**而未答复 —— 与「用户主动跳过 / 关掉卡片」区分开，
+    /// 好让失败文案可诊断：任务 7 要求「等待回答超时」与「用户没有回答」分开说。
+    /// </summary>
+    public bool IsTimeout { get; init; }
+
+    /// <summary>等待超时（用户没在时限内答复）。绝不据此假装用户答过。</summary>
+    public static AskUserAnswer Timeout { get; } = new(false, null) { IsTimeout = true };
 }
 
 /// <summary>
@@ -39,6 +48,16 @@ public interface IUserInteraction
 {
     /// <summary>当前有没有可以真正对话的界面。false 时不要尝试提问。</summary>
     bool CanInteract { get; }
+
+    /// <summary>
+    /// 能否**真正向用户提问**（<c>ask_user</c>）。
+    ///
+    /// 默认与 <see cref="CanInteract"/> 一致 —— 完整的交互实现（Web UI）无需关心它。
+    /// 但**只懂审批的界面**（审批是交互的一个特例）必须覆写为 false：
+    /// 它能弹「允许 / 拒绝」，却答不了「用哪个方案」——
+    /// 让它冒充「能提问」只会把「问不出去」糊成一句误导的「用户没有回答」。
+    /// </summary>
+    bool CanAsk => CanInteract;
 
     /// <summary>请求批准一个危险动作（工具执行前）。</summary>
     ValueTask<bool> ConfirmAsync(ToolPreExecuteEvent toolCall, CancellationToken ct = default);

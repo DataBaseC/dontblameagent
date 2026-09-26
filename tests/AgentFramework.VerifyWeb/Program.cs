@@ -996,6 +996,221 @@ finally
     AgentModes.Unregister("tavern-test");
 }
 
+// ── 14. ask_user 提问卡片全链路（任务 7）────────────────────
+Console.WriteLine("\n── 14. ask_user 提问卡片全链路 ──");
+
+var askRoot = Path.Combine(root, "ask");
+var askOptions = new HostOptions
+{
+    WorkspaceRoot = Path.Combine(askRoot, "ws"),
+    SessionsDir = Path.Combine(askRoot, "sessions"),
+    SessionId = "ask",
+    ConfigPath = Path.Combine(askRoot, "agent.json"),
+    LlmOverride = new AskScriptClient(),
+};
+Directory.CreateDirectory(askOptions.WorkspaceRoot);
+await using var askHost = await AgentHost.CreateAsync(askOptions);
+var askPort = PickFreePort();
+using var askServer = new WebUiServer(askHost, askOptions, askPort);
+using var askCts = new CancellationTokenSource();
+_ = askServer.RunAsync(askCts.Token);
+await Task.Delay(400);
+
+using var askHttp = new HttpClient { Timeout = TimeSpan.FromSeconds(15) };
+
+var askFrames = new List<string>();
+var askAnswered = 0;
+var askSseCts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+
+_ = Task.Run(async () =>
+{
+    try
+    {
+        using var response = await askHttp.GetAsync(
+            askServer.Url + "api/stream", HttpCompletionOption.ResponseHeadersRead, askSseCts.Token);
+        using var stream = await response.Content.ReadAsStreamAsync(askSseCts.Token);
+        using var reader = new StreamReader(stream);
+
+        while (!askSseCts.IsCancellationRequested)
+        {
+            var line = await reader.ReadLineAsync(askSseCts.Token);
+            if (line is null)
+            {
+                break;
+            }
+
+            if (!line.StartsWith("data: ", StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            var payload = line[6..];
+            lock (askFrames)
+            {
+                askFrames.Add(payload);
+            }
+
+            if (payload.Contains("\"type\":\"ask-user\""))
+            {
+                using var doc = JsonDocument.Parse(payload);
+                var id = doc.RootElement.GetProperty("id").GetString();
+                var reply = await askHttp.PostAsync(
+                    askServer.Url + "api/ask-user",
+                    new StringContent($$"""{"id":"{{id}}","text":"方案乙"}""", Encoding.UTF8, "application/json"),
+                    askSseCts.Token);
+                if (reply.IsSuccessStatusCode)
+                {
+                    Interlocked.Increment(ref askAnswered);
+                }
+            }
+        }
+    }
+    catch (OperationCanceledException) { }
+    catch { }
+});
+
+await Task.Delay(300);
+var askSend = await askHttp.PostAsync(
+    askServer.Url + "api/send",
+    new StringContent("""{"text":"帮我选个方案"}""", Encoding.UTF8, "application/json"));
+Check("ask_user 场景：发送返回 202", (int)askSend.StatusCode == 202, $"{(int)askSend.StatusCode}");
+
+await Task.Delay(2500);
+
+string[] askCaptured;
+lock (askFrames)
+{
+    askCaptured = [.. askFrames];
+}
+
+Check("★ 模型调 ask_user 时前端收到 type=ask-user 帧",
+    askCaptured.Any(f => f.Contains("\"type\":\"ask-user\"")),
+    $"{askCaptured.Length} 帧");
+
+var askFrame = askCaptured.FirstOrDefault(f => f.Contains("\"type\":\"ask-user\""));
+if (askFrame is not null)
+{
+    using var d = JsonDocument.Parse(askFrame);
+    Check("★ ask-user 帧形状：{type,id,question,options}",
+        d.RootElement.TryGetProperty("id", out _)
+        && d.RootElement.TryGetProperty("question", out _)
+        && d.RootElement.TryGetProperty("options", out _));
+}
+
+Check("★ 用户答案被受理（POST /api/ask-user → 200）", askAnswered >= 1, $"{askAnswered} 次");
+
+var askHistory = await askHttp.GetStringAsync(askServer.Url + "api/history");
+using (var doc = JsonDocument.Parse(askHistory))
+{
+    var evs = doc.RootElement.GetProperty("events").EnumerateArray().ToList();
+    var completedWithAnswer = evs.Any(e =>
+        e.GetProperty("type").GetString() == "tool-call-completed"
+        && e.TryGetProperty("output", out var o)
+        && (o.GetString() ?? "").Contains("方案乙"));
+    Check("★ 答案回填进工具结果（completed 带用户答案）", completedWithAnswer);
+    Check("★ 模型拿到答案后继续（产生 assistant 消息）",
+        evs.Any(e => e.GetProperty("type").GetString() == "assistant-message"));
+}
+
+using (var unknown = await askHttp.PostAsync(
+    askServer.Url + "api/ask-user",
+    new StringContent("""{"id":"ask-nope","text":"x"}""", Encoding.UTF8, "application/json")))
+{
+    Check("★ 未知/超时 id → 404（不假装受理）", (int)unknown.StatusCode == 404, $"{(int)unknown.StatusCode}");
+}
+
+askSseCts.Cancel();
+askCts.Cancel();
+askServer.Stop();
+
+// ── 15. 提示词缓存：前缀稳定（任务 8）────────────────────────
+Console.WriteLine("\n── 15. 提示词缓存：前缀稳定 ──");
+
+var stableRoot = Path.Combine(root, "stable");
+var stableCaptured = new List<LlmRequest>();
+var stableOptions = new HostOptions
+{
+    WorkspaceRoot = Path.Combine(stableRoot, "ws"),
+    SessionsDir = Path.Combine(stableRoot, "sessions"),
+    SessionId = "stable",
+    ConfigPath = Path.Combine(stableRoot, "agent.json"),
+    LlmOverride = new CapturingScriptClient(stableCaptured),
+};
+Directory.CreateDirectory(stableOptions.WorkspaceRoot);
+await using var stableHost = await AgentHost.CreateAsync(stableOptions);
+
+var stablePort = PickFreePort();
+using var stableServer = new WebUiServer(stableHost, stableOptions, stablePort);
+using var stableCts = new CancellationTokenSource();
+_ = stableServer.RunAsync(stableCts.Token);
+await Task.Delay(400);
+
+await stableHost.SendAsync("第一轮消息");
+await stableHost.SendAsync("第二轮消息");
+await stableHost.SendAsync("第三轮消息");
+
+List<LlmRequest> snaps;
+lock (stableCaptured)
+{
+    snaps = [.. stableCaptured];
+}
+
+var frozenBlocks = snaps
+    .Select(r => r.Messages.FirstOrDefault(m => m.Role == LlmRole.System)?.Content)
+    .ToList();
+
+Console.WriteLine("  各轮 messages 角色序列：");
+for (var i = 0; i < snaps.Count; i++)
+{
+    Console.WriteLine($"    轮{i + 1}: " + string.Join(",", snaps[i].Messages.Select(m => m.Role)));
+}
+
+Check("★ 请求以冻结段（system）打头（动态段不前插）",
+    frozenBlocks.Count >= 3 && frozenBlocks.All(b => b is not null),
+    $"{frozenBlocks.Count} 轮");
+
+Check("★ 冻结段连续 3 轮逐字节稳定（缓存前缀可复用）",
+    frozenBlocks.Count >= 3 && frozenBlocks.Distinct(StringComparer.Ordinal).Count() == 1,
+    $"唯一值 {frozenBlocks.Distinct(StringComparer.Ordinal).Count()} 个");
+
+Check("★ 冻结段不含每轮可变内容（召回 / 小本本）",
+    frozenBlocks.All(b => b is not null && !b.Contains("【相关记忆") && !b.Contains("【工作小本本")),
+    "");
+
+// 逐轮比较：本轮请求是否以「上一轮的整段」为前缀 —— 是则端点前缀缓存可命中。
+var commonPrefix = 0;
+if (snaps.Count >= 2)
+{
+    var a = snaps[0].Messages;
+    var b = snaps[1].Messages;
+    while (commonPrefix < a.Count && commonPrefix < b.Count
+        && string.Equals(a[commonPrefix].Role, b[commonPrefix].Role, StringComparison.Ordinal)
+        && string.Equals(a[commonPrefix].Content, b[commonPrefix].Content, StringComparison.Ordinal))
+    {
+        commonPrefix++;
+    }
+}
+
+Check("★ 第 2 轮请求以第 1 轮请求为前缀（历史单调增长，可缓存）",
+    snaps.Count >= 2 && commonPrefix == snaps[0].Messages.Count,
+    $"公共前缀 {commonPrefix}/{snaps[0].Messages.Count}");
+
+var usageStatusJson = await http.GetStringAsync(stableServer.Url + "api/status");
+using (var doc = JsonDocument.Parse(usageStatusJson))
+{
+    var usage = doc.RootElement.GetProperty("usage");
+    Check("★ status.usage 暴露本轮与会话累计 + 命中率（任务 8 度量）",
+        usage.TryGetProperty("lastTurn", out var lastTurn)
+        && lastTurn.ValueKind == JsonValueKind.Object
+        && lastTurn.TryGetProperty("cachedTokens", out _)
+        && lastTurn.TryGetProperty("cacheWriteTokens", out _)
+        && lastTurn.TryGetProperty("cacheHitRate", out _),
+        usage.ToString());
+}
+
+stableCts.Cancel();
+stableServer.Stop();
+
 sseCts.Cancel();
 cts.Cancel();
 server.Stop();
@@ -1020,6 +1235,66 @@ static int PickFreePort()
     var port = ((IPEndPoint)probe.LocalEndpoint).Port;
     probe.Stop();
     return port;
+}
+
+/// <summary>捕获每轮请求（含 messages）的端点替身 —— 用于验证前缀稳定（任务 8）。</summary>
+internal sealed class CapturingScriptClient(List<LlmRequest> sink) : ILlmClient
+{
+    public string Name => "capturing";
+
+    public async IAsyncEnumerable<LlmStreamChunk> StreamAsync(
+        LlmRequest request,
+        [EnumeratorCancellation] CancellationToken ct = default)
+    {
+        await Task.Yield();
+
+        lock (sink)
+        {
+            sink.Add(request);
+        }
+
+        yield return new LlmStreamChunk.TextDelta("收到。");
+        // 报一次用量：命中 / 写入都有值 —— 好让 status 的「本轮命中率」可读。
+        yield return new LlmStreamChunk.UsageReady(
+            new LlmUsage
+            {
+                InputTokens = 1000,
+                OutputTokens = 40,
+                CachedTokens = 800,
+                CacheWriteTokens = 150,
+            },
+            "capture-model");
+        yield return new LlmStreamChunk.Completed("stop");
+    }
+}
+
+/// <summary>先调用 ask_user 求用户拍板、拿到答案后再收尾 —— 验证提问卡片全链路。</summary>
+internal sealed class AskScriptClient : ILlmClient
+{
+    public string Name => "ask-script";
+
+    public async IAsyncEnumerable<LlmStreamChunk> StreamAsync(
+        LlmRequest request,
+        [EnumeratorCancellation] CancellationToken ct = default)
+    {
+        await Task.Yield();
+
+        var usedTool = request.Messages.Any(m => m.Role == LlmRole.Tool);
+
+        if (!usedTool)
+        {
+            yield return new LlmStreamChunk.ToolCallsReady(
+            [
+                new ToolCallRequest("a1", "ask_user",
+                    """{"question":"用哪个方案？","options":["方案甲","方案乙"]}"""),
+            ]);
+            yield return new LlmStreamChunk.Completed("tool_calls");
+            yield break;
+        }
+
+        yield return new LlmStreamChunk.TextDelta("好的，按方案乙来。");
+        yield return new LlmStreamChunk.Completed("stop");
+    }
 }
 
 /// <summary>先吐两段文本、再调工具、最后收尾 —— 用来验证流式与工具卡片。</summary>

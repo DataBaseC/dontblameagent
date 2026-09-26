@@ -247,6 +247,28 @@ Check("没有界面时如实回「问不出去」（绝不假装用户答过）"
     !askedNoUi.Success && (askedNoUi.Error?.Contains("问不出去") ?? false),
     askedNoUi.Error);
 
+// 只懂审批的界面（能弹「允许/拒绝」，却答不了「用哪个方案」）：
+// 必须如实说「问不出去」，而不是冒充能提问、糊成一句误导的「用户没有回答」。
+host5.UserInteraction = null;
+host5.ApprovalPrompt = new StubApprovalPrompt();
+var askedApprovalOnly = await host5.Plugins.InvokeToolAsync(
+    "ask_user",
+    new Dictionary<string, string?> { ["question"] = "选哪个" });
+Check("★ 只有审批界面时，ask_user 如实「问不出去」（不冒充「用户没有回答」）",
+    !askedApprovalOnly.Success && (askedApprovalOnly.Error?.Contains("问不出去") ?? false),
+    askedApprovalOnly.Error);
+host5.ApprovalPrompt = null;
+
+// 等待超时：文案必须与「用户主动跳过」分开（失败可诊断）。
+host5.UserInteraction = new TimeoutUserInteraction();
+var askedTimeout = await host5.Plugins.InvokeToolAsync(
+    "ask_user",
+    new Dictionary<string, string?> { ["question"] = "在吗" });
+Check("★ 等待超时的文案可诊断（含「超时」，不混同「用户没有回答」）",
+    !askedTimeout.Success && (askedTimeout.Error?.Contains("超时") ?? false),
+    askedTimeout.Error);
+host5.UserInteraction = null;
+
 // 会话派生：子 agent 的地基（共享模型 / 工具 / 索引 / 记忆，独立日志与上下文）
 var sub = host5.OpenSession("sub-1", systemPrompt: "你是子 agent");
 Check("能开独立会话", sub.SessionId == "sub-1" && File.Exists(sub.LogPath), Path.GetFileName(sub.LogPath));
@@ -472,6 +494,28 @@ internal sealed class StubUserInteraction : IUserInteraction
 
     public ValueTask<AskUserAnswer> AskAsync(AskUserRequest request, CancellationToken ct = default)
         => ValueTask.FromResult(AskUserAnswer.Of("方案甲"));
+
+    public ValueTask NotifyAsync(string text, CancellationToken ct = default)
+        => ValueTask.CompletedTask;
+}
+
+/// <summary>只懂审批的界面替身 —— 验证「审批是交互的一个特例」不会冒充「能提问」。</summary>
+internal sealed class StubApprovalPrompt : IApprovalPrompt
+{
+    public ValueTask<bool> AskAsync(ToolPreExecuteEvent request, CancellationToken ct)
+        => ValueTask.FromResult(true);
+}
+
+/// <summary>等待超时的交互缝替身 —— 验证超时与「用户跳过」文案可区分。</summary>
+internal sealed class TimeoutUserInteraction : IUserInteraction
+{
+    public bool CanInteract => true;
+
+    public ValueTask<bool> ConfirmAsync(ToolPreExecuteEvent toolCall, CancellationToken ct = default)
+        => ValueTask.FromResult(true);
+
+    public ValueTask<AskUserAnswer> AskAsync(AskUserRequest request, CancellationToken ct = default)
+        => ValueTask.FromResult(AskUserAnswer.Timeout);
 
     public ValueTask NotifyAsync(string text, CancellationToken ct = default)
         => ValueTask.CompletedTask;

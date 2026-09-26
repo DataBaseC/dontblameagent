@@ -291,6 +291,9 @@ public sealed partial class WebUiServer : IDisposable, IApprovalPrompt
         Broadcast(JsonSerializer.SerializeToElement(new
         {
             type = "ask-user",
+            // 带归属会话：前端据此分流 —— 多标签页 / 切到别的会话时，
+            // 提问卡只弹在「提问所属会话」那一页，不串会话（与 approval 帧对齐）。
+            sessionId = _host.SessionId,
             id,
             question = request.Question,
             options = request.Options,
@@ -311,8 +314,9 @@ public sealed partial class WebUiServer : IDisposable, IApprovalPrompt
                     }
                     else
                     {
-                        // 超时 = 用户没答。如实说没答，不假装回答过。
-                        completion.TrySetResult(AskUserAnswer.None);
+                        // 超时 = 用户没答。如实说「等待超时」，不假装回答过，
+                        // 也不与「用户主动跳过」混为一谈（失败文案可诊断）。
+                        completion.TrySetResult(AskUserAnswer.Timeout);
                     }
                 })
                 .ConfigureAwait(false);
@@ -515,14 +519,38 @@ public sealed partial class WebUiServer : IDisposable, IApprovalPrompt
     }
 
     /// <summary>
-    /// 会话用量账目（累计）。
+    /// 会话用量账目（累计）+ 本轮用量。
     ///
-    /// 它是从事件流**投影**出来的 —— 所以重启界面、换个浏览器再看，数字都一样。
+    /// 二者都从事件流**投影**出来 —— 所以重启界面、换个浏览器再看，数字都一样。
     /// 这比「内存里挂一个计数器」强的地方在于：对不上的时候永远以日志为准。
+    ///
+    /// 为什么还要「本轮」：累计会被很多轮稀释 —— 前缀被打掉时，累计命中率只掉一点，
+    /// 看不出来；而**本轮**（最近一次模型调用）掉到 0 是刺眼的。任务 8 要的就是这个可见性。
     /// </summary>
     private object UsageStatus()
     {
         var usage = _host.Usage;
+
+        // 本轮 = 最近一条用量事件（一次 RunAsync 可能调多轮模型，取最后一轮）。
+        var last = _host.Events().OfType<ModelUsageEvent>().LastOrDefault();
+
+        object? lastTurn = last is null
+            ? null
+            : new
+            {
+                step = last.Step,
+                model = last.Model,
+                inputTokens = last.InputTokens,
+                outputTokens = last.OutputTokens,
+                cachedTokens = last.CachedTokens,
+                cacheWriteTokens = last.CacheWriteTokens,
+                reasoningTokens = last.ReasoningTokens,
+                // 命中率口径：cached / prompt（与 SessionUsage.CacheHitRate 一致）。
+                // 输入 token 未知时留 null —— 宁可显示「未知」，也不给假 0%。
+                cacheHitRate = last.InputTokens is > 0
+                    ? Math.Round((double)(last.CachedTokens ?? 0) / last.InputTokens.Value, 4)
+                    : (double?)null,
+            };
 
         return new
         {
@@ -537,6 +565,7 @@ public sealed partial class WebUiServer : IDisposable, IApprovalPrompt
             cacheHitRate = usage.CacheHitRate is null
                 ? (double?)null
                 : Math.Round(usage.CacheHitRate.Value, 4),
+            lastTurn,
         };
     }
 

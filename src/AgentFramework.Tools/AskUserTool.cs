@@ -32,7 +32,10 @@ public sealed class AskUserTool(Func<IUserInteraction> interactionProvider) : IT
 
         var interaction = interactionProvider();
 
-        if (interaction is null || !interaction.CanInteract)
+        // 用 CanAsk 而不是 CanInteract：只懂审批的界面（ApprovalPromptInteraction）能弹
+        // 确认卡、却问不出问题 —— 对它必须如实说「问不出去」，而不是退化成一句误导的
+        // 「用户没有回答」。这正是不让「审批是交互的一个特例」误导提问这条缝的地方。
+        if (interaction is null || !interaction.CanAsk)
         {
             return ToolResult.Fail(
                 "当前没有可交互的界面，问不出去。请基于已有信息自行判断，"
@@ -48,9 +51,15 @@ public sealed class AskUserTool(Func<IUserInteraction> interactionProvider) : IT
 
         var answer = await interaction.AskAsync(request, ct).ConfigureAwait(false);
 
-        return answer.Answered
-            ? ToolResult.Ok(answer.Text ?? "（用户没有填写内容）")
-            : ToolResult.Fail("用户没有回答（可能直接关掉了提问）。请自行决断，并在结论里标注这一点。");
+        if (answer.Answered)
+        {
+            return ToolResult.Ok(answer.Text ?? "（用户没有填写内容）");
+        }
+
+        // 超时与「用户主动跳过」分开说 —— 失败文案必须可诊断（任务 7）。
+        return answer.IsTimeout
+            ? ToolResult.Fail("等待回答超时：用户没有在时限内答复。请自行决断，并在结论里标注这一点。")
+            : ToolResult.Fail("用户没有回答（可能直接跳过了提问）。请自行决断，并在结论里标注这一点。");
     }
 
     /// <summary>

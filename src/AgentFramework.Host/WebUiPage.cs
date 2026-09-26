@@ -670,7 +670,10 @@ internal static class WebUiPage
       <div id="mode-pick" class="modal-mask" hidden>
         <div class="modal">
           <div class="modal-title">新会话 · 选工作文件夹</div>
-          <div class="modal-sub">先定这个会话的工作文件夹（可留空用默认），再点模式创建</div>
+          <div class="modal-sub">
+            先定这个会话的工作文件夹（可留空用默认），再点模式创建。
+            模式决定暴露哪些工具与记忆层级 —— 创建后固定，换模式就再开一个新会话。
+          </div>
           <div class="row" style="margin:8px 0 4px">
             <span style="font-size:12px; color:var(--dim); flex:0 0 auto">工作文件夹</span>
             <input id="np-project-dir" placeholder="留空 = 宿主默认工作区；点「浏览…」挑一个文件夹">
@@ -1236,7 +1239,12 @@ function addUsageLine(e) {
   const parts = [];
   if (e.inputTokens != null) parts.push('<b>in</b> ' + fmtNum(e.inputTokens));
   if (e.outputTokens != null) parts.push('<b>out</b> ' + fmtNum(e.outputTokens));
+  // 缓存：命中（读）/ 写入 + 命中率 —— 每轮都看得见，前缀被打掉时一眼可辨（任务 8）。
   if (e.cachedTokens != null) parts.push('<b>cache</b> ' + fmtNum(e.cachedTokens));
+  if (e.cacheWriteTokens != null) parts.push('<b>写入</b> ' + fmtNum(e.cacheWriteTokens));
+  if (e.inputTokens > 0 && e.cachedTokens != null) {
+    parts.push('<b>命中</b> ' + Math.round(e.cachedTokens / e.inputTokens * 100) + '%');
+  }
   if (e.reasoningTokens != null) parts.push('<b>think</b> ' + fmtNum(e.reasoningTokens));
   if (e.elapsedMs) parts.push((e.elapsedMs / 1000).toFixed(1) + 's');
   if (e.firstTokenMs != null) parts.push('首字 ' + e.firstTokenMs + 'ms');
@@ -2818,10 +2826,15 @@ stream.onmessage = (message) => {
   }
   else if (data.type === 'ask-user') {
     // 与审批同层的外层帧：模型在问用户，必须弹出可答卡片。
+    // 帧带 sessionId —— 提问卡只弹在「提问所属会话」那一页，不串会话。
     if (isCurrent) {
       sealReasoning();
       addAskUserCard(data);
       setPhase('等待你的回答…');
+    } else {
+      // 提问属于别的会话：不在这里弹卡（避免串会话），但把那个会话标成忙，
+      // 让用户知道「别处有人在等回答」，切过去即可作答。
+      markSessionBusy(frameSession);
     }
   }
   else if (data.type === 'notify') {
