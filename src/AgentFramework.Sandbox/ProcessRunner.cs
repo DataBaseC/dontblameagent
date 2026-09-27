@@ -24,7 +24,14 @@ internal static class ProcessRunner
         Action<Process>? OnStarted,
         Action? OnTerminate,
         /// <summary>会话钉死的 shell。null = 自动解析（优先 POSIX，只解析这一次的调用方应自己缓存）。</summary>
-        ShellSpec? Shell = null);
+        ShellSpec? Shell = null,
+        /// <summary>
+        /// 可选包装器（安全审查 T10）：非空时以 <c>Wrapper[0]</c> 作为外层可执行文件，
+        /// <c>Wrapper[1..]</c> 原样作为它的前置参数（通常以真正的 shell 可执行文件结尾），
+        /// 之后再追加 shell 自己的参数（<c>-c &lt;command&gt;</c> 等）。
+        /// 用于把命令塞进 bwrap 这类隔离器；null = 直接跑 shell。
+        /// </summary>
+        IReadOnlyList<string>? Wrapper = null);
 
     public static async Task<SandboxOutcome> RunAsync(RunOptions run, CancellationToken ct)
     {
@@ -34,13 +41,23 @@ internal static class ProcessRunner
 
         var startInfo = new ProcessStartInfo
         {
-            FileName = shell.FileName,
+            // 包装器（如 bwrap）非空时，由它当外层可执行文件；真正的 shell 在它的参数里（见下）。
+            FileName = run.Wrapper is { Count: > 0 } ? run.Wrapper[0] : shell.FileName,
             WorkingDirectory = run.WorkingDirectory,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
             UseShellExecute = false,
             CreateNoWindow = true,
         };
+
+        if (run.Wrapper is { Count: > 1 })
+        {
+            // 包装器参数原样前置（通常以真正的 shell 可执行文件结尾）。
+            for (var i = 1; i < run.Wrapper.Count; i++)
+            {
+                startInfo.ArgumentList.Add(run.Wrapper[i]);
+            }
+        }
 
         if (shell.IsPosix)
         {
@@ -252,25 +269,12 @@ internal static class ProcessRunner
     /// <summary>
     /// 命令进程可见的环境白名单：只放行 shell / 常见工具链真正需要的变量。
     /// 模型密钥、代理凭证、云厂商 token 等一律不进子进程。
+    ///
+    /// 白名单本身下沉到 <see cref="ProcessEnvironment"/>（契约层）——
+    /// 命令沙箱与 MCP 子进程共用同一份，「密钥不出门」的纪律只有一处。
     /// </summary>
     private static IEnumerable<KeyValuePair<string, string>> SafeEnvironment(ShellSpec shell)
-    {
-        string[] allow = shell.IsPosix || shell.Id is "pwsh" or "powershell"
-            ? ["PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "LC_ALL", "LC_CTYPE", "TERM", "TZ",
-               // Git Bash / MSYS 靠这几个找到挂载点与系统目录
-               "TMP", "TEMP", "TMPDIR", "SystemRoot", "SYSTEMROOT", "ComSpec", "COMSPEC", "PATHEXT", "windir", "WINDIR", "SystemDrive", "SYSTEMDRIVE"]
-            : ["PATH", "SystemRoot", "SYSTEMROOT", "ComSpec", "COMSPEC", "PATHEXT", "windir", "WINDIR", "SystemDrive", "SYSTEMDRIVE", "NUMBER_OF_PROCESSORS", "PROCESSOR_ARCHITECTURE"];
-
-        foreach (var name in allow)
-        {
-            var value = Environment.GetEnvironmentVariable(name);
-            if (!string.IsNullOrEmpty(value))
-            {
-                // Windows 环境变量名大小写不敏感，Get 已能命中；这里去重避免重复写入。
-                yield return new KeyValuePair<string, string>(name, value);
-            }
-        }
-    }
+        => ProcessEnvironment.Allowlist(shell.IsPosix || shell.Id is "pwsh" or "powershell");
 
     private static int SafeExitCode(Process process)
     {

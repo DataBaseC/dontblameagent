@@ -1,0 +1,56 @@
+name: ci
+
+# 最小质量门禁：能编过 + 全部 Verify 套件通过。
+# 用 windows-latest 是因为 AgentFramework.Desktop 是 net10.0-windows（WinForms），
+# 在 Linux 上整个 sln 编不过；要开 Linux CI 得先给该工程做条件编译或过滤构建。
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build-and-verify:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Build solution (Debug)
+        run: >
+          dotnet build AgentFramework.sln -c Debug -m:1 --nologo -v quiet
+          /p:UseSharedCompilation=false /nodeReuse:false
+
+      - name: Run verify suites
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $suites = @(
+            'Verify', 'VerifyData', 'VerifyAgent', 'VerifyTools', 'VerifySandbox',
+            'VerifyPlugins', 'VerifyLlm', 'VerifyHost', 'VerifyLauncher', 'VerifyWeb',
+            'VerifySummary', 'VerifyRephrase', 'VerifyContext', 'VerifyMemory',
+            'VerifyToolsets', 'VerifyBaseKit', 'VerifyCheckpoint', 'VerifySecrets'
+          )
+          $failed = @()
+          foreach ($name in $suites) {
+            $proj = "tests/AgentFramework.$name/AgentFramework.$name.csproj"
+            if (-not (Test-Path $proj)) {
+              Write-Host "跳过 $name（找不到 $proj）" -ForegroundColor Yellow
+              continue
+            }
+            Write-Host ""
+            Write-Host "============== $name =============="
+            dotnet run --project $proj -c Debug --no-build --nologo
+            if ($LASTEXITCODE -ne 0) {
+              Write-Host ">>> $name 失败（退出码 $LASTEXITCODE）" -ForegroundColor Red
+              $failed += $name
+            }
+          }
+          Write-Host ""
+          if ($failed.Count -gt 0) {
+            Write-Host "失败套件：$($failed -join ', ')" -ForegroundColor Red
+            exit 1
+          }
+          Write-Host "全部套件通过。" -ForegroundColor Green

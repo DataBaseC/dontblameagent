@@ -24,6 +24,12 @@ public sealed class AgentOptions
     /// <summary>思考增量回调 —— 让界面能显示「模型正在往哪个方向想」。</summary>
     public Action<string>? OnReasoningDelta { get; set; }
 
+    /// <summary>
+    /// 回调异常的可观测出口 —— UI 回调抛错不该拖垮回合，但也不该被无声吞掉。
+    /// 宿主可挂上它做计数 / 记日志；不挂则维持「静默但回合不受影响」。
+    /// </summary>
+    public Action<Exception>? OnCallbackError { get; set; }
+
     /// <summary>是否要求端点回报用量（个别本地端点不认该字段时关掉）。</summary>
     public bool IncludeUsage { get; set; } = true;
 
@@ -151,14 +157,14 @@ public sealed class AgentRunner
                         text.Append(delta.Text);
                         // v3.6 审查修复：UI 增量回调隔离 —— 原先内联直调，
                         // 回调抛异常会中断整轮，而此刻 assistant 文本尚未落账 → 该轮输出丢失。
-                        try { _options.OnTextDelta?.Invoke(delta.Text); } catch { /* UI 回调异常不拖垮回合 */ }
+                        try { _options.OnTextDelta?.Invoke(delta.Text); } catch (Exception ex) { _options.OnCallbackError?.Invoke(ex); }
                         break;
 
                     // 思考与正文是两条通道：思考不喂回模型，但可以实时给用户看
                     case LlmStreamChunk.ReasoningDelta reasoningDelta:
                         firstTokenMs ??= ElapsedMs(startedAt);
                         reasoning.Append(reasoningDelta.Text);
-                        try { _options.OnReasoningDelta?.Invoke(reasoningDelta.Text); } catch { /* 同上 */ }
+                        try { _options.OnReasoningDelta?.Invoke(reasoningDelta.Text); } catch (Exception ex) { _options.OnCallbackError?.Invoke(ex); }
                         break;
 
                     case LlmStreamChunk.UsageReady usageReady:

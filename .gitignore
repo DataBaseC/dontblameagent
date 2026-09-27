@@ -40,3 +40,4 @@ Thumbs.db
 # ── 本机工具数据与本机配置（不上传）──
 .zwork/
 agent.json
+agent.json.bak*

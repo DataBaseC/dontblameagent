@@ -132,14 +132,14 @@ public sealed class AgentConfig
     /// <summary>
     /// 生成一份<strong>严格 JSON</strong>配置单（无 //、无尾逗号）。
     /// 内置一个免费视觉友好端点（AMD Radeon 开发者 API）作开箱默认；
-    /// 密钥是用户提供的免费额度 key，可在界面「模型管理」里改掉。
+    /// 密钥<b>不预置</b> —— 留占位符，请填入自己的 key（或用 AGENT_CLOUD_KEY 环境变量）。
     /// </summary>
     public static string Sample() => """
         {
           "systemPrompt": "你是「dba助手」，可靠的桌面 AI 助理。\n人设：冷静、口语化、先结论后细节。\n硬约束：\n- 不编造；不确定就说不确定\n- 引用网页用 markdown 链接\n- 涉及写文件/执行命令时先说明要做什么\n- 回答尽量短，除非我要求展开",
           "cloud": {
             "baseUrl": "https://developer.amd.com.cn/radeon/api/v1",
-            "apiKey": "rc-436902fdc3644e70ce4fb320028a351b9a7b757832e44368",
+            "apiKey": "在这里填你的 key",
             "model": "MiniCPM5-2B"
           },
           "local": {
@@ -151,7 +151,7 @@ public sealed class AgentConfig
               "id": "amd-radeon",
               "name": "AMD Radeon 免费端点",
               "baseUrl": "https://developer.amd.com.cn/radeon/api/v1",
-              "apiKey": "rc-436902fdc3644e70ce4fb320028a351b9a7b757832e44368",
+              "apiKey": "在这里填你的 key",
               "reasoningStyle": "none",
               "reasoningEffort": "",
               "models": [

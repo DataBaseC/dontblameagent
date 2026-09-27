@@ -19,6 +19,7 @@ public sealed class SessionRuntime : IAsyncDisposable
 {
     private readonly List<SessionEvent> _events;
     private readonly object _eventsGate = new();
+    private IReadOnlyList<SessionEvent>? _snapshot;   // 事件表快照缓存：追加事件时失效（安全审查 P1-6）
 
     internal SessionRuntime(string sessionId, JsonlEventLog log, HostEventSink sink, AgentRunner runner, string? modeId = null, string? projectDir = null)
     {
@@ -78,7 +79,9 @@ public sealed class SessionRuntime : IAsyncDisposable
         {
             lock (_eventsGate)
             {
-                return [.. _events];
+                // 缓存只读快照（安全审查 P1-6）：Events 会被高频投影，原先每次全量复制纯属浪费。
+                // Array.AsReadOnly 阻断调用方改到活表；追加事件时把缓存置空重建。
+                return _snapshot ??= Array.AsReadOnly(_events.ToArray());
             }
         }
     }
@@ -95,6 +98,7 @@ public sealed class SessionRuntime : IAsyncDisposable
         lock (_eventsGate)
         {
             _events.Add(sessionEvent);
+            _snapshot = null;
         }
     }
 

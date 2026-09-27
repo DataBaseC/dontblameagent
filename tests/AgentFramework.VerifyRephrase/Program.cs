@@ -53,7 +53,7 @@ Check("默认启用转述", defaults.Enabled);
 Check("默认不做发送前自动澄清", !defaults.AutoBeforeSend);
 Check("默认走本地端点", defaults.Model == "local");
 Check("默认低温（澄清不是创作）", Math.Abs(defaults.Temperature - 0.2) < 1e-9);
-Check("默认超时 8000ms", defaults.TimeoutMs == 8000);
+Check("默认超时 120000ms（转述超时 8s→120s，随实现同步）", defaults.TimeoutMs == 120_000);
 Check("默认 8 字符以下不转述", defaults.MinChars == 8);
 
 Check(

@@ -96,7 +96,10 @@ internal sealed class ScriptPlugin : IPlugin
             .LimitRecursion(64)
             .MaxStatements(500_000)
             .TimeoutInterval(TimeSpan.FromSeconds(10))
-            .Strict(false));
+            .Strict(false)
+            // 关掉字符串编译：即禁用 eval() / new Function()。插件脚本是「静态写出」的，
+            // 不该在运行时把「字符串」再编译成代码 —— 那既是注入面，也让能力面收窄声明形同虚设。
+            .NoStringCompilation());
 
         // 先把引擎挂上：工具回调与事件钩子都要用它（它们都在激活之后才触发，这里只是防御）。
         lock (_gate)
@@ -431,5 +434,23 @@ internal sealed class ScriptPlugin : IPlugin
         }
 
         return ToolResult.Ok(clr is null ? "（空）" : JsonSerializer.Serialize(clr));
+    }
+}
+
+/// <summary>
+/// Jint 选项的本地加固扩展。
+/// </summary>
+/// <remarks>
+/// 刻意自己写一个扩展方法，而不是依赖 Jint 的某个「字符串编译开关」方法名 ——
+/// Jint 4.x 各小版本里这个开关的**方法名变过**（StringCompilationAllowed / DisableStringCompilation 等叫法不一）。
+/// 这里只依赖稳定存在的 Options.StringCompilationAllowed 属性，最抗版本漂移。
+/// </remarks>
+internal static class ScriptEngineHardening
+{
+    /// <summary>关闭字符串编译：禁用 eval() / new Function()，插件脚本不能在运行时再编译代码。</summary>
+    public static Jint.Options NoStringCompilation(this Jint.Options options)
+    {
+        options.StringCompilationAllowed = false;
+        return options;
     }
 }

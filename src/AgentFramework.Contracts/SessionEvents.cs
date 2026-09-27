@@ -50,6 +50,17 @@ public abstract class SessionEvent
 
     /// <summary>写入时刻（UTC）。</summary>
     public DateTimeOffset Timestamp { get; set; }
+
+    /// <summary>
+    /// 事件格式版本（安全审查 P2）。当前 <see cref="CurrentSchemaVersion"/>。
+    /// 结构演进时据此在 fold / 读取层做迁移，避免旧日志被静默按新结构解析。
+    /// 旧日志（无此字段）读回来取默认值 = 1。
+    /// </summary>
+    [JsonPropertyName("v")]
+    public int V { get; set; } = CurrentSchemaVersion;
+
+    /// <summary>当前事件格式版本。</summary>
+    public const int CurrentSchemaVersion = 1;
 }
 
 /// <summary>会话创建。分叉出的会话用 ParentSessionId / ForkFromSeq 记录血缘。</summary>

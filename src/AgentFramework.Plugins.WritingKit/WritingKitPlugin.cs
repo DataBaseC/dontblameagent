@@ -23,13 +23,14 @@ public sealed class WritingKitPlugin : IPlugin
     {
         var workspace = ctx.Get<IWorkspaceService>();
 
+        ctx.RegisterTool(new ReadDocumentTool(workspace));
         ctx.RegisterTool(new WordCountTool(workspace));
         ctx.RegisterTool(new ParagraphReportTool(workspace));
         ctx.RegisterTool(new RepeatWordsTool(workspace));
         ctx.RegisterTool(new CheckPunctuationTool(workspace));
         ctx.RegisterTool(new OutlineTool(workspace));
 
-        ctx.Log.LogInformation("writing-kit 已激活：注册 5 个写作工具");
+        ctx.Log.LogInformation("writing-kit 已激活：注册 6 个写作工具");
         return Task.CompletedTask;
     }
 }

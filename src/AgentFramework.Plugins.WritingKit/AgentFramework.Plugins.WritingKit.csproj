@@ -3,6 +3,12 @@
   <PropertyGroup>
     <RootNamespace>AgentFramework.Plugins.WritingKit</RootNamespace>
     <AssemblyName>AgentFramework.Plugins.WritingKit</AssemblyName>
+    <!--
+      插件靠 PluginLoadContext + AssemblyDependencyResolver 从「插件目录」解析私有依赖。
+      而库项目默认 CopyLocalLockFileAssemblies=false —— NuGet 依赖不会被复制到输出，
+      结果是 PDF 一读就报「找不到 UglyToad.PdfPig」。故必须显式打开，把插件私有依赖落进插件目录。
+    -->
+    <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
   </PropertyGroup>
 
   <ItemGroup>
@@ -10,6 +16,11 @@
       <Private>false</Private>
       <ExcludeAssets>runtime</ExcludeAssets>
     </ProjectReference>
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- PDF 取文。docx/xlsx/pptx 零依赖自解（zip+xml），不引 NPOI 那类重型库（见 DocumentText.cs 说明）。 -->
+    <PackageReference Include="PdfPig" Version="0.1.16" />
   </ItemGroup>
 
   <ItemGroup>

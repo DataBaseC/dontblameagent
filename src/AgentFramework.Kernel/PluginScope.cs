@@ -24,6 +24,7 @@ internal sealed class PluginScope : IKernelScope
     private readonly ServiceRegistry _services;
     private readonly ToolRegistry _tools;
     private readonly ILogger _log;
+    private readonly List<string> _failedRevocations = [];
     private bool _disposed;
 
     public PluginScope(
@@ -53,6 +54,12 @@ internal sealed class PluginScope : IKernelScope
 
     /// <summary>已被撤销的副作用数量（诊断用）。</summary>
     public int RevokedCount { get; private set; }
+
+    /// <summary>
+    /// 撤销失败的副作用（诊断用，安全审查 P2）。此前失败只 <c>LogError</c>，
+    /// 调用方永远看到「成功」；现在把失败摊开，收尾逻辑可据此上报。
+    /// </summary>
+    public IReadOnlyList<string> FailedRevocations => _failedRevocations;
 
     public IDisposable On<TEvent>(Func<TEvent, CancellationToken, ValueTask> handler)
         where TEvent : notnull
@@ -133,6 +140,7 @@ internal sealed class PluginScope : IKernelScope
             {
                 // 单个撤销失败不能阻断其余撤销 —— 否则一处漏清理会拖垮整个卸载
                 _log.LogError(ex, "撤销副作用失败：plugin={PluginId}", PluginId);
+                _failedRevocations.Add($"{PluginId}: {ex.Message}");
             }
         }
 

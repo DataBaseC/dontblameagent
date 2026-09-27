@@ -459,15 +459,62 @@ public sealed class PluginHost
         }
     }
 
-    /// <summary>把备份目录放回原位（先清空目标再拷回）。</summary>
+    /// <summary>
+    /// 把备份目录放回原位。
+    ///
+    /// 先拷进**同目录下的 staging**，拷贝成功后再用两次 rename 换入 ——
+    /// 于是「拷贝中途崩溃」不会破坏原目录（安全审查 P2）：最坏留下一个临时目录残留，
+    /// 原目录 / 备份都还在，可人工恢复。直接「先删后拷」则一旦中途崩溃，插件目录就全没了。
+    /// </summary>
     private static void RestoreBackup(string backup, string pluginDirectory)
     {
-        if (Directory.Exists(pluginDirectory))
-        {
-            Directory.Delete(pluginDirectory, recursive: true);
-        }
+        var parent = Path.GetDirectoryName(pluginDirectory) ?? ".";
+        var staging = Path.Combine(parent, ".restore-" + Guid.NewGuid().ToString("N"));
+        var retired = Path.Combine(parent, ".retired-" + Guid.NewGuid().ToString("N"));
 
-        CopyDirSafe(backup, pluginDirectory);
+        // 1. 先把备份完整拷进 staging（此时还没动原目录）
+        CopyDirSafe(backup, staging);
+
+        try
+        {
+            // 2. 原目录挪走 → staging 归位
+            if (Directory.Exists(pluginDirectory))
+            {
+                Directory.Move(pluginDirectory, retired);
+            }
+
+            Directory.Move(staging, pluginDirectory);
+        }
+        catch
+        {
+            // 换入失败：尽量把原目录挪回来，别把插件弄丢
+            if (!Directory.Exists(pluginDirectory) && Directory.Exists(retired))
+            {
+                Directory.Move(retired, pluginDirectory);
+            }
+
+            throw;
+        }
+        finally
+        {
+            TryDeleteDir(staging);
+            TryDeleteDir(retired);
+        }
+    }
+
+    private static void TryDeleteDir(string dir)
+    {
+        try
+        {
+            if (Directory.Exists(dir))
+            {
+                Directory.Delete(dir, recursive: true);
+            }
+        }
+        catch
+        {
+            // 清理失败无伤大雅（残留的是临时目录）
+        }
     }
 
     /// <summary>拷贝目录，**不跟随符号链接**（防链接指到盘外 / 环状链接空转）。</summary>

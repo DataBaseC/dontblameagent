@@ -31,6 +31,12 @@ public sealed class RouterLlmClient : ILlmClient
     /// <summary>手动覆盖：设置后无视规则，直达指定目标。null 表示交还给规则。</summary>
     public string? ManualOverride { get; set; }
 
+    /// <summary>
+    /// 显式回落目标（安全审查 P2）。规则把请求指向一个未注册的端点时优先落到它；
+    /// 没设就退回「唯一目标」（只有一项时顺序无歧义）。依赖字典枚举顺序是不可靠的。
+    /// </summary>
+    public string? FallbackTarget { get; set; }
+
     /// <summary>路由历史（诊断用 —— 若用户频繁手动切，说明规则没抓住规律）。</summary>
     public IReadOnlyList<RouteRecord> History
     {
@@ -63,10 +69,22 @@ public sealed class RouterLlmClient : ILlmClient
         {
             if (!_targets.TryGetValue(target, out client))
             {
-                // 只配了一个端点时，规则仍可能把请求指向另一个 ——
+                // 规则想把请求指向一个未注册的端点 ——
                 // 例如「只配了云端」，而闲聊模式的长上下文 + 无工具按规则该走本地。
-                // 这时退回唯一可用的目标，而不是直接抛异常：**规则是偏好，不是前提。**
-                client = _targets.Count == 1 ? _targets.Values.First() : null;
+                // 这时退回回落目标，而不是直接抛异常：**规则是偏好，不是前提。**
+                if (!string.IsNullOrEmpty(FallbackTarget)
+                    && _targets.TryGetValue(FallbackTarget, out var explicitFallback))
+                {
+                    client = explicitFallback;
+                }
+                else if (_targets.Count == 1)
+                {
+                    client = _targets.Values.First();   // 唯一目标：顺序无歧义
+                }
+                else
+                {
+                    client = null;
+                }
             }
         }
 

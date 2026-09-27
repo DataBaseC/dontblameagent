@@ -114,8 +114,8 @@ var writing = host.Toolsets.First(t => t.Id == "writing-kit");
 Check("★ 领域插件包的显示名来自清单（界面上看得懂）",
     writing.Name == "写作扩展工具包",
     writing.Name);
-Check("writing-kit 带着 5 个写作工具",
-    writing.Tools.Count == 5 && writing.Tools.Contains("word_count"),
+Check("writing-kit 带着 6 个写作工具（含 read_document）",
+    writing.Tools.Count == 6 && writing.Tools.Contains("word_count") && writing.Tools.Contains("read_document"),
     $"{writing.Tools.Count} 个");
 Check("core 收齐文件链（关掉插件不断手）",
     host.Toolsets.First(t => t.Id == "core").Tools.Contains("edit_file")
@@ -151,9 +151,10 @@ Check("★ 关掉「执行命令」包 → run_command 不可见（但读写文�
     && !host.ExposedToolNames.Contains("run_command")
     && host.ExposedToolNames.Contains("write_file"));
 
-Check("★ 关掉写作包 → 5 个写作工具全不可见，core 文件链不受影响",
+Check("★ 关掉写作包 → 6 个写作工具全不可见，core 文件链不受影响",
     host.SetToolsetEnabled("writing-kit", false)
     && !host.ExposedToolNames.Contains("word_count")
+    && !host.ExposedToolNames.Contains("read_document")
     && !host.ExposedToolNames.Contains("outline")
     && host.ExposedToolNames.Contains("edit_file"),
     $"可见 {host.ExposedToolNames.Count} 个");

@@ -510,7 +510,7 @@ public interface IWorkspaceService
 - 想再加一个基石插件：照 `AgentFramework.Plugins.*` 建工程 → 写 `plugin.json`（含 `injects`）→ `ActivateAsync` 里 `ctx.RegisterTool(...)`
   → 加进 `AgentFramework.sln` → 在 `run.cmd` / `pack-launcher.cmd` 里各加一行同步
 
-## 🧰 命令沙箱：跑命令真的「关进笼子」
+## 🧰 命令沙箱：跑命令「关进笼子」（平台强度不同）
 
 `run_command` 是最危险的工具。此前它只有两道防线：**审批**（决定放不放行）与**超时**。
 可「放行了」之后能造成什么破坏，没人管：
@@ -527,6 +527,11 @@ public interface IWorkspaceService
 | `off` | 不管。**保留它是有意的**：出事时能一键退回「没有沙箱的世界」，才好判断问题出在命令本身还是沙箱身上 | 全平台 |
 | **`process`**（非 Windows 上 auto 的落点） | 工作目录钉在工作区；**临时目录重定向进工作区**（TMP/TEMP/TMPDIR）；**超时/取消连子孙进程一起终结**；输出过程中封顶 | 全平台 |
 | **`job`**（Windows 上 auto 的落点） | 在 process 之上加**内核配额**：内存上限、CPU 时间上限、活动进程数上限，且**宿主退出时连同子孙一并终结**（Job Object 的 `KILL_ON_JOB_CLOSE`） | Windows |
+
+> ⚠️ **隔离强度说清楚**：`job` 档给的是**资源配额**（内存 / CPU / 进程数），`process` 档给的是**进程级护栏**
+> （cwd 钉死 / TMP 重定向 / 超时终结 / 输出封顶 / 环境白名单）。**两者都不是隔离** —— 命令仍以宿主进程同等 uid 权限运行。
+> 非 Windows 上当前没有 chroot / namespace / seccomp / cgroup / landlock，命令能读写 `~/.ssh`、能访问内网。
+> 要更强的隔离，请走插件后端（容器 / bwrap）。
 
 为什么 Windows 上选 Job Object：它是**系统自带、零依赖**的进程配额机制，而 agent 跑命令真正要的
 就是这几条。容器（要装运行环境）、低完整性级别（会把普通程序跑坏）、防火墙（要管理员权限）

@@ -20,7 +20,11 @@ public sealed class McpServerConfig
     /// <summary>命令行参数。</summary>
     public List<string> Args { get; set; } = [];
 
-    /// <summary>附加环境变量（常用来传 token / 根目录）。</summary>
+    /// <summary>
+    /// 附加环境变量（常用来传 token / 根目录）。
+    /// 子进程环境是「清空 + 白名单」的：白名单（见 <c>ProcessEnvironment.ToolingAllowlist</c>）
+    /// 只含路径 / 家目录这类通用变量，server 需要的其它变量一律在这里显式声明。
+    /// </summary>
     public Dictionary<string, string> Env { get; set; } = new(StringComparer.Ordinal);
 
     /// <summary>是否启用（默认启用）。</summary>

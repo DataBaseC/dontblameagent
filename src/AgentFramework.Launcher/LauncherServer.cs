@@ -37,6 +37,9 @@ public sealed class LauncherState
 
     public required PluginProfile Profile { get; set; }
 
+    /// <summary>启动器自身监听的端口（加载页用）。</summary>
+    public int Port { get; set; }
+
     public required IReadOnlyList<PluginDescriptor> Catalog { get; init; }
 
     public required IReadOnlyList<string> Errors { get; init; }
@@ -343,6 +346,12 @@ public sealed class LauncherServer
                 return;
             }
 
+            case "/loading":
+            {
+                WriteHtml(context, LoadingPage());
+                return;
+            }
+
             default:
                 WriteHtml(context, RenderPage());
                 return;
@@ -410,6 +419,73 @@ public sealed class LauncherServer
         => Preflight.Run(_state.Catalog, EnabledInLoadOrder(), _state.Errors);
 
     // ── 页面 ──────────────────────────────────────────────────
+
+    private string LoadingPage() => $$"""
+        <!doctype html>
+        <html lang="zh-CN">
+        <head>
+        <meta charset="utf-8">
+        <title>Agent 加载中</title>
+        <style>
+          * { box-sizing: border-box; margin: 0; padding: 0; }
+          body { background: #12151b; color: #e6e8ec; font: 14px/1.6 "Segoe UI", system-ui, sans-serif;
+                 display: flex; align-items: center; justify-content: center; height: 100vh; }
+          .wrap { text-align: center; width: 320px; }
+          h1 { font-size: 18px; margin-bottom: 12px; }
+          .bar-bg { height: 6px; background: #242a35; border-radius: 3px; overflow: hidden; margin-bottom: 16px; }
+          .bar-fg { height: 100%; width: 0%; background: linear-gradient(90deg, #2f6bff, #7aa2f7);
+                     border-radius: 3px; transition: width .4s ease; }
+          .msg { color: #8b93a1; font-size: 12px; min-height: 18px; }
+          @keyframes pulse { 0%,100% { opacity:.6 } 50% { opacity:1 } }
+          .msg { animation: pulse 1.8s ease-in-out infinite; }
+        </style>
+        </head>
+        <body>
+        <div class="wrap">
+          <h1>正在启动 Agent</h1>
+          <div class="bar-bg"><div class="bar-fg" id="bar"></div></div>
+          <div class="msg" id="msg">准备中…</div>
+        </div>
+        <script>
+        const bar = document.getElementById('bar');
+        const msg = document.getElementById('msg');
+        const target = 'http://localhost:8090/';
+        let pct = 5;
+        const steps = [
+          [15, '加载模型配置…'],
+          [30, '初始化插件…'],
+          [50, '启动工具链…'],
+          [70, '等待服务就绪…'],
+          [85, '即将进入对话…'],
+        ];
+        let step = 0;
+        const tick = setInterval(() => {
+          if (step < steps.length) {
+            pct = steps[step][0];
+            msg.textContent = steps[step][1];
+            step++;
+          }
+          bar.style.width = pct + '%';
+        }, 1200);
+
+        async function probe() {
+          for (let i = 0; i < 60; i++) {
+            try {
+              const r = await fetch(target, { mode: 'no-cors', signal: AbortSignal.timeout(2000) });
+              break;
+            } catch {}
+            await new Promise(r => setTimeout(r, 500));
+          }
+          clearInterval(tick);
+          bar.style.width = '100%';
+          msg.textContent = '进入对话…';
+          setTimeout(() => { location.href = target; }, 400);
+        }
+        probe();
+        </script>
+        </body>
+        </html>
+        """;
 
     private string RenderPage()
     {

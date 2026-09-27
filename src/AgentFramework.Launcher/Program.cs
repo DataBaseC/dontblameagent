@@ -196,6 +196,9 @@ state.Launcher = options =>
         state.HostUrl = "http://localhost:8090/";
     }
 
+    // 加载页由桌面壳先打开（带进度条），轮询宿主端口就绪后自动跳转。
+    // 不再阻塞等待端口——加载页在浏览器端异步探活。
+
     // 原生窗口优先：桌面壳可用就直接开窗（不跳浏览器）；没有桌面壳才退回浏览器。
     TryOpenDesktopShell(cwd);
 
@@ -217,6 +220,7 @@ state.Launcher = options =>
 
 static string Quote(string value) => value.Contains(' ') ? $"\"{value}\"" : value;
 
+state.Port = port;
 var server = new LauncherServer(state, port);
 
 Console.WriteLine($"═══ Agent 启动器 {BuildInfo.Stamp} ═══");
@@ -359,7 +363,7 @@ void TryOpenDesktopShell(string cwd)
             return;
         }
 
-        var window = Process.Start(new ProcessStartInfo(desktopExe, "--url http://localhost:8090/")
+        var window = Process.Start(new ProcessStartInfo(desktopExe, $"--url http://localhost:{state.Port}/loading")
         {
             WorkingDirectory = cwd,
             UseShellExecute = false,
@@ -367,7 +371,7 @@ void TryOpenDesktopShell(string cwd)
 
         if (window is null)
         {
-            TryOpenBrowser("http://localhost:8090/");
+            TryOpenBrowser($"http://localhost:{port}/loading");
             return;
         }
 
@@ -380,7 +384,7 @@ void TryOpenDesktopShell(string cwd)
                 var exited = await Task.Run(() => window.WaitForExit(6000)).ConfigureAwait(false);
                 if (exited && window.ExitCode != 0)
                 {
-                    TryOpenBrowser("http://localhost:8090/");
+                    TryOpenBrowser($"http://localhost:{port}/loading");
                 }
             }
             catch

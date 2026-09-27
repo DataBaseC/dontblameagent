@@ -6,7 +6,7 @@ namespace AgentFramework.Sandbox;
 /// 沙箱后端注册表（宿主提供，插件可注册）。
 ///
 /// <para>
-/// 内置三档：<c>off</c> / <c>process</c> / <c>job</c>。
+/// 内置档：<c>off</c> / <c>process</c> / <c>job</c>（Windows），Linux 上装了 bubblewrap 则多一档 <c>bwrap</c>。
 /// 插件想加一档（容器、远程执行、带审计的包装……）就 <c>Register</c> 一个后端，
 /// 然后在配置里写它的名字 —— 不必改宿主里任何 <c>switch</c>。
 /// </para>
@@ -34,6 +34,18 @@ public sealed class SandboxRegistry : ISandboxRegistry
         if (OperatingSystem.IsWindows())
         {
             Register(new WindowsJobSandboxBackend());
+        }
+
+        // Linux 可选的 bwrap 隔离后端（安全审查 T10）：装了 bubblewrap 才注册 ——
+        // 没装就不在名单里，配置写了它也会得到一句明确的「没有这个后端」。
+        // 注意：它是**显式选用**档（--sandbox bwrap），不进 auto —— auto 仍是 job→process。
+        if (OperatingSystem.IsLinux())
+        {
+            var bwrap = new BwrapSandboxBackend();
+            if (bwrap.IsAvailable)
+            {
+                Register(bwrap);
+            }
         }
     }
 

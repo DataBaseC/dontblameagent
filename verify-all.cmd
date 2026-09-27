@@ -39,7 +39,7 @@ if errorlevel 1 (
 echo [2/2] Running verify suites ...
 rem Serial + 1s gap: suites share plugin DLL outputs; a still-open
 rem process causes false "file in use" failures.
-for %%n in (Verify VerifyData VerifyAgent VerifyTools VerifySandbox VerifyPlugins VerifyLlm VerifyHost VerifyLauncher VerifyWeb VerifySummary VerifyRephrase VerifyContext VerifyMemory VerifyToolsets VerifyBaseKit VerifyCheckpoint) do (
+for %%n in (Verify VerifyData VerifyAgent VerifyTools VerifySandbox VerifyPlugins VerifyLlm VerifyHost VerifyLauncher VerifyWeb VerifySummary VerifyRephrase VerifyContext VerifyMemory VerifyToolsets VerifyBaseKit VerifyCheckpoint VerifySecrets) do (
     echo.
     echo ============== %%n ==============
     dotnet run --project "tests\AgentFramework.%%n\AgentFramework.%%n.csproj" -c Debug --no-build --nologo

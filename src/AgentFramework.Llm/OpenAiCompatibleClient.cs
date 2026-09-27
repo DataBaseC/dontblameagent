@@ -17,7 +17,20 @@ public sealed class OpenAiCompatibleOptions
 
     public string DefaultModel { get; set; } = "deepseek-chat";
 
-    public TimeSpan Timeout { get; set; } = TimeSpan.FromMinutes(3);
+    /// <summary>
+    /// 帧间空闲 / 等待响应头的超时（连接与总时限另由 HttpClient 管）。
+    /// 默认 3 分钟；可用环境变量 <c>AGENT_LLM_TIMEOUT</c>（秒）放大 ——
+    /// 慢端点、或大模型首 token 久（大工具集 / 长上下文）时用得上。
+    /// </summary>
+    public TimeSpan Timeout { get; set; } = DefaultTimeout();
+
+    private static TimeSpan DefaultTimeout()
+    {
+        var raw = Environment.GetEnvironmentVariable("AGENT_LLM_TIMEOUT");
+        return double.TryParse(raw, NumberStyles.Float, CultureInfo.InvariantCulture, out var seconds) && seconds > 0
+            ? TimeSpan.FromSeconds(seconds)
+            : TimeSpan.FromMinutes(3);
+    }
 
     /// <summary>
     /// 思考参数风格（见 ReasoningStyles）：openai = 顶层 reasoning_effort；
@@ -211,6 +224,19 @@ public sealed class OpenAiCompatibleClient : ILlmClient, IDisposable
             using (doc)
             {
                 var root = doc.RootElement;
+
+                // ★ 端点把错误当「数据帧」发：形如 data: {"error":{"message":"...","type":"..."}}。
+                //   典型如网关上游过载时回 200 + event:error（"Error from provider ...: 503"）。
+                //   若不在这里拦下，它会被下面的「无 choices → continue」吞掉，
+                //   整轮表现成「模型什么都没说」却算成功 —— 最难排查的一种。
+                if (root.TryGetProperty("error", out var errorNode) && errorNode.ValueKind == JsonValueKind.Object)
+                {
+                    var message = errorNode.TryGetProperty("message", out var messageNode)
+                                  && messageNode.ValueKind == JsonValueKind.String
+                        ? messageNode.GetString()
+                        : errorNode.ToString();
+                    throw new InvalidOperationException($"端点返回错误帧：{Truncate(message ?? "（无消息）", 400)}");
+                }
 
                 if (root.TryGetProperty("model", out var modelNode) && modelNode.ValueKind == JsonValueKind.String)
                 {

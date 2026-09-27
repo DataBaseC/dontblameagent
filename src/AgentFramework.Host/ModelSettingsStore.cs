@@ -203,6 +203,7 @@ public sealed class ModelSettingsStore
             if (!File.Exists(backup))
             {
                 File.Copy(Path, backup);
+                TightenPermissions(backup);
             }
         }
         catch (IOException)
@@ -310,5 +311,27 @@ public sealed class ModelSettingsStore
 
         File.WriteAllText(temporary, json);
         File.Move(temporary, Path, overwrite: true);
+        TightenPermissions(Path);
+    }
+
+    /// <summary>
+    /// 非 Windows 上把配置文件权限收紧到「仅本人可读写」（安全审查 P1-9）。
+    /// Windows 走 DPAPI 加密、且无 POSIX 权限位，跳过；文件系统不支持权限位时不阻断保存本身。
+    /// </summary>
+    private static void TightenPermissions(string path)
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        try
+        {
+            File.SetUnixFileMode(path, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+        }
+        catch (Exception)
+        {
+            // 某些文件系统（FAT / 网络盘）不支持权限位：失败不该拦住保存本身
+        }
     }
 }

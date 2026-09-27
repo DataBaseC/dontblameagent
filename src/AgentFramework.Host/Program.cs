@@ -14,6 +14,12 @@ using AgentFramework.Host;
 //    AGENT_CLOUD_BASEURL / AGENT_CLOUD_KEY / AGENT_CLOUD_MODEL
 //    AGENT_LOCAL_BASEURL / AGENT_LOCAL_MODEL
 //  两者都没有则进入离线演示模式（能跑通，但端点不报用量）
+//
+//  命令沙箱强度（--sandbox）：
+//    · Windows  → job 档：Job Object 资源限制（内存 / CPU / 进程数上限）
+//    · Linux/macOS → process 档：仅进程级护栏（工作目录钉死 / TMP 重定向 /
+//      超时连子孙终结 / 输出封顶 / 环境变量白名单）—— **不是隔离**：
+//      命令以本用户权限运行，能读写本用户可访问的任何文件。
 // ═══════════════════════════════════════════════════════════
 
 try
@@ -69,6 +75,7 @@ var options = new HostOptions
         ?? Path.Combine(cwd, "agent-sessions"),
     PluginsDir = Pick(GetArg("--plugins"), "AGENT_PLUGINS", config?.Plugins),
     // 命令沙箱档位：auto（默认）/ off / process / job，或插件注册的后端名
+    // 强度因平台而异：Windows 的 job 档有内核配额；Linux/macOS 的 process 档只是进程级护栏（非隔离）。
     Sandbox = Pick(GetArg("--sandbox"), "AGENT_SANDBOX", config?.Sandbox),
     // shell：会话级一次决定，优先 POSIX。auto / bash / sh / cmd / powershell / pwsh / 路径
     Shell = Pick(GetArg("--shell"), "AGENT_SHELL", config?.Shell),

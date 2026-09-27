@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Text;
+using AgentFramework.Contracts;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 
@@ -34,6 +35,16 @@ public sealed class McpClient : IAsyncDisposable
     private readonly CancellationTokenSource _cts = new();
     private readonly Task _readLoop;
     private long _nextId;
+    private string? _terminalReason;
+
+    /// <summary>单条响应行的字符上限（安全审查 P0-3）。</summary>
+    private const int MaxLineChars = 8 * 1024 * 1024;
+
+    /// <summary>单会话累计读取字符上限（安全审查 P0-3）。</summary>
+    private const long MaxSessionChars = 64L * 1024 * 1024;
+
+    /// <summary>单次请求超时（安全审查 P0-3）：server 不响应不能让整轮永久挂起。</summary>
+    private static readonly TimeSpan RequestTimeout = TimeSpan.FromMinutes(5);
 
     private McpClient(string serverId, Process process)
     {
@@ -75,6 +86,18 @@ public sealed class McpClient : IAsyncDisposable
         foreach (var arg in config.Args)
         {
             psi.ArgumentList.Add(arg);
+        }
+
+        // 环境清洗：与命令沙箱（ProcessRunner）同一纪律 —— **先清空继承的宿主环境**，
+        // 再只放行白名单 + 配置里显式声明的变量。
+        // 不清空的话，ProcessStartInfo.Environment 默认带全宿主环境，
+        // 模型 / 搜索的 API key（AGENT_*_KEY）会随 MCP 子进程一起外带（安全审查 P0-3）。
+        // 白名单用「工具链档」：比 shell 档多放行家目录 / 缓存变量（npx、uvx、pip 要用），
+        // 但同样不含任何密钥；server 需要的其它变量请在 config.Env 里显式写。
+        psi.Environment.Clear();
+        foreach (var (key, value) in ProcessEnvironment.ToolingAllowlist())
+        {
+            psi.Environment[key] = value;
         }
 
         foreach (var (key, value) in config.Env)
@@ -206,8 +229,33 @@ public sealed class McpClient : IAsyncDisposable
 
         await WriteAsync(message.ToJsonString(), ct).ConfigureAwait(false);
 
-        using var registration = ct.Register(() => tcs.TrySetCanceled(ct));
-        return await tcs.Task.ConfigureAwait(false);
+        // per-request 超时（安全审查 P0-3）：坏掉的 server 不能靠「永不回答」把整轮挂死。
+        // 超时按 McpException 上报（而非 OperationCanceled），好让上层把它当「失败」记录，
+        // 而不是误判成「用户取消」。
+        using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        timeoutCts.CancelAfter(RequestTimeout);
+        using var registration = timeoutCts.Token.Register(() =>
+        {
+            if (ct.IsCancellationRequested)
+            {
+                tcs.TrySetCanceled(ct);
+            }
+            else
+            {
+                tcs.TrySetException(new McpException(
+                    $"MCP 请求「{method}」超时（{RequestTimeout.TotalSeconds:0} 秒无响应）"));
+            }
+        });
+
+        try
+        {
+            return await tcs.Task.ConfigureAwait(false);
+        }
+        finally
+        {
+            // 成功 / 失败 / 取消都摘除未决项，避免 _pending 泄漏。
+            _pending.TryRemove(id, out _);
+        }
     }
 
     private async Task NotifyAsync(string method, JsonNode? parameters, CancellationToken ct)
@@ -235,6 +283,7 @@ public sealed class McpClient : IAsyncDisposable
 
     private async Task ReadLoopAsync()
     {
+        long receivedChars = 0;
         while (!_cts.IsCancellationRequested)
         {
             string? line;
@@ -249,6 +298,28 @@ public sealed class McpClient : IAsyncDisposable
 
             if (line is null)
             {
+                break;
+            }
+
+            // 资源上限（安全审查 P0-3）：恶意或故障 server 不能靠持续吐数据撑爆内存。
+            // 单行封顶挡住「一行到底的巨型响应」，累计封顶挡住「无限多行」。
+            receivedChars += line.Length;
+            if (line.Length > MaxLineChars || receivedChars > MaxSessionChars)
+            {
+                _terminalReason =
+                    $"响应体积超限（单行 > {MaxLineChars} 字符或累计 > {MaxSessionChars} 字符），已终止该 server";
+                try
+                {
+                    if (!_process.HasExited)
+                    {
+                        _process.Kill(entireProcessTree: true);
+                    }
+                }
+                catch
+                {
+                    // 已经退出 / 杀不掉：不掩盖超限原因
+                }
+
                 break;
             }
 
@@ -291,10 +362,11 @@ public sealed class McpClient : IAsyncDisposable
             }
         }
 
-        // 进程结束：让所有未决请求尽快失败，而不是永远挂着
+        // 进程结束（正常退出 / 被杀 / 超限）：让所有未决请求尽快失败，而不是永远挂着。
+        var reason = _terminalReason ?? $"MCP server「{ServerId}」已退出";
         foreach (var pair in _pending)
         {
-            pair.Value.TrySetException(new McpException($"MCP server「{ServerId}」已退出"));
+            pair.Value.TrySetException(new McpException(reason));
         }
     }
 

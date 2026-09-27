@@ -66,7 +66,20 @@ internal static class TextInput
 
         try
         {
-            text = File.ReadAllText(fullPath);
+            // 容器格式（pdf/docx/xlsx/pptx，及需提示的旧格式）走文档提取；
+            // 其余仍按文本读 —— 保持「任意文本文件都能读」的既有行为。
+            if (DocumentText.NeedsExtraction(fullPath))
+            {
+                if (!DocumentText.TryExtract(fullPath, out text, out var extractError))
+                {
+                    error = extractError;
+                    return false;
+                }
+            }
+            else
+            {
+                text = File.ReadAllText(fullPath);
+            }
         }
         catch (Exception ex)
         {

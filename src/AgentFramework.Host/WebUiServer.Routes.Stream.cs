@@ -26,6 +26,7 @@ public sealed partial class WebUiServer
 
             response.StatusCode = 200;
             response.ContentType = "text/event-stream; charset=utf-8";
+            ApplySecurityHeaders(response);
             response.Headers.Add("Cache-Control", "no-cache");
             response.SendChunked = true;
 

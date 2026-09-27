@@ -350,6 +350,12 @@ public sealed partial class WebUiServer : IDisposable, IApprovalPrompt
             }
             catch
             {
+                // 写失败 = 客户端断开：统一交给 finally 摘除
+            }
+            finally
+            {
+                // 无论异常退出还是队列正常读完，都要摘除客户端 ——
+                // 否则 _clients 会残留已完成的写循环（安全审查 P2）。
                 RemoveClient(client);
             }
         });
@@ -1142,12 +1148,33 @@ public sealed partial class WebUiServer : IDisposable, IApprovalPrompt
         WriteBytes(context, contentType, bytes, statusCode);
     }
 
+    /// <summary>
+    /// 给每个响应补一层安全头（安全审查 P1-4）。
+    ///
+    /// CSP 允许内联 script/style（当前 SPA 是内联在 WebUiPage 里的单文件），
+    /// 但把**外部**脚本 / 样式 / 图片 / 框架一律拦下：即便某条错误信息插值漏了，
+    /// 攻击者也没法加载外部载荷，也无法把本页嵌进 iframe。
+    /// </summary>
+    internal static void ApplySecurityHeaders(HttpListenerResponse response)
+    {
+        var headers = response.Headers;
+        headers["Content-Security-Policy"] =
+            "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; " +
+            "img-src 'self' data:; font-src 'self' data:; connect-src 'self'; object-src 'none'; " +
+            "base-uri 'none'; form-action 'self'; frame-ancestors 'self'";
+        headers["X-Content-Type-Options"] = "nosniff";
+        // X-Frame-Options 与 CSP frame-ancestors 重复且不支持 'self' 语义，去掉它。
+        // 同源 iframe（插件面板）需要 frame-ancestors 'self'。
+        headers["Referrer-Policy"] = "no-referrer";
+    }
+
     /// <summary>写二进制响应体（favicon / 图片）。</summary>
     internal static void WriteBytes(HttpListenerContext context, string contentType, byte[] bytes, int statusCode = 200)
     {
         context.Response.StatusCode = statusCode;
         context.Response.ContentType = contentType;
         context.Response.ContentLength64 = bytes.Length;
+        ApplySecurityHeaders(context.Response);
         context.Response.OutputStream.Write(bytes);
         context.Response.Close();
     }

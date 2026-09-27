@@ -10,6 +10,10 @@
   <ItemGroup>
     <!-- 浏览器标签页 favicon：由 /icon.png 端点吐出（见 WebUiServer.Routes.Session.cs） -->
     <EmbeddedResource Include="..\..\assets\icon.png" Link="assets\icon.png" LogicalName="AgentFramework.Host.assets.icon.png" />
+    <!-- 对话界面 SPA（安全审查 P1-3）：从 C# 字符串常量抽成独立文件 + 嵌入资源。
+         独立文件让编辑器能高亮 / lint / 出可读 diff；嵌入资源让运行时行为不变（单文件、随 exe 分发）。 -->
+    <None Remove="Web\index.html" />
+    <EmbeddedResource Include="Web\index.html" LogicalName="AgentFramework.Host.Web.index.html" />
   </ItemGroup>
 
   <ItemGroup>
