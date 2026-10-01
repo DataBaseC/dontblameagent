@@ -67,12 +67,42 @@ public sealed class AgentConfig
     /// <summary>系统提示词（不写就用内置的）。</summary>
     public string? SystemPrompt { get; set; }
 
+    /// <summary>
+    /// Goal 停止条件（自然语言，如「所有测试通过且代码已提交」）。不写 = 不启用目标核验。
+    /// 模型每次想收尾时由旁路验证者裁决「真的达成了吗」，未达成就带着差距继续 —— 防提前收工。
+    /// </summary>
+    public string? Goal { get; set; }
+
     public double? Temperature { get; set; }
 
+    /// <summary>
+    /// 一个回合的最大步数（默认 60 —— 编程任务动辄几十步工具调用）。
+    /// 到上限不硬杀：末步会注入「交接摘要」提示优雅收尾。
+    /// </summary>
     public int? MaxSteps { get; set; }
 
     /// <summary>上下文治理参数（不写就用默认值）。</summary>
     public ContextConfig? Context { get; set; }
+
+    /// <summary>
+    /// 输入级权限规则（MiMo 的 permission rules）：
+    /// <c>[{"match":"run_command git *","action":"allow"}]</c>。
+    /// 按数组顺序匹配，<strong>后写覆盖先写</strong>（last-match-wins）；
+    /// action = <c>allow</c> / <c>ask</c> / <c>deny</c>。不写 = 纯按审批档位判定。
+    /// </summary>
+    public List<ApprovalRuleConfig>? ApprovalRules { get; set; }
+
+    /// <summary>
+    /// 授予越界目录访问（<c>external_directory</c>）。默认 false：
+    /// 写到工作区之外一律不静默放行（询问；无界面即拒绝），规则与档位都推不翻。
+    /// </summary>
+    public bool? AllowExternalDirectory { get; set; }
+
+    /// <summary>
+    /// 进化配置（PLAN-memory-evolution 支柱四）：Dream（记忆周期整理）/ Distill（技能固化）。
+    /// 按累计回合数触发；Dream 默认开（30 回合一轮），Distill 默认关（要写工作区）。
+    /// </summary>
+    public EvolutionConfig? Evolution { get; set; }
 
     /// <summary>云端端点（负责复杂任务、要用工具的活）。</summary>
     public EndpointConfig? Cloud { get; set; }
@@ -199,7 +229,42 @@ public sealed class ContextConfig
 
     public double? CompressionTriggerRatio { get; set; }
 
+    /// <summary>
+    /// 提前摘要水位（默认 0.45）：到这个水位就先把「工作记忆」增量提取落盘，不收紧窗口。
+    /// 0 = 关闭（回到「到压缩水位才一次性处理」的旧行为）。
+    /// </summary>
+    public double? EarlySummarizeRatio { get; set; }
+
     public int? RecentTurnsKeptVerbatim { get; set; }
 
     public bool? InjectTaskCard { get; set; }
+}
+
+/// <summary>一条输入级权限规则（配置单形态）：模式匹配 + 三值处置。</summary>
+public sealed class ApprovalRuleConfig
+{
+    /// <summary>匹配「工具名 + 关键参数」签名的模式（<c>*</c>/<c>?</c> 通配，大小写不敏感）。</summary>
+    public string? Match { get; set; }
+
+    /// <summary>处置：<c>allow</c> / <c>ask</c> / <c>deny</c>。</summary>
+    public string? Action { get; set; }
+}
+
+/// <summary>进化配置（不写就用默认值）。</summary>
+public sealed class EvolutionConfig
+{
+    /// <summary>Dream 周期（累计回合数）；0 = 关闭。</summary>
+    public int? DreamEveryTurns { get; set; }
+
+    /// <summary>Distill 周期（累计回合数）；0 / 不写 = 关闭。</summary>
+    public int? DistillEveryTurns { get; set; }
+
+    /// <summary>模式至少出现多少次才算「反复出现」（默认 3）。</summary>
+    public int? DistillMinOccurrences { get; set; }
+
+    /// <summary>模式至少横跨多少个会话（默认 2）。</summary>
+    public int? DistillMinSessions { get; set; }
+
+    /// <summary>一轮最多固化几个技能（默认 3）。</summary>
+    public int? DistillMaxSkills { get; set; }
 }

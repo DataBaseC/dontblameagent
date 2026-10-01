@@ -40,6 +40,12 @@ public sealed record ContextProjection(
 ///   尾 —— 最近 N 轮逐字保留 + 任务卡（L4）常驻
 ///
 /// 「模型可见即已记录」依然成立：投影里的每一条都能由日志 + 压缩事件推出来。
+///
+/// <para>
+/// <see cref="ContextProjection.OlderMessages"/> 的语义（INV-C1）：
+/// 它是**下一次压缩的原料队列** —— 只收「窗口外、未被摘要产物覆盖、非合成复述」的
+/// 对话原文。摘要产物永不在此队列里（它只以 previousSummary 身份作背景）。
+/// </para>
 /// </summary>
 public static class SessionContextBuilder
 {
@@ -52,7 +58,7 @@ public static class SessionContextBuilder
 
     /// <summary>带治理的投影。</summary>
     /// <param name="forceCollapse">
-    /// 超预算且无摘要时是否仍折叠旧轮（P0）：折叠掉放一句如实占位，
+    /// 超预算时是否允许「折叠旧轮」这最后一招（P0）：折叠掉放一句如实占位，
     /// 好过让正文永远不收缩、水位永远降不下来。
     /// </param>
     public static ContextProjection Project(
@@ -63,15 +69,24 @@ public static class SessionContextBuilder
         var opt = options ?? new ContextOptions();
         var all = events as IReadOnlyList<SessionEvent> ?? [.. events];
 
-        // L6 两遍投影：第一遍不骨架化 —— 无压力时零信息损失；
-        // 估算水位超限才用骨架化再投影一遍（纯函数、无 IO，成本是常数次遍历）。
-        var first = ProjectCore(all, opt, skeletonize: false, forceCollapse);
-        if (!opt.SkeletonizeOldAssistant || !first.NeedsCompression)
+        // 压缩阶梯（借鉴 MiMo Code「无压力不损失信息」的纪律）：
+        //   第 1 遍 —— 只做 L3 工具遮蔽 + 摘要折叠（有摘要才折）。预算够就全给。
+        //   第 2 遍 —— 确实超水位才加码：骨架化旧回答；允许时再强制折叠旧轮。
+        //
+        // 从前 forceCollapse 一上来就把旧轮全折掉 —— 预算还空着也看不见早前对话，
+        // 正是「压缩不好用」的观感来源：不是压缩得太狠，是压得太早。
+        var first = ProjectCore(all, opt, skeletonize: false, forceCollapse: false);
+        if (!first.NeedsCompression)
         {
             return first;
         }
 
-        var second = ProjectCore(all, opt, skeletonize: true, forceCollapse);
+        var second = ProjectCore(
+            all,
+            opt,
+            skeletonize: opt.SkeletonizeOldAssistant,
+            forceCollapse: forceCollapse);
+
         return second.EstimatedTokens < first.EstimatedTokens ? second : first;
     }
 
@@ -84,8 +99,10 @@ public static class SessionContextBuilder
         // ── 0) 先读历史压缩留痕 ─────────────────────────────
         //   · MaskedSeqs：钉死遮蔽态 —— 「当时遮蔽过的，之后不会又展开」
         //   · Summary  ：老历史的"替身"，取最后一条
+        //   · SummaryThroughTurn：摘要覆盖到第几轮 —— 超出部分要如实标注，不能装作摘要什么都有
         var frozenMasked = new HashSet<long>();
         string? summary = null;
+        int? summaryThroughTurn = null;
 
         foreach (var sessionEvent in all)
         {
@@ -102,6 +119,7 @@ public static class SessionContextBuilder
             if (!string.IsNullOrWhiteSpace(compacted.Summary))
             {
                 summary = compacted.Summary;
+                summaryThroughTurn = compacted.SummaryThroughTurn;
             }
         }
 
@@ -174,41 +192,68 @@ public static class SessionContextBuilder
 
         if (collapseOld)
         {
-            messages.Add(new LlmMessage
+            var note = summary is not null
+                ? "【早期对话摘要·非用户发言】原始事件仍在会话日志中，需要细节时可回到原文检索。\n" + summary
+                : "【早期对话已折叠·非用户发言】以下为最近几轮对话。更早的 "
+                  + cutoff
+                  + " 轮已折叠以节省上下文；原始事件仍在会话日志中，需要细节时用 search_history 检索，或向用户确认。";
+
+            // 摘要不是万能替身 —— 它只覆盖写它时已折叠的轮次。
+            // 之后又变旧的轮次超出覆盖范围时，如实标注，绝不假装摘要什么都有。
+            if (summary is not null && summaryThroughTurn is int covered && covered < cutoff)
             {
-                Role = LlmRole.User,
-                Content = summary is not null
-                    ? "【早期对话摘要·非用户发言】原始事件仍在会话日志中，需要细节时可回到原文检索。\n" + summary
-                    : "【早期对话已折叠·非用户发言】以下为最近几轮对话。更早的 "
-                      + cutoff
-                      + " 轮已折叠以节省上下文；原始事件仍在会话日志中，需要细节时用 search_history 检索，或向用户确认。",
-            });
+                note += $"\n（摘要覆盖至第 {covered} 轮；其后至第 {cutoff} 轮的对话也已折叠，"
+                    + "如需其中细节请用 search_history 检索，或向用户确认。）";
+            }
+
+            messages.Add(new LlmMessage { Role = LlmRole.User, Content = note });
         }
 
         foreach (var sessionEvent in all)
         {
-            var isOld = cutoff > 0
-                && turnOfSeq.TryGetValue(sessionEvent.Seq, out var owner)
-                && owner <= cutoff;
+            var hasTurn = turnOfSeq.TryGetValue(sessionEvent.Seq, out var owner);
+            var isOld = cutoff > 0 && hasTurn && owner <= cutoff;
 
-            // 窗口外的对话消息 —— 无论折不折叠都收集起来：L5 的滚动摘要要用它
+            // 窗口外的对话消息 —— 无论折不折叠都收集起来：L5 的滚动摘要要用它。
+            //
+            // INV-C1（压缩产物再入禁止）—— 这里是「压缩输入主体」的取材口，两道闸都在这：
+            //   1) 已被摘要产物**覆盖**的轮次不再取材：那些轮次的压缩产物（摘要）会在
+            //      previousSummary 里到场，原料与产物同台 = 同一信息二次压缩、重复计数、
+            //      放大漂移。增量摘要的语义本来就是「旧摘要 + 只补新进展」。
+            //      覆盖线未知（老日志 SummaryThroughTurn=null）时保守放行：宁可多重一遍，
+            //      不可静默丢轮次。
+            //   2) 合成复述块（【…·非用户发言】）永不取材：它本身就是复述/压缩产物的载体。
             if (isOld)
             {
-                switch (sessionEvent)
-                {
-                    case UserMessageEvent oldUser:
-                        olderMessages.Add(new LlmMessage { Role = LlmRole.User, Content = oldUser.ModelVisibleText });
-                        break;
+                var coveredBySummary = summary is not null
+                    && summaryThroughTurn is int coveredTurn
+                    && owner <= coveredTurn;
 
-                    case AssistantMessageEvent oldAssistant:
-                        olderMessages.Add(new LlmMessage { Role = LlmRole.Assistant, Content = oldAssistant.Text });
-                        break;
+                if (!coveredBySummary)
+                {
+                    switch (sessionEvent)
+                    {
+                        case UserMessageEvent oldUser when !SyntheticContent.IsSynthetic(oldUser.ModelVisibleText):
+                            olderMessages.Add(new LlmMessage { Role = LlmRole.User, Content = oldUser.ModelVisibleText });
+                            break;
+
+                        case AssistantMessageEvent oldAssistant when !SyntheticContent.IsSynthetic(oldAssistant.Text):
+                            olderMessages.Add(new LlmMessage { Role = LlmRole.Assistant, Content = oldAssistant.Text });
+                            break;
+                    }
                 }
             }
 
             // 老轮次已被摘要覆盖 → 整段跳过，免得摘要与原文重复一遍
             if (isOld && collapseOld)
             {
+                // 被折叠掉的工具结果同样属于「模型看不到的内容」—— 记进 MaskedSeqs：
+                // 既是审计（压缩必须记录被遮蔽的序号），也是钉子（之后放宽窗口也不会突然展开）。
+                if (sessionEvent is ToolCallCompletedEvent hidden)
+                {
+                    maskedSeqs.Add(hidden.Seq);
+                }
+
                 continue;
             }
 

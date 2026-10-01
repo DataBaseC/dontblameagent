@@ -651,6 +651,235 @@ Check("关掉 L6 后与旧行为一致（逐字保留）",
     SessionContextBuilder.Project(dialogueEvents, WithBudget(dialogueOpts, 900, skeletonize: false))
         .Messages.Count(m => m.Role == LlmRole.Assistant && m.Content!.StartsWith("[已骨架化")) == 0);
 
+// ── 12. checkpoint-writer（MiMo writer 子代理：后台提取、single-writer）──
+Section("12. checkpoint-writer（后台提取不阻塞回合、single-writer）");
+
+var gated = new GatedSummarizer();
+var cwRoot = Path.Combine(root, "checkpoint-writer");
+var cwOptions = new HostOptions
+{
+    WorkspaceRoot = Path.Combine(cwRoot, "ws"),
+    SessionsDir = Path.Combine(cwRoot, "sessions"),
+    SessionId = "cw",
+    LlmOverride = new LongTextClient(),
+    ApprovalPolicy = _ => ApprovalDecision.Allow,
+    ContextSummarizerOverride = gated,
+    Context = new ContextOptions
+    {
+        TokenBudget = 300,
+        CompressionTriggerRatio = 0.95,   // 压缩线放最高：本节只考 checkpoint 提取
+        EarlySummarizeRatio = 0.3,
+        RecentTurnsKeptVerbatim = 2,
+        InlineResultLimit = 2_000,
+    },
+};
+
+var cwWatch = System.Diagnostics.Stopwatch.StartNew();
+await using (var host = await AgentHost.CreateAsync(cwOptions))
+{
+    for (var i = 1; i <= 4; i++)
+    {
+        await host.SendAsync($"第 {i} 步：说明你打算怎么处理 f{i}.txt。" + new string('。', 200));
+    }
+
+    cwWatch.Stop();
+
+    // writer 的门一直关着 —— 若回合在等它，这里根本走不到
+    Check("★ 回合不等 writer（门关着，4 轮照样全部返回）", cwWatch.ElapsedMilliseconds < 10_000,
+        $"{cwWatch.ElapsedMilliseconds}ms");
+    Check("★ writer 已被派发（至少调用一次）", gated.Calls >= 1, $"{gated.Calls} 次");
+    Check("writer 未完成时没有摘要事件（稿子还在后台）",
+        host.Events().OfType<ContextCompactedEvent>().Count(e => e.Trigger == CompactionTrigger.Early) == 0);
+
+    // single-writer：writer 在跑时不许再派第二个
+    await host.SendAsync("第 5 步：同上。" + new string('。', 200));
+    Check("★ writer 在跑时不再派发（single-writer、防堆积）", gated.Calls == 1, $"{gated.Calls} 次");
+
+    // 放行 writer → 稿子在下一轮边界落成摘要事件
+    gated.Gate.SetResult();
+    for (var w = 0; w < 60 && gated.Done == 0; w++)
+    {
+        await Task.Delay(50);
+    }
+
+    await host.SendAsync("第 6 步：收个尾。");
+
+    var earlyEvents = host.Events().OfType<ContextCompactedEvent>()
+        .Where(e => e.Trigger == CompactionTrigger.Early).ToList();
+    Check("★ 稿子在回合边界落成摘要事件（trigger=early）",
+        earlyEvents.Count >= 1 && earlyEvents[0].Summary?.Contains("工作记忆") == true,
+        $"{earlyEvents.Count} 条");
+    Check("覆盖线如实记录（SummaryThroughTurn > 0）",
+        earlyEvents.Count >= 1 && earlyEvents[0].SummaryThroughTurn > 0,
+        earlyEvents.Count >= 1 ? $"{earlyEvents[0].SummaryThroughTurn}" : "-");
+
+    var checkpointFile = Path.Combine(cwOptions.SessionsDir, "checkpoints", "cw.md");
+    Check("★ 结构化检查点文件已落盘（single-writer 产出）", File.Exists(checkpointFile));
+}
+
+// ── 13. 压缩产物再入禁止（INV-C1：摘要产物永不作为压缩输入主体）──
+Section("13. 压缩产物再入禁止（INV-C1：摘要产物永不作为压缩输入主体）");
+
+// A. 覆盖线内的轮次不再进压缩原料 —— 原料与产物不同台，同一信息不二次压缩
+var invCovered = BuildInvariantSession();
+invCovered.Add(new ContextCompactedEvent
+{
+    Seq = 9001,
+    SessionId = "inv",
+    Timestamp = DateTimeOffset.UtcNow,
+    Summary = "INVC1-S1 早期对话摘要正文（这是压缩产物）",
+    SummaryThroughTurn = 3,
+    MaskedSeqs = [],
+    MaskedCount = 0,
+    CollapsedTurns = 0,
+});
+var invProj = SessionContextBuilder.Project(invCovered, WithBudget(new ContextOptions(), 100_000, keptTurns: 2));
+var invTranscript = string.Join("\n", invProj.OlderMessages.Select(m => m.Content));
+Check("★ 已被摘要覆盖的轮次不再进压缩原料（原料与产物不同台）",
+    !invTranscript.Contains("INVC1-U1")
+        && !invTranscript.Contains("INVC1-U2")
+        && !invTranscript.Contains("INVC1-U3"),
+    $"原料 {invProj.OlderMessages.Count} 条");
+Check("覆盖线之后的旧轮仍是原料（增量只补新进展）",
+    invTranscript.Contains("INVC1-U4") && invTranscript.Contains("INVC1-A4"));
+Check("★ 压缩产物（摘要）本身永不在压缩原料里",
+    !invTranscript.Contains("INVC1-S1") && !invTranscript.Contains("摘要正文"));
+
+// B. 合成复述块（【…·非用户发言】）永不取材 —— 它是复述产物的载体
+var invSyn = BuildInvariantSession(syntheticTurn: 2);
+var invSynProj = SessionContextBuilder.Project(invSyn, WithBudget(new ContextOptions(), 100_000, keptTurns: 2));
+var invSynTranscript = string.Join("\n", invSynProj.OlderMessages.Select(m => m.Content));
+Check("★ 合成复述块不进压缩原料（计划文件/摘要注记不再被压一遍）",
+    !invSynTranscript.Contains("INVC1-PLAN") && !invSynTranscript.Contains("非用户发言"),
+    $"{invSynProj.OlderMessages.Count} 条原料");
+Check("合成块旁的真对话照常取材（只挡复述，不挡原文）",
+    invSynTranscript.Contains("INVC1-A2") && invSynTranscript.Contains("INVC1-U3"));
+
+// C. 没有摘要产物时行为不变：旧轮全量取材（老语义不回归）
+var invPlain = SessionContextBuilder.Project(
+    BuildInvariantSession(), WithBudget(new ContextOptions(), 100_000, keptTurns: 2));
+var invPlainTranscript = string.Join("\n", invPlain.OlderMessages.Select(m => m.Content));
+Check("无摘要时旧轮照常全量取材（老日志/首轮语义不变）",
+    invPlainTranscript.Contains("INVC1-U1") && invPlainTranscript.Contains("INVC1-U4"));
+
+// D. 老日志覆盖线未知（SummaryThroughTurn=null）→ 保守放行，宁多重一遍不静默丢轮次
+var invLegacy = BuildInvariantSession();
+invLegacy.Add(new ContextCompactedEvent
+{
+    Seq = 9002,
+    SessionId = "inv",
+    Timestamp = DateTimeOffset.UtcNow,
+    Summary = "INVC1-S1 老日志摘要（没有覆盖线字段）",
+    SummaryThroughTurn = null,
+    MaskedSeqs = [],
+    MaskedCount = 0,
+    CollapsedTurns = 0,
+});
+var invLegacyProj = SessionContextBuilder.Project(invLegacy, WithBudget(new ContextOptions(), 100_000, keptTurns: 2));
+var invLegacyTranscript = string.Join("\n", invLegacyProj.OlderMessages.Select(m => m.Content));
+Check("覆盖线未知时保守放行（不静默丢轮次）",
+    invLegacyTranscript.Contains("INVC1-U1") && invLegacyTranscript.Contains("INVC1-U4"));
+
+// E. 摘要器边界同一条纪律：合成块绝不作为被压缩的正文（防守未来事件化注入）
+var capture = new CapturingClient();
+var invSummarizer = new AgentFramework.Llm.LlmContextSummarizer(
+    capture, new AgentFramework.Llm.LlmContextSummarizerOptions { MinMessages = 2 });
+var mixedSubjects = new List<LlmMessage>
+{
+    new() { Role = LlmRole.User, Content = "【早期对话摘要·非用户发言】\nINVC1-S1 旧摘要产物正文" },
+    new() { Role = LlmRole.User, Content = "INVC1-U9 正常用户消息一" },
+    new() { Role = LlmRole.Assistant, Content = "INVC1-A9 正常助手回复" },
+    new() { Role = LlmRole.User, Content = "INVC1-U10 正常用户消息二" },
+};
+await invSummarizer.SummarizeHistoryAsync(mixedSubjects, null);
+Check("★ 摘要器把合成复述块挡在正文外（INV-C1 第 3 条）",
+    capture.LastPrompt is not null
+        && capture.LastPrompt.Contains("INVC1-U9")
+        && !capture.LastPrompt.Contains("INVC1-S1")
+        && !capture.LastPrompt.Contains("非用户发言"),
+    capture.Calls == 1 ? "1 次调用" : $"{capture.Calls} 次调用");
+
+var onlySynthetic = new List<LlmMessage>
+{
+    new() { Role = LlmRole.User, Content = "【任务卡·非用户发言】\nINVC1-CARD 任务卡正文" },
+};
+var emptyOut = await invSummarizer.SummarizeHistoryAsync(onlySynthetic, null);
+Check("原料全被滤掉时不空转（返回空、调用方沿用旧摘要）",
+    emptyOut.Length == 0 && capture.Calls == 1);
+
+// F. 端到端：两次压缩之间，产物只以背景身份到场，正文里没有它、也没有它覆盖过的原料
+var rec = new RecordingSummarizer();
+var invRoot = Path.Combine(root, "inv-c1");
+var invOptions = new HostOptions
+{
+    WorkspaceRoot = Path.Combine(invRoot, "ws"),
+    SessionsDir = Path.Combine(invRoot, "sessions"),
+    SessionId = "inv",
+    LlmOverride = new LongTextClient(),
+    ApprovalPolicy = _ => ApprovalDecision.Allow,
+    ContextSummarizerOverride = rec,
+    Context = new ContextOptions
+    {
+        TokenBudget = 4_000,
+        CompressionTriggerRatio = 0.5,
+        RecentTurnsKeptVerbatim = 6,
+        EarlySummarizeRatio = 0,   // 关掉提前摘要：本节只考压缩链路，摘要调用必须可预期
+    },
+};
+
+await using (var host = await AgentHost.CreateAsync(invOptions))
+{
+    // 闲聊模式：回合里不自动压缩 —— 两次压缩都由 ManualCompactAsync 显式驱动，摘要调用可预期
+    host.SetCurrentMode("chat");
+
+    for (var i = 1; i <= 4; i++)
+    {
+        await host.SendAsync($"INVC1-U{i} 请按第 {i} 步推进任务。" + new string('。', 120));
+    }
+
+    // 水位自适应：预算收到「压缩器收得动」为止（方案非空 = 有得收），
+    // 于是第一次手动压缩必然成功 —— 不靠对 token 估算的神机妙算。
+    TuneBudgetForCompaction(host, invOptions, minWindow: 2);
+    var (ok1, sum1, _, _, err1) = await host.ManualCompactAsync();
+    Check("★ 第一次压缩正常产出摘要", ok1 && sum1?.Contains("INVC1-S1") == true,
+        err1 ?? sum1?.Split('\n')[0] ?? "(null)");
+
+    for (var i = 5; i <= 6; i++)
+    {
+        await host.SendAsync($"INVC1-U{i} 请按第 {i} 步推进任务。" + new string('。', 120));
+    }
+
+    TuneBudgetForCompaction(host, invOptions);
+    var (ok2, sum2, _, _, err2) = await host.ManualCompactAsync();
+    Check("★ 第二次压缩（增量）正常产出新摘要", ok2 && sum2?.Contains("INVC1-S2") == true,
+        err2 ?? sum2?.Split('\n')[0] ?? "(null)");
+
+    Check("两次压缩共两次摘要调用（闲聊模式无旁路 writer 添乱）",
+        rec.Calls.Count == 2, $"{rec.Calls.Count} 次");
+
+    var coverage1 = host.Events().OfType<ContextCompactedEvent>().First().SummaryThroughTurn;
+    var call2 = rec.Calls.Count >= 2 ? rec.Calls[1] : default;
+
+    Check("★ 增量摘要只把旧产物当背景（previousSummary = 上一版摘要）",
+        call2.Previous?.Contains("INVC1-S1") == true,
+        call2.Previous?.Split('\n')[0] ?? "(null)");
+    Check("★ 摘要产物永不作为压缩输入主体（第二次正文里没有它）",
+        call2.Transcript is not null
+            && !call2.Transcript.Contains("INVC1-S1")
+            && !call2.Transcript.Contains("INVC1-S2"));
+
+    var secondTurns = System.Text.RegularExpressions.Regex
+        .Matches(call2.Transcript ?? "", @"INVC1-U(\d+)")
+        .Select(m => int.Parse(m.Groups[1].Value))
+        .Distinct()
+        .ToList();
+    Check("★ 已被产物覆盖的轮次不再入正文（原料不与产物同台）",
+        secondTurns.All(i => i > (coverage1 ?? 0)),
+        $"覆盖至第 {coverage1?.ToString() ?? "?"} 轮；正文含 {string.Join(",", secondTurns)}");
+    Check("第二次正文只含新进展（有新原料）",
+        secondTurns.Count > 0, $"正文 {call2.Transcript?.Length ?? 0} 字符");
+}
+
 // ── 收尾 ───────────────────────────────────────────────────
 Console.WriteLine();
 Console.WriteLine($"═══ 结果：{passes} 通过 / {failures} 失败 ═══");
@@ -737,6 +966,65 @@ List<SessionEvent> BuildLongSession(int turns, int toolResultChars)
     return events;
 }
 
+/// <summary>INV-C1 用：6 轮纯对话，每轮带唯一标记（INVC1-U{i} / INVC1-A{i}）。</summary>
+List<SessionEvent> BuildInvariantSession(int syntheticTurn = 0)
+{
+    var events = new List<SessionEvent>();
+    long seq = 0;
+
+    void Add(SessionEvent sessionEvent)
+    {
+        sessionEvent.Seq = ++seq;
+        sessionEvent.SessionId = "inv";
+        sessionEvent.Timestamp = DateTimeOffset.UtcNow;
+        events.Add(sessionEvent);
+    }
+
+    for (var i = 1; i <= 6; i++)
+    {
+        Add(i == syntheticTurn
+            ? new UserMessageEvent
+            {
+                Text = "【计划文件·非用户发言】（plans/plan.md —— 每轮重新注入）\nINVC1-PLAN 计划正文（合成复述块）",
+            }
+            : new UserMessageEvent { Text = $"INVC1-U{i} 用户消息正文（第 {i} 轮）。" + new string('。', 80) });
+        Add(new AssistantMessageEvent { Text = $"INVC1-A{i} 助手回复正文（第 {i} 轮）。" + new string('。', 80) });
+    }
+
+    return events;
+}
+
+/// <summary>
+/// 水位自适应：把预算收到「压缩器收得动」（方案非空）为止 ——
+/// 手动压缩要方案非空才有戏，与其猜 token 估算，不如直接问压缩器。
+/// <paramref name="minWindow"/>：期望压缩后保留的窗口下限（第一轮要给后续留出收紧余地）。
+/// </summary>
+static void TuneBudgetForCompaction(AgentHost host, HostOptions options, int minWindow = 1)
+{
+    for (var pass = 0; pass < 2; pass++)
+    {
+        var budget = options.Context.TokenBudget;
+
+        for (var i = 0; i < 14 && budget > 40; i++)
+        {
+            options.Context.TokenBudget = budget;
+
+            // 与闲聊模式的生效值对齐（ManualCompactAsync 走 EffectiveContextOptions）
+            var effective = options.Context.Clone();
+            effective.MaskOldToolResults = false;
+            effective.InjectTaskCard = false;
+
+            var plan = ContextCompactor.Plan(host.Events(), effective, forceCollapse: true);
+            if (plan is not null && (pass == 1 || plan.Tightened.RecentTurnsKeptVerbatim >= minWindow))
+            {
+                return;
+            }
+
+            budget = Math.Max(40, (int)(budget * 0.85));
+        }
+    }
+}
+
 static int PickFreePort()
 {
     var listener = new TcpListener(IPAddress.Loopback, 0);
@@ -775,6 +1063,107 @@ internal sealed class AlternatingToolClient : ILlmClient
                 "好的，已经读过了。这里是一段用来把上下文顶上去的说明文字，模拟真实长任务里的对话长度。");
         }
 
+        yield return new LlmStreamChunk.Completed("stop");
+    }
+}
+
+/// <summary>永远回一段固定长文本、一步收尾的假模型 —— 给 checkpoint-writer 一节造水位。</summary>
+internal sealed class LongTextClient : ILlmClient
+{
+    public string Name => "long-text";
+
+    public async IAsyncEnumerable<LlmStreamChunk> StreamAsync(
+        LlmRequest request,
+        [EnumeratorCancellation] CancellationToken ct = default)
+    {
+        await Task.Yield();
+        yield return new LlmStreamChunk.TextDelta(
+            "处理方案如下：先读取目标文件、确认字段顺序，再按既有接口实现，不改动第 1 轮定下的签名；"
+            + "完成后运行校验脚本确认输出一致，并把结论记进工作记录。这里补一段说明以模拟真实任务的回复长度。");
+        yield return new LlmStreamChunk.Completed("stop");
+    }
+}
+
+/// <summary>
+/// 可控门的假摘要器：门没开就一直不返回 —— 用来证明「回合不等 writer」与 single-writer。
+/// </summary>
+internal sealed class GatedSummarizer : IContextSummarizer
+{
+    public TaskCompletionSource Gate { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    private int _calls;
+    public int Calls => _calls;
+
+    private int _done;
+    public int Done => _done;
+
+    public ValueTask<string> SummarizeHistoryAsync(
+        IReadOnlyList<LlmMessage> messages,
+        string? taskCard,
+        string? previousSummary = null,
+        CancellationToken ct = default)
+    {
+        Interlocked.Increment(ref _calls);
+
+        return new ValueTask<string>(Gate.Task.ContinueWith(_ =>
+        {
+            Interlocked.Increment(ref _done);
+            return "## 当前意图\n第 1 轮定下的接口不能改。（工作记忆·测试稿）\n## 下一步动作\n继续处理剩余文件。";
+        }));
+    }
+}
+
+/// <summary>
+/// 记录每一次摘要调用的完整输入 —— INV-C1 断言的证据来源：
+/// 正文里有什么、没有谁，previousSummary 是谁，全部可对账。
+/// </summary>
+internal sealed class RecordingSummarizer : IContextSummarizer
+{
+    public readonly record struct Call(string? Previous, string? TaskCard, string? Transcript);
+
+    private readonly object _gate = new();
+    private readonly List<Call> _calls = [];
+
+    public IReadOnlyList<Call> Calls
+    {
+        get { lock (_gate) { return _calls.ToList(); } }
+    }
+
+    public ValueTask<string> SummarizeHistoryAsync(
+        IReadOnlyList<LlmMessage> messages,
+        string? taskCard,
+        string? previousSummary = null,
+        CancellationToken ct = default)
+    {
+        var transcript = string.Join("\n", messages.Select(m => m.Content ?? string.Empty));
+
+        lock (_gate)
+        {
+            _calls.Add(new Call(previousSummary, taskCard, transcript));
+            return ValueTask.FromResult($"INVC1-S{_calls.Count} 工作记忆（第 {_calls.Count} 版）。");
+        }
+    }
+}
+
+/// <summary>捕获摘要器发出的 prompt —— 考 LlmContextSummarizer 的 INV-C1 边界。</summary>
+internal sealed class CapturingClient : ILlmClient
+{
+    private int _calls;
+    public int Calls => _calls;
+
+    public string Name => "capturing";
+
+    public string? LastPrompt { get; private set; }
+
+    public async IAsyncEnumerable<LlmStreamChunk> StreamAsync(
+        LlmRequest request,
+        [EnumeratorCancellation] CancellationToken ct = default)
+    {
+        Interlocked.Increment(ref _calls);
+        LastPrompt = string.Join("\n", request.Messages.Select(m => m.Content ?? string.Empty));
+
+        await Task.Yield();
+        yield return new LlmStreamChunk.TextDelta("INVC1-S9 压缩产物正文（由假模型产出）");
         yield return new LlmStreamChunk.Completed("stop");
     }
 }

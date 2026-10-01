@@ -324,9 +324,17 @@
   @keyframes bounce { 0%, 60%, 100% { transform: none; } 30% { transform: translateY(-5px); } }
   @keyframes stopPulse { 0%, 100% { box-shadow: 0 0 0 0 rgba(255, 107, 107, .25); }
                          50% { box-shadow: 0 0 0 5px rgba(255, 107, 107, 0); } }
-  /* 尊重系统"减少动态效果"设置 —— 动画是调味，不是门槛 */
+  /* 尊重系统"减少动态效果"设置 —— 装饰动画（滑入/上浮/光晕）全停；
+     但**状态指示器**保留最小反馈：思考点/转圈/打字光标是功能，不是调味 ——
+     一刀切 animation:none 会把「思考中」变成死图，让人以为功能坏了。
+     位移类动画（bounce/rise）对前庭敏感者最不友好，这里只留纯透明度呼吸与慢速旋转。 */
   @media (prefers-reduced-motion: reduce) {
     *, *::before, *::after { animation: none !important; transition: none !important; }
+    .dots span.dot { animation: dotPulse 1.8s ease-in-out infinite !important; }
+    .dots .dot-label { animation: dotPulse 1.8s ease-in-out infinite !important; }
+    .spin { animation: spin 1.8s linear infinite !important; }
+    .bubble.streaming::after { animation: blink 1.2s steps(2, start) infinite !important; }
+    .busy-dot { animation: pulse 1.8s ease-in-out infinite !important; }
   }
 
   /* ── 底部面板可达性（任务 3）────────────────────────────
@@ -404,6 +412,42 @@
   @keyframes modalIn { from { opacity: 0; transform: translateY(10px) scale(.98); } to { opacity: 1; transform: none; } }
   /* 面板内容行：新增时的轻微滑入（复用 rise，仅统一时长） */
   .mem-row, .plugin-row { animation: fadeIn var(--anim) ease-out; }
+
+  /* ── ④ 开始屏（启动不自动开任务窗口，类 dsh 的「一张白纸 + 一句话开工」）── */
+  #welcome { flex: 1; overflow-y: auto; display: flex; align-items: center; justify-content: center;
+             padding: 28px 20px; }
+  #welcome[hidden] { display: none; }
+  .welcome-card { width: 100%; max-width: 680px; animation: rise .28s cubic-bezier(.2,.7,.3,1) ease-out both; }
+  .welcome-hello { font-size: 25px; font-weight: 650; letter-spacing: .01em; margin: 0 0 10px;
+                   background: linear-gradient(120deg, var(--text), var(--accent-2));
+                   -webkit-background-clip: text; background-clip: text; color: transparent; }
+  .welcome-sub { color: var(--dim); line-height: 1.75; margin: 0 0 20px; }
+  .welcome-sub kbd { font-family: var(--mono); font-size: 11px; color: var(--dim);
+                     background: var(--bg3); border: 1px solid var(--border2); border-bottom-width: 2px;
+                     border-radius: 5px; padding: 1px 6px; }
+  .welcome-chips { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 12px; }
+  .chip { padding: 6px 14px; border-radius: 99px; border: 1px solid var(--border2);
+          background: rgba(255,255,255,.02); color: var(--dim); cursor: pointer; font-size: 12.5px;
+          transition: border-color var(--anim), color var(--anim), background var(--anim), transform var(--anim); }
+  .chip:hover { border-color: var(--accent); color: var(--text); transform: translateY(-1px); }
+  .chip.active { border-color: var(--accent); background: rgba(47,107,255,.16); color: #dce3f0; }
+  .welcome-adv { margin: 0 0 22px; font-size: 12px; color: var(--faint); }
+  .welcome-adv summary { cursor: pointer; user-select: none; }
+  .welcome-adv .dir-row-input { display: flex; gap: 8px; margin-top: 9px; }
+  .welcome-adv input { flex: 1; background: var(--bg3); color: var(--text); border: 1px solid var(--border2);
+                       border-radius: var(--radius-s); padding: 7px 11px; font-size: 12.5px; }
+  .welcome-recent h3 { font-size: 12px; color: var(--faint); font-weight: 500; letter-spacing: .05em;
+                       margin: 0 0 8px; }
+  .recent-item { display: flex; align-items: center; gap: 10px; padding: 9px 12px; border-radius: var(--radius-s);
+                 cursor: pointer; border: 1px solid transparent; transition: background var(--anim), border-color var(--anim); }
+  .recent-item:hover { background: var(--bg3); border-color: var(--border2); }
+  .recent-item .r-name { flex: 1; font-size: 13px; color: #d6dbe4; overflow: hidden;
+                         text-overflow: ellipsis; white-space: nowrap; }
+  .recent-item .r-meta { font-size: 11px; color: var(--faint); flex: 0 0 auto; }
+  .welcome-tip { margin-top: 22px; font-size: 11.5px; color: var(--faint); line-height: 1.8; }
+  /* 开始屏里的输入提示：让「输入区是唯一落点」这件事再明显一点 */
+  footer.welcome-focus .composer textarea { min-height: 52px; font-size: 14.5px; }
+
 </style>
 </head>
 <body>
@@ -418,7 +462,7 @@
 
   <main>
     <header>
-      <b>Agent 对话</b>
+      <b id="app-title" title="回到开始屏（不打断进行中的回合）" style="cursor:pointer">Agent 对话</b>
       <span id="pill-conn" class="pill" title="与服务的实时连接状态">…</span>
       <span id="pill-model" class="pill clickable" title="点击打开 / 收起模型设置">模型</span>
       <span id="pill-tools" class="pill"></span>
@@ -431,8 +475,37 @@
       <span id="pill-rephrase" class="pill clickable" title="点击打开 / 收起转述设置">转述</span>
       <span id="pill-usage" class="pill" title="本次会话累计用量">用量</span>
       <span id="pill-session" class="pill"></span>
+      <span id="pill-workdir" class="pill clickable" title="在文件管理器里打开工作文件夹（文件就落在这里）">📁 工作区</span>
     </header>
     <div id="stream"><div class="wrap" id="wrap"></div></div>
+    <!-- 开始屏：启动**不自动开任务窗口** —— 一张白纸 + 一句话开工；
+         会话只在「用户真正发了第一条消息」时才被创建（类 dsh 的开箱体验）。 -->
+    <div id="welcome" hidden>
+      <div class="welcome-card">
+        <div class="welcome-hello">开始新任务</div>
+        <p class="welcome-sub">
+          在下方输入框说说你要做什么，按 <kbd>Enter</kbd> —— 会自动开一个新任务并开始执行。<br>
+          <kbd>Shift+Enter</kbd> 换行 · <kbd>Esc</kbd> 停止进行中的回合；历史任务在左侧，点开即续。
+        </p>
+        <div class="welcome-chips" id="welcome-modes" title="这个任务用哪种工作模式"></div>
+        <details class="welcome-adv">
+          <summary>工作文件夹（可选 · 默认宿主工作区；文件写入边界与项目记忆都锚定在这里）</summary>
+          <div class="dir-row-input">
+            <input id="welcome-dir" placeholder="留空 = 宿主默认工作区；点「浏览…」挑一个文件夹">
+            <button id="welcome-browse" class="ghost small" type="button">浏览…</button>
+            <button id="welcome-open-dir" class="ghost small" type="button"
+                    title="在文件管理器里打开当前工作文件夹（宿主工作区或本会话项目目录）">📂 打开当前</button>
+          </div>
+        </details>
+        <div class="welcome-recent" id="welcome-recent"></div>
+        <div class="welcome-tip">
+          小提示：任务会自动以你的第一句话命名；长任务可随时切去别的任务，后台照常跑；
+          顶栏各面板（模型 / 记忆 / 技能 / 审批…）在这里也一样可用。
+        </div>
+        <!-- 自诊断：系统开了「减少动态效果」时明说 —— 别让用户以为是功能坏了 -->
+        <div id="welcome-motion-note" class="welcome-tip" hidden style="color:var(--warn)"></div>
+      </div>
+    </div>
     <footer>
       <!-- 阶段指示：agent 干活的每一步（思考 / 调用工具 / 生成）都在这行可见 -->
       <div id="phase" hidden><span class="spin"></span><span id="phase-text"></span></div>
@@ -637,27 +710,8 @@
         </div>
       </div>
 
-      <!-- 新建会话：工作文件夹 + 工作模式（创建后钉住） -->
-      <div id="mode-pick" class="modal-mask" hidden>
-        <div class="modal">
-          <div class="modal-title">新会话 · 选工作文件夹</div>
-          <div class="modal-sub">
-            先定这个会话的工作文件夹（可留空用默认），再点模式创建。
-            模式决定暴露哪些工具与记忆层级 —— 创建后固定，换模式就再开一个新会话。
-          </div>
-          <div class="row" style="margin:8px 0 4px">
-            <span style="font-size:12px; color:var(--dim); flex:0 0 auto">工作文件夹</span>
-            <input id="np-project-dir" placeholder="留空 = 宿主默认工作区；点「浏览…」挑一个文件夹">
-            <button id="np-browse" class="ghost small" type="button">浏览…</button>
-          </div>
-          <div class="modal-sub" style="margin:4px 0 8px">
-            这个文件夹圈住本会话的「写」与项目记忆；「读」不受限，可读硬盘任意目录。创建后钉住，换文件夹就再开一个新会话。
-          </div>
-          <div class="modal-sub" style="margin:0 0 4px">选择工作模式</div>
-          <div id="mode-cards"></div>
-          <div class="modal-acts"><button id="mode-cancel" class="ghost small">取消</button></div>
-        </div>
-      </div>
+      <!-- 新建任务的「模式 + 工作文件夹」选择已并入开始屏（#welcome）：
+           会话只在第一条消息发出时创建 —— 不再有「先建一个空会话」这一步。 -->
 
       <!-- 删除会话：二次确认（破坏性操作不可逆） -->
       <div id="confirm-del" class="modal-mask" hidden>
@@ -1324,7 +1378,7 @@ function autoGrow() {
 
 // ── 工作模式：属会话，创建时选定（HCI）──────────────────
 // 模式不再是宿主全局开关 —— 会话在创建时钉住模式，列表里看徽标，
-// 想换模式就开新会话。选择器在「＋ 新建会话」的弹层里（见 newSession / showModePick）。
+// 想换模式就开新任务：开始屏的模式 chips 选定后，第一条消息即按该模式创建会话。
 
 // ── 输入转述（澄清模式）───────────────────────────────────
 // 手动为主：点「✨ 优化」→ 结果回填输入框，可撤销。
@@ -1483,6 +1537,14 @@ async function send() {
   const text = input.value.trim();
   const images = pendingImages.slice();
   if (!text && images.length === 0) return;
+
+  // 开始屏：会话在「第一条消息真正要发出」这一刻才诞生 ——
+  // 空会话从不存在，自然也不占侧栏、不留「(空会话)」残骸。
+  if (!windowOpen) {
+    const started = await startSend();
+    if (!started) return;   // 创建失败：输入框一个字都不动（绝不弄丢用户正在写的话）
+  }
+
   input.value = '';
   input.style.height = 'auto';
   hint.textContent = '';
@@ -1509,13 +1571,19 @@ async function send() {
   } catch (err) {
     hint.textContent = '发送失败：' + err.message;
   } finally {
+    startingSession = false;
     if (!turnRunning) input.focus();
   }
 }
 
 function renderSessions(sessions, current) {
+  lastSessions = sessions.slice();
   sessionList.innerHTML = '';
   sessions.forEach((s) => {
+    // 「没开始的任务不占侧栏」：0 条消息的空会话只是还没开工的壳 ——
+    // 新任务的会话由第一条消息创建，正常情况下根本轮不到这条过滤。
+    const live = busySessions.has(s.id) || (windowOpen && s.id === currentSessionId);
+    if (s.messageCount === 0 && !live) return;
     const item = document.createElement('div');
     item.className = 'session' + (s.isCurrent ? ' current' : '');
     item.dataset.id = s.id;
@@ -1525,9 +1593,9 @@ function renderSessions(sessions, current) {
     const meta = document.createElement('div');
     meta.className = 'session-meta';
     const projName = s.projectDir ? s.projectDir.split(/[\\/]/).filter(Boolean).pop() : null;
-    meta.textContent = s.id + ' · ' + s.messageCount + ' 条消息 · ' + (modeCatalog[s.mode] || s.mode || 'work')
+    meta.textContent = (relTime(s.updatedAt) || s.id) + ' · ' + s.messageCount + ' 条消息 · ' + (modeCatalog[s.mode] || s.mode || 'work')
       + (projName ? ' · 📁' + projName : '');
-    meta.title = '工作模式：' + (modeCatalog[s.mode] || s.mode || 'work')
+    meta.title = s.id + '\n工作模式：' + (modeCatalog[s.mode] || s.mode || 'work')
       + (s.projectDir ? '\n项目目录：' + s.projectDir : '\n项目目录：宿主默认工作区');
     item.appendChild(name);
     item.appendChild(meta);
@@ -1569,7 +1637,7 @@ function renderSessions(sessions, current) {
     item.onclick = () => switchSession(s.id);
     sessionList.appendChild(item);
   });
-  if (current) {
+  if (current && windowOpen) {
     document.getElementById('pill-session').textContent = '会话 ' + current;
   }
 }
@@ -1606,73 +1674,131 @@ async function switchSession(id) {
       return;
     }
     hint.textContent = '';
+    // 刷新续接：记住「正在看哪个任务」，下次打开页面直接回到它
+    localStorage.setItem('af-open-session', id);
     await afterSessionChange();
   } catch (err) {
     hint.textContent = '切换失败：' + err.message;
   }
 }
 
-async function newSession() {
-  // HCI：模式在创建会话时选定（不再有顶栏切换器）—— 弹出模式选择卡
-  await showModePick();
+// ── 开始屏（启动不自动开任务窗口）──────────────────────────
+// 会话的创建被推迟到「第一条消息真正发出」那一刻（send → startSend）：
+// 空会话不占侧栏、不占心智 —— 用户面对的永远是「一张白纸 + 一句话开工」。
+let windowOpen = false;        // 任务窗口是否打开（false = 停在开始屏）
+let startingSession = false;   // 建会话→发消息的短暂窗口（防 session-switched 广播把人弹回开始屏）
+let welcomeMode = localStorage.getItem('af-mode') || 'work';
+let lastSessions = [];
+
+function showWelcome() {
+  windowOpen = false;
+  document.getElementById('welcome').hidden = false;
+  scroller.hidden = true;
+  document.querySelector('footer').classList.add('welcome-focus');
+  input.placeholder = '说说你要做什么…（Enter 开始一个新任务）';
+  document.getElementById('pill-session').textContent = '新任务';
+  localStorage.removeItem('af-open-session');
+  renderWelcomeModes();
+  renderWelcomeRecent();
+  input.focus();
 }
 
-// ── 新建会话：模式选择弹层 ───────────────────────────
-async function showModePick() {
-  const mask = document.getElementById('mode-pick');
-  const cards = document.getElementById('mode-cards');
-  cards.innerHTML = '<div class="mc-desc">加载模式目录…</div>';
-  mask.hidden = false;
-
-  try {
-    const data = await (await fetch('/api/modes')).json();
-    cards.innerHTML = '';
-    data.modes.forEach((m) => {
-      const card = document.createElement('div');
-      card.className = 'mode-card';
-      const name = document.createElement('div');
-      name.className = 'mc-name';
-      name.textContent = m.name;
-      if (m.custom) {
-        const badge = document.createElement('span');
-        badge.className = 'mc-badge';
-        badge.textContent = '插件';
-        name.appendChild(badge);
-      }
-      const desc = document.createElement('div');
-      desc.className = 'mc-desc';
-      desc.textContent = (m.summary || '')
-        + (m.exposesTools ? '（全工具）' : '（不挂工具）');
-      card.appendChild(name);
-      card.appendChild(desc);
-      card.onclick = () => createSession(m.id);
-      cards.appendChild(card);
-    });
-  } catch (err) {
-    setNotice(cards, 'mc-desc', '模式目录加载失败：' + errText(err));
-  }
+function openWindow() {
+  windowOpen = true;
+  document.getElementById('welcome').hidden = true;
+  scroller.hidden = false;
+  document.querySelector('footer').classList.remove('welcome-focus');
+  input.placeholder = '说点什么…（Enter 发送 / Shift+Enter 换行 / Ctrl+V 贴图）';
 }
 
-async function createSession(mode) {
-  document.getElementById('mode-pick').hidden = true;
-  const projectDir = document.getElementById('np-project-dir').value.trim();
+async function renderWelcomeModes() {
+  await ensureModeCatalog();
+  const box = document.getElementById('welcome-modes');
+  box.innerHTML = '';
+  const ids = Object.keys(modeCatalog);
+  if (!ids.length) return;
+  if (!ids.includes(welcomeMode)) welcomeMode = ids.includes('work') ? 'work' : ids[0];
+  ids.forEach((id) => {
+    const chip = document.createElement('button');
+    chip.type = 'button';
+    chip.className = 'chip' + (id === welcomeMode ? ' active' : '');
+    chip.textContent = modeCatalog[id] || id;
+    chip.title = '用「' + (modeCatalog[id] || id) + '」开始这个任务（决定暴露哪些工具与记忆）';
+    chip.onclick = () => {
+      welcomeMode = id;
+      localStorage.setItem('af-mode', id);
+      renderWelcomeModes();
+      input.focus();
+    };
+    box.appendChild(chip);
+  });
+}
+
+function relTime(iso) {
+  if (!iso) return '';
+  const t = Date.parse(iso);
+  if (!isFinite(t)) return '';
+  const s = Math.max(0, (Date.now() - t) / 1000);
+  if (s < 60) return '刚刚';
+  if (s < 3600) return Math.floor(s / 60) + ' 分钟前';
+  if (s < 86400) return Math.floor(s / 3600) + ' 小时前';
+  if (s < 86400 * 2) return '昨天';
+  if (s < 86400 * 30) return Math.floor(s / 86400) + ' 天前';
+  return new Date(t).toLocaleDateString();
+}
+
+function renderWelcomeRecent() {
+  const box = document.getElementById('welcome-recent');
+  box.innerHTML = '';
+  const recent = lastSessions.filter((s) => s.messageCount > 0).slice(0, 6);
+  if (!recent.length) return;
+  const title = document.createElement('h3');
+  title.textContent = '最近任务 · 点开即续';
+  box.appendChild(title);
+  recent.forEach((s) => {
+    const item = document.createElement('div');
+    item.className = 'recent-item';
+    const name = document.createElement('span');
+    name.className = 'r-name';
+    name.textContent = s.preview;
+    const meta = document.createElement('span');
+    meta.className = 'r-meta';
+    meta.textContent = (relTime(s.updatedAt) || s.id) + ' · ' + (modeCatalog[s.mode] || s.mode || 'work');
+    item.appendChild(name);
+    item.appendChild(meta);
+    item.onclick = () => switchSession(s.id);
+    box.appendChild(item);
+  });
+}
+
+// 开始屏开工：先建会话（带模式与工作文件夹），成功后由 send() 接力发第一条消息。
+// 返回 false = 创建失败（send() 会保留输入框原文，一个字都不丢）。
+async function startSend() {
+  startingSession = true;
   try {
+    const projectDir = (document.getElementById('welcome-dir').value || '').trim();
     const response = await fetch('/api/sessions/new', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ mode, projectDir: projectDir || null })
+      body: JSON.stringify({ mode: welcomeMode, projectDir: projectDir || null })
     });
     const data = await response.json();
     if (!data.ok) {
-      hint.textContent = '创建失败：' + (data.error || response.status);
-      return;
+      hint.textContent = '创建任务失败：' + (data.error || response.status);
+      startingSession = false;
+      return false;
     }
-    hint.textContent = '新会话已就绪（模式：' + data.mode.name
-      + (data.projectDir ? ' · 工作文件夹：' + data.projectDir : ' · 默认工作区') + '）';
+    localStorage.setItem('af-open-session', data.sessionId);
+    openWindow();
+    clearMessages();
     await loadSessions();
-    await switchSession(data.sessionId);
+    await loadStatus();
+    await loadHistory();   // 新任务自然是空的 —— maybeEmptyState 给出行动提示
+    return true;
   } catch (err) {
-    hint.textContent = '创建失败：' + err.message;
+    hint.textContent = '创建任务失败：' + err.message;
+    startingSession = false;
+    return false;
   }
 }
 
@@ -1761,6 +1887,13 @@ async function afterSessionChange() {
   await loadSessions();
   await loadStatus();
   await loadHistory();
+  // 「窗口只为有内容的任务而开」：空会话（例如删光所有任务后的兜底会话）
+  // 不值得单开一个窗口 —— 回开始屏；开工中的 startSend 不受这条影响。
+  if (!startingSession && lastSeq === 0 && !turnRunning) {
+    showWelcome();
+    return;
+  }
+  openWindow();
 }
 async function loadStatus() {
   try {
@@ -1780,9 +1913,19 @@ async function loadStatus() {
     plugins.title = status.plugins.map(p => p.id + '@' + p.version).join(', ');
 
     const sessionPill = document.getElementById('pill-session');
-    sessionPill.textContent = '会话 ' + status.sessionId;
+    sessionPill.textContent = windowOpen ? '会话 ' + status.sessionId : '新任务';
     // B2：记住“当前会话”——增量帧按归属分流就靠它比对。
     currentSessionId = status.sessionId;
+
+    // 工作目录常驻可见 + 一键打开 ——「文件到底落在哪」不该靠猜
+    const workdirPill = document.getElementById('pill-workdir');
+    const workdir = status.projectDir || status.workspaceRoot || '';
+    const workdirName = workdir ? workdir.split(/[\\/]/).filter(Boolean).pop() : '工作区';
+    workdirPill.textContent = '📁 ' + workdirName;
+    workdirPill.title = '工作文件夹：' + (workdir || '（未配置）')
+      + (status.projectDir
+        ? '\n（本会话钉的项目目录；点击在文件管理器里打开）'
+        : '\n（宿主默认工作区；点击在文件管理器里打开）');
 
     // 用量 pill：常驻一眼可见 —— 这是「钱花在哪」唯一的常驻入口
     const usagePill = document.getElementById('pill-usage');
@@ -1921,7 +2064,9 @@ function updateAttachGate() {
   if (!ok) clearPendingImages();
 }
 optimizeBtn.onclick = optimize;
-document.getElementById('new-session').onclick = newSession;
+// 「＋ 新任务」与点标题：都回开始屏 —— 新任务的会话在第一条消息时才创建
+document.getElementById('new-session').onclick = () => { showWelcome(); };
+document.getElementById('app-title').onclick = () => { showWelcome(); };
 
 rephrasePill.onclick = () => { settingsPanel.hidden = !settingsPanel.hidden; };
 // ── 工具包（可见性的最小单位）─────────────────────────
@@ -2271,8 +2416,7 @@ modelPill.onclick = () => {
   modelPanel.hidden = !modelPanel.hidden;
   if (!modelPanel.hidden) loadModels();
 };
-// HCI：模式卡片的点击在 showModePick 里逐卡挂 —— 容器不再需要全局 onclick
-document.getElementById('mode-cancel').onclick = () => { document.getElementById('mode-pick').hidden = true; };
+// HCI：模式选择已并入开始屏（welcome-modes chips）—— 不再有「先建空会话」的弹层
 
 // ── 项目目录：目录浏览弹窗（「浏览…」）─────────────────────
 // 浏览器出于安全拿不到本地绝对路径（showDirectoryPicker 只给句柄），
@@ -2377,18 +2521,40 @@ document.getElementById('dp-cancel').onclick = () => { dirPick.hidden = true; };
 
 document.getElementById('dp-choose').onclick = () => {
   if (!dpPath) { dpState.textContent = '先进入一个目录，再点「就用这个目录」'; return; }
-  document.getElementById('np-project-dir').value = dpPath;
+  document.getElementById('welcome-dir').value = dpPath;
   dirPick.hidden = true;
 };
 
-document.getElementById('np-browse').onclick = () => {
+document.getElementById('welcome-browse').onclick = () => {
   dirPick.hidden = false;
-  const current = document.getElementById('np-project-dir').value.trim();
+  const current = document.getElementById('welcome-dir').value.trim();
   dirBrowse(current || null);
 };
-document.getElementById('mode-pick').onclick = (ev) => {
-  if (ev.target.id === 'mode-pick') ev.target.hidden = true;   // 点遮罩关闭
-};
+
+// 「打开工作目录」：文件到底落在哪，一键在系统文件管理器里看见。
+// 不传 path = 打开当前工作文件夹（本会话项目目录 ?? 宿主工作区）。
+async function openWorkDir(path) {
+  try {
+    const response = await fetch('/api/fs/open', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(path ? { path } : {})
+    });
+    const data = await response.json();
+    if (!data.ok) {
+      hint.textContent = '打开工作目录失败：' + (data.error || response.status);
+      return;
+    }
+    hint.textContent = '已在文件管理器打开：' + data.path;
+    setTimeout(() => {
+      if (hint.textContent.startsWith('已在文件管理器打开')) hint.textContent = '';
+    }, 2500);
+  } catch (err) {
+    hint.textContent = '打开工作目录失败：' + err.message;
+  }
+}
+document.getElementById('pill-workdir').onclick = () => openWorkDir();
+document.getElementById('welcome-open-dir').onclick = () => openWorkDir();
 
 // ── 插件列表与独立面板（dsh 式）─────────────────────
 const pluginsPanel = document.getElementById('plugins-panel');
@@ -2984,9 +3150,11 @@ stream.onmessage = (message) => {
   //   不分流的话，A 的打字机会打进 B 的气泡（currentAssistant 是全局状态）。
   //   兼容性：老帧不带 sessionId 时按当前会话处理（isCurrent = true）。
   const frameSession = data.sessionId || null;
-  const isCurrent = frameSession === null || frameSession === currentSessionId;
+  // 窗口没开（停在开始屏）时任何帧都按“后台”处理：不往隐藏的消息流里渲，
+  // 只把归属会话标成进行中 —— 切过去时由 loadHistory 完整重建，现场不丢。
+  const isCurrent = (frameSession === null || frameSession === currentSessionId) && windowOpen;
   if (!isCurrent && (data.type === 'delta' || data.type === 'reasoning' || data.type === 'event')) {
-    markSessionBusy(frameSession);
+    markSessionBusy(frameSession || currentSessionId);
     return;
   }
 
@@ -3001,6 +3169,9 @@ stream.onmessage = (message) => {
       sealReasoning();
       addApprovalCard(data);
       setPhase('等待你确认：' + (data.toolName || '工具') + ' …');
+    } else {
+      // 等确认的活在别处（或窗口没开）：标忙，让侧栏先知道“有人在等你”
+      markSessionBusy(frameSession || currentSessionId);
     }
   }
   else if (data.type === 'ask-user') {
@@ -3044,6 +3215,8 @@ stream.onmessage = (message) => {
     }
     if (data.sessionId) clearSessionBusy(data.sessionId);
     if (!data.sessionId || data.sessionId === currentSessionId) setTurnRunning(false);
+    // 回合收束即刷新侧栏：新任务的第一句话在此变成标题，条数/时间不过夜
+    loadSessions();
   }
   else if (data.type === 'error') {
     sealReasoning();
@@ -3069,7 +3242,28 @@ stream.onerror = () => setConn(false);
   // 只在打开模型面板时才 loadModels 会让首屏下拉只剩 local/cloud。
   await loadModels();
   await loadRephrase();
-  await loadHistory();
+
+  // HCI：启动**不自动开任务窗口** —— 默认停在开始屏（一张白纸 + 一句话开工）。
+  // 刷新不丢现场：上次打开的任务（localStorage）还在就直接回到它，等同于接着干。
+  const saved = localStorage.getItem('af-open-session');
+  const known = saved && lastSessions.some((s) => s.id === saved && s.messageCount > 0);
+  if (known) {
+    await switchSession(saved);
+  } else {
+    showWelcome();
+  }
+
+  // HCI：系统「减少动态效果」开着时明说 —— 动画静默不是坏了，
+  // 是页面在遵从系统无障碍设置（状态指示已降为最小呼吸样式）。
+  if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+    const motionNote = document.getElementById('welcome-motion-note');
+    if (motionNote) {
+      motionNote.hidden = false;
+      motionNote.textContent = '检测到系统开启了「减少动态效果」：思考动画以最小呼吸样式呈现（不是坏了）。'
+        + '想看完整动画：Windows 设置 → 辅助功能 → 视觉效果 → 打开「动画效果」，然后刷新本页。';
+    }
+  }
+
   input.focus();
 
   // 定期刷新状态栏（工具数/插件数/模式等），避免事件遗漏导致数字滞后

@@ -30,7 +30,15 @@ public sealed record CompactionPlan(
 /// </summary>
 public static class ContextCompactor
 {
-    public static CompactionPlan? Plan(IEnumerable<SessionEvent> events, ContextOptions options)
+    /// <param name="forceCollapse">
+    /// 与 <see cref="SessionContextBuilder.Project"/> 同义：超预算时是否允许强制折叠旧轮。
+    /// 宿主传 true（与它实际装配用的投影一致），让 Before/After 反映真实视图；
+    /// 测试与老调用方不传 = false，行为不变。
+    /// </param>
+    public static CompactionPlan? Plan(
+        IEnumerable<SessionEvent> events,
+        ContextOptions options,
+        bool forceCollapse = false)
     {
         var all = events as IReadOnlyList<SessionEvent> ?? [.. events];
 
@@ -44,7 +52,7 @@ public static class ContextCompactor
             tightened.RecentTurnsKeptVerbatim = Math.Max(1, alreadyTightened);
         }
 
-        var before = SessionContextBuilder.Project(all, tightened);
+        var before = SessionContextBuilder.Project(all, tightened, forceCollapse);
 
         if (!before.NeedsCompression)
         {
@@ -71,7 +79,7 @@ public static class ContextCompactor
                     tightened.RecentTurnsKeptVerbatim,
                     (int)Math.Ceiling(tightened.RecentTurnsKeptVerbatim * (1.0 - before.WaterLevel) * 2)));
             tightened.RecentTurnsKeptVerbatim = target;
-            after = SessionContextBuilder.Project(all, tightened);
+            after = SessionContextBuilder.Project(all, tightened, forceCollapse);
         }
 
         // 关于 L6 骨架化：它随 options 一起进了 tightened（Clone 保留了该开关），

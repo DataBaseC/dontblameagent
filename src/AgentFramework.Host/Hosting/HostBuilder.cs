@@ -384,6 +384,13 @@ public sealed class ModelModule : IHostModule
                 ? null
                 : new LlmContextSummarizer(summarizerClient, new LlmContextSummarizerOptions()));
 
+        // Goal 终止验证器（防提前收工）：与摘要器共用同一套「旁路小模型」解析
+        //（local 优先、认不出回退 active）。配置里没写 goal 就不会被调用，零成本挂着。
+        var goalVerifier = options.GoalVerifierOverride
+            ?? (summarizerClient is null
+                ? null
+                : new LlmGoalVerifier(summarizerClient, new LlmGoalVerifierOptions()));
+
         state.ModelStore = modelStore;
         state.ModelSettings = modelSettings;
         state.Llm = llm;
@@ -392,6 +399,7 @@ public sealed class ModelModule : IHostModule
         state.CloudClient = cloudClient;
         state.Rephraser = rephraser;
         state.ContextSummarizer = contextSummarizer;
+        state.GoalVerifier = goalVerifier;
 
         // 包一层可替换的壳：之后换模型只换它的内层，主循环不用重建
         state.Switchable = new SwitchableLlmClient(llm);
@@ -939,7 +947,15 @@ public sealed class LoopModule : IHostModule
             state.Kernel,
             // 任务 5：包一层**动态读取** —— 运行期切档（替换 options.ApprovalPolicy）立即生效，
             // 不再是「装配时按值捕获、切了也不动」。这正是审查发现的那个坑。
-            e => options.ApprovalPolicy(e),
+            // 完整链条：计划模式闸（读主会话当前 ModeId）→ 输入级规则（last-match-wins）→
+            // 分级审批策略 → external_directory 硬闸
+            e => ApprovalPolicyChain.Decide(
+                state.MainSession?.ModeId,
+                e,
+                options.ApprovalPolicy,
+                options.WorkspaceRoot,
+                options.ApprovalRules,
+                options.AllowExternalDirectory),
             () => state.InteractionProvider?.Invoke() ?? NullUserInteraction.Instance,
             e =>
             {
@@ -969,6 +985,10 @@ public sealed class LoopModule : IHostModule
                 Temperature = options.Temperature,
                 MaxSteps = options.MaxSteps,
                 IncludeUsage = options.IncludeUsage,
+                // Goal 终止验证（防提前收工）：主会话与子会话同权接入；
+                // Order=100 的模型模块已把 GoalVerifier 装好，这里拿到的不是 null。
+                Goal = options.Goal,
+                GoalVerifier = state.GoalVerifier,
                 OnTextDelta = text => state.TextRelay?.Invoke(options.SessionId, text),
                 OnReasoningDelta = text => state.ReasoningRelay?.Invoke(options.SessionId, text),
             });

@@ -2,6 +2,14 @@
 
 | 文档 | 内容 |
 |------|------|
+| [history/CHANGES-v3.19-ui-start-screen.md](history/CHANGES-v3.19-ui-start-screen.md) | **UI：启动不自动开任务窗口**（开始屏 + 会话随第一条消息创建）+ 交互打磨 |
+| [history/CHANGES-v3.18-evolution.md](history/CHANGES-v3.18-evolution.md) | **Dream / Distill**：记忆周期整理 + 从历史固化技能草稿（进化支柱四） |
+| [history/CHANGES-v3.17-invariants-permissions.md](history/CHANGES-v3.17-invariants-permissions.md) | **INV-C1 压缩产物再入禁止** + 权限输入级匹配与 external_directory 硬闸 |
+| [history/CHANGES-v3.16-plan-mode.md](history/CHANGES-v3.16-plan-mode.md) | **Plan 模式**：权限层只读规划 + 计划文件持久化重注入（MiMo plan 档） |
+| [history/CHANGES-v3.15-checkpoint-writer.md](history/CHANGES-v3.15-checkpoint-writer.md) | **checkpoint-writer**：后台记忆提取 + 结构化检查点（MiMo writer 子代理） |
+| [history/CHANGES-v3.14-goal-verifier.md](history/CHANGES-v3.14-goal-verifier.md) | **Goal 终止验证器**：防提前收工（MiMo Goal 机制落地） |
+| [history/CHANGES-v3.13-long-horizon.md](history/CHANGES-v3.13-long-horizon.md) | **长程任务修复批**：自动停止根因修复 + 上下文压缩改造（MiMo Code 机制落地） |
+| [PLAN-mimocode-adoption.md](PLAN-mimocode-adoption.md) | MiMo Code 调研与借鉴路线（Goal 验证器 / checkpoint / 权限 / Dynamic Workflow） |
 | [history/CHANGES-v3.12-hardening.md](history/CHANGES-v3.12-hardening.md) | **安全与正确性加固**（外部代码审查后的 Critical/P0 清理） |
 | [history/CHANGES-v3.11-memory-plan.md](history/CHANGES-v3.11-memory-plan.md) | 记忆与进化：checkpoint 契约先行 |
 | [history/CHANGES-v3.10-toolsets.md](history/CHANGES-v3.10-toolsets.md) | 工具包与暴露面解耦 |

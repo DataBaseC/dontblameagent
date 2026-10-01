@@ -308,6 +308,121 @@ Check("投影：无悬空工具调用异常", state5.Anomalies.Count == 0, strin
 Check("第二次请求带回了 ERROR 工具结果（tool_call 成对）",
     boomClient.ReceivedRequests[1].Messages.Any(m => m.Role == LlmRole.Tool && (m.Content ?? "").StartsWith("ERROR:")));
 
+// ── 7. 端点断流 / 抖动不炸回合（免费端点的真实形态）────────
+Console.WriteLine("\n── 7. 端点断流降级（不抛异常、不丢正文）──");
+
+// 7a：吐了一半之后端点断流 → 不抛异常、半截正文保留、如实报 endpoint-error
+var flaky = new FlakyLlmClient(new FlakyStep("我已经写了一半。", FailAfter: true));
+var host6 = new PluginHost(new PluginHostOptions { DataRoot = Path.Combine(root, "plugin-data") });
+var echo6 = new EchoTool();
+AgentRunResult result6 = default!;
+var threw6 = false;
+try
+{
+    using var log = JsonlEventLog.Open(Path.Combine(root, "s6.jsonl"));
+    var runner6 = new AgentRunner(flaky, () => [echo6], new JsonlSink(log, host6), new AgentOptions
+    {
+        SessionId = "s-6",
+        MaxContinuations = 0,   // 本例只验降级收尾，不走续写
+    });
+    result6 = await runner6.RunAsync("端点断流测试");
+}
+catch
+{
+    threw6 = true;
+}
+
+Check("★ 断流不再抛异常炸掉回合", !threw6);
+Check("如实报 endpoint-error（不假成功）", result6.StopReason == "endpoint-error", result6.StopReason);
+Check("★ 半截正文不丢（进了 FinalText）", result6.FinalText.Contains("我已经写了一半"), result6.FinalText);
+
+// 7b：第一次调用抛瞬时异常、第二次成功 → 重试后回合照常完成
+var flakyOk = new FlakyLlmClient(
+    new FlakyStep(null, FailBefore: true),
+    new FlakyStep("重试之后成功了。", FinishReason: "stop"));
+AgentRunResult result7;
+using (var log = JsonlEventLog.Open(Path.Combine(root, "s7.jsonl")))
+{
+    var runner7 = new AgentRunner(flakyOk, () => [echo6], new JsonlSink(log, host6), new AgentOptions
+    {
+        SessionId = "s-7",
+        MaxContinuations = 0,
+    });
+    result7 = await runner7.RunAsync("瞬时异常重试测试");
+}
+
+Check("★ 瞬时异常自动重试后回合照常完成", result7.Completed && result7.StopReason == "stop", result7.StopReason);
+Check("重试后正文正确", result7.FinalText == "重试之后成功了。", result7.FinalText);
+
+// ── 7c–7f. Goal 终止验证（MiMo Goal 机制：防提前收工）────────
+Console.WriteLine("\n── 7c. Goal 验证：未达成 → 差距反馈继续 → 达成后收尾 ──");
+
+var goalClient = new ScriptedLlmClient(
+    "cloud",
+    new ScriptedTurn(["我认为已经做完了。"], null, "stop"),
+    new ScriptedTurn(["补完测试，现在真的完成了。"], null, "stop"));
+var goalVerifier = new ScriptedGoalVerifier(
+    GoalVerification.NotMet("还缺单元测试"),
+    GoalVerification.Met());
+var host7 = new PluginHost(new PluginHostOptions { DataRoot = Path.Combine(root, "plugin-data") });
+AgentRunResult resultGoal;
+using (var log = JsonlEventLog.Open(Path.Combine(root, "s8.jsonl")))
+{
+    var runner = new AgentRunner(goalClient, () => [echo6], new JsonlSink(log, host7), new AgentOptions
+    {
+        SessionId = "s-goal",
+        Goal = "全部测试通过",
+        GoalVerifier = goalVerifier,
+    });
+    resultGoal = await runner.RunAsync("完成这个任务");
+}
+
+Check("★ 未达成时不放行收尾（带差距继续干）", resultGoal.Completed && resultGoal.Steps == 2, $"{resultGoal.Steps} 步 / {resultGoal.StopReason}");
+Check("★ 差距反馈被送回模型", goalClient.ReceivedRequests[1].Messages.Any(m => m.Role == LlmRole.User && (m.Content ?? "").Contains("还缺单元测试")));
+Check("验证者被调用两次（想收尾就被核验）", goalVerifier.Calls.Count == 2, $"{goalVerifier.Calls.Count} 次");
+Check("核验拿到的是目标与收尾答复", goalVerifier.Calls[0].Goal == "全部测试通过" && goalVerifier.Calls[0].Final.Contains("做完了"));
+
+Console.WriteLine("\n── 7d. Goal 验证：确认做不到 → 如实收尾 ──");
+var impossibleClient = new ScriptedLlmClient("cloud", new ScriptedTurn(["我尽力了。"], null, "stop"));
+var impossibleVerifier = new ScriptedGoalVerifier(GoalVerification.Impossible("沙箱禁止联网"));
+AgentRunResult resultImpossible;
+using (var log = JsonlEventLog.Open(Path.Combine(root, "s9.jsonl")))
+{
+    var runner = new AgentRunner(impossibleClient, () => [echo6], new JsonlSink(log, host7), new AgentOptions
+    {
+        SessionId = "s-goal-imp",
+        Goal = "抓取网页",
+        GoalVerifier = impossibleVerifier,
+    });
+    resultImpossible = await runner.RunAsync("抓取网页");
+}
+
+Check("★ 确认做不到时报 goal-impossible（不空转）", resultImpossible.StopReason == "goal-impossible" && !resultImpossible.Completed, resultImpossible.StopReason);
+Check("障碍写进最终答复", resultImpossible.FinalText.Contains("沙箱禁止联网"));
+
+Console.WriteLine("\n── 7e. Goal 验证器故障时放行（fail-open）──");
+var failOpenClient = new ScriptedLlmClient("cloud", new ScriptedTurn(["做完了。"], null, "stop"));
+AgentRunResult resultFailOpen;
+using (var log = JsonlEventLog.Open(Path.Combine(root, "s10.jsonl")))
+{
+    var runner = new AgentRunner(failOpenClient, () => [echo6], new JsonlSink(log, host7), new AgentOptions
+    {
+        SessionId = "s-goal-open",
+        Goal = "随便什么",
+        GoalVerifier = new ThrowingGoalVerifier(),
+    });
+    resultFailOpen = await runner.RunAsync("验证器故障测试");
+}
+
+Check("★ 验证器炸了也不卡收尾", resultFailOpen.Completed && resultFailOpen.StopReason == "stop", resultFailOpen.StopReason);
+
+Console.WriteLine("\n── 7f. 验证器输出解析 ──");
+Check("NOT_MET 被识别", LlmGoalVerifier.Parse("VERDICT: NOT_MET\nGAP: 缺测试").Verdict == GoalVerdict.NotMet);
+Check("GAP 被提取", LlmGoalVerifier.Parse("VERDICT: NOT_MET\nGAP: 缺测试").Gap == "缺测试");
+Check("IMPOSSIBLE 被识别", LlmGoalVerifier.Parse("VERDICT: IMPOSSIBLE\nGAP: -").Verdict == GoalVerdict.Impossible);
+Check("MET 被识别", LlmGoalVerifier.Parse("VERDICT: MET\nGAP: -").Verdict == GoalVerdict.Met);
+Check("认不出裁决时放行（fail-open）", LlmGoalVerifier.Parse("我想想……").Verdict == GoalVerdict.Met);
+
 // ── 8. SSE 坏帧容错（P0-1）────────────────────────────────
 Console.WriteLine("\n── 8. SSE 坏帧容错 ──");
 
@@ -456,6 +571,89 @@ internal sealed record ScriptedTurn(
     IReadOnlyList<string> TextPieces,
     IReadOnlyList<ToolCallRequest>? ToolCalls,
     string FinishReason);
+
+/// <summary>
+/// 会「抖」的假模型：按脚本逐步执行 —— 每步可以先抛异常、吐一半再抛异常、或正常回放。
+/// 用来验证主循环的重试与降级（免费端点的断流 / 上游过载都是这个形态）。
+/// </summary>
+internal sealed class FlakyLlmClient : ILlmClient
+{
+    private readonly Queue<FlakyStep> _steps;
+
+    public FlakyLlmClient(params FlakyStep[] steps)
+    {
+        _steps = new Queue<FlakyStep>(steps);
+    }
+
+    public string Name => "flaky";
+
+    public async IAsyncEnumerable<LlmStreamChunk> StreamAsync(
+        LlmRequest request,
+        [EnumeratorCancellation] CancellationToken ct = default)
+    {
+        await Task.Yield();
+
+        if (!_steps.TryDequeue(out var step))
+        {
+            yield return new LlmStreamChunk.Completed("stop");
+            yield break;
+        }
+
+        if (step.FailBefore)
+        {
+            throw new InvalidOperationException("端点返回错误帧：Upstream stream terminated unexpectedly");
+        }
+
+        if (step.Text is not null)
+        {
+            yield return new LlmStreamChunk.TextDelta(step.Text);
+        }
+
+        if (step.FailAfter)
+        {
+            throw new InvalidOperationException("端点返回错误帧：Upstream stream terminated unexpectedly");
+        }
+
+        yield return new LlmStreamChunk.Completed(step.FinishReason);
+    }
+}
+
+internal sealed record FlakyStep(
+    string? Text,
+    bool FailBefore = false,
+    bool FailAfter = false,
+    string FinishReason = "stop");
+
+/// <summary>按脚本回放裁决的假目标验证器（队列耗尽后一律 Met）。</summary>
+internal sealed class ScriptedGoalVerifier(params GoalVerification[] verdicts) : IGoalVerifier
+{
+    private readonly Queue<GoalVerification> _verdicts = new(verdicts);
+
+    public List<(string Goal, string Final)> Calls { get; } = [];
+
+    public ValueTask<GoalVerification> VerifyAsync(
+        string goal,
+        string userRequest,
+        IReadOnlyList<LlmMessage> context,
+        string finalText,
+        CancellationToken ct = default)
+    {
+        Calls.Add((goal, finalText));
+        return ValueTask.FromResult(_verdicts.TryDequeue(out var verdict) ? verdict : GoalVerification.Met());
+    }
+}
+
+/// <summary>一调就炸的假目标验证器 —— 验证 fail-open。</summary>
+internal sealed class ThrowingGoalVerifier : IGoalVerifier
+{
+    public ValueTask<GoalVerification> VerifyAsync(
+        string goal,
+        string userRequest,
+        IReadOnlyList<LlmMessage> context,
+        string finalText,
+        CancellationToken ct = default)
+        => throw new InvalidOperationException("验证器炸了");
+}
 
 /// <summary>把事件写进 JSONL，并把审批事件派发到内核事件总线。</summary>
 internal sealed class JsonlSink : IAgentEventSink

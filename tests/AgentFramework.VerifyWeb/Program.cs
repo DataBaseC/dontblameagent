@@ -70,6 +70,28 @@ Check("页面用 SSE 接收流式输出", html.Contains("EventSource('/api/strea
 Check("页面能渲染工具卡片", html.Contains("tool-call-requested") && html.Contains("tool-call-completed"));
 Check("页面带审批卡片", html.Contains("需要你确认") && html.Contains("/api/approve"));
 Check("页面带会话侧边栏", html.Contains("session-list") && html.Contains("/api/sessions"));
+Check("页面带开始屏（启动不自动开任务窗口）",
+    html.Contains("id=\"welcome\"") && html.Contains("开始新任务") && html.Contains("welcome-modes"));
+Check("会话在第一条消息时才创建（空会话从不存在）",
+    html.Contains("startSend") && html.Contains("af-open-session") && html.Contains("windowOpen"));
+Check("开始屏带模式选择与最近任务",
+    html.Contains("welcome-recent") && html.Contains("welcome-dir"));
+Check("减少动态模式保留状态指示动画（思考点/转圈是功能不是装饰）",
+    html.Contains("prefers-reduced-motion") && html.Contains("dotPulse 1.8s"));
+Check("首页响应带协商缓存（换版本不留旧页）",
+    (await http.GetAsync(server.Url)).Headers.CacheControl?.NoCache == true);
+Check("页面带打开工作目录入口（顶栏 pill + /api/fs/open）",
+    html.Contains("pill-workdir") && html.Contains("/api/fs/open"));
+
+// 打开工作目录：只考**拒绝路径**（真放行会弹资源管理器窗口，不在自动测试里弹）
+var openRel = await http.PostAsync(server.Url + "api/fs/open",
+    new StringContent("""{"path":"relative/dir"}""", Encoding.UTF8, "application/json"));
+Check("★ /api/fs/open 拒绝相对路径", (int)openRel.StatusCode == 400, $"{(int)openRel.StatusCode}");
+var openMissing = await http.PostAsync(server.Url + "api/fs/open",
+    new StringContent(
+        JsonSerializer.Serialize(new { path = Path.Combine(Path.GetTempPath(), "af-verify-no-such-" + Guid.NewGuid().ToString("N")) }),
+        Encoding.UTF8, "application/json"));
+Check("★ /api/fs/open 对不存在的目录 404", (int)openMissing.StatusCode == 404, $"{(int)openMissing.StatusCode}");
 Check("页面 favicon 指向内嵌图标", html.Contains("/icon.png") && html.Contains("image/png"));
 
 var iconBytes = await http.GetByteArrayAsync(server.Url + "icon.png");
@@ -96,7 +118,10 @@ Check("初始历史为空",
 Console.WriteLine("\n── 2. 流式对话 + 交互式审批 ──");
 var frames = new List<string>();
 var autoApproved = 0;
-var sseCts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+// 自动放行器要活到**整个套件结束**：后面 10.5 的「同源请求」等回合也会触发
+// write_file 审批，放行器一旦先死，回合会挂在审批上（最长 5 分钟），
+// 连带把「切换会话」类检查全拖垮 —— 15 秒的旧寿命就是那 3 个失败的根因。
+var sseCts = new CancellationTokenSource(TimeSpan.FromSeconds(120));
 
 _ = Task.Run(async () =>
 {
@@ -615,12 +640,42 @@ using (var evilRequest = new HttpRequestMessage(HttpMethod.Post, server.Url + "a
         $"{(int)evilResponse.StatusCode}");
 }
 
+string? sameTurnId = null;
 using (var sameOrigin = new HttpRequestMessage(HttpMethod.Post, server.Url + "api/send"))
 {
     sameOrigin.Headers.Add("Origin", $"http://localhost:{port}");
     sameOrigin.Content = new StringContent("""{"text":"同源请求"}""", Encoding.UTF8, "application/json");
     using var sameResponse = await http.SendAsync(sameOrigin);
+    var sameBody = await sameResponse.Content.ReadAsStringAsync();
     Check("同源 Origin 正常放行", (int)sameResponse.StatusCode == 202, $"{(int)sameResponse.StatusCode}");
+    try
+    {
+        using var doc = JsonDocument.Parse(sameBody);
+        sameTurnId = doc.RootElement.GetProperty("turnId").GetString();
+    }
+    catch
+    {
+        // 拿不到 turnId 就退化为下面的定时兜底
+    }
+}
+
+// ★ 等这个回合真正收尾再做切换类检查：回合可能打到第 6 节留下的真实端点
+// （死端点要几秒才失败），抢跑会撞上「回合正在进行」的合理拒绝 —— 那是测试竞态，不是产品 bug。
+for (var w = 0; w < 40; w++)
+{
+    bool ended;
+    lock (frames)
+    {
+        ended = frames.Any(f => f.Contains("\"type\":\"turn-ended\"")
+            && (sameTurnId is null || f.Contains(sameTurnId)));
+    }
+
+    if (ended)
+    {
+        break;
+    }
+
+    await Task.Delay(500);
 }
 
 // S2：会话 id 路径穿越（switch / delete 两处都拿 id 拼路径）

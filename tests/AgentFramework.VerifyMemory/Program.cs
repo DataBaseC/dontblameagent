@@ -347,8 +347,12 @@ await Task.Delay(500);
 using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(15) };
 
 var page = await http.GetStringAsync(server.Url);
-Check("★ 页面带新建会话选模式（创建时选定，无顶栏切换器）", page.Contains("mode-pick", StringComparison.Ordinal) && page.Contains("/api/modes", StringComparison.Ordinal) && !page.Contains("id=\"pill-mode\"", StringComparison.Ordinal));
-Check("页面带模式差异说明（弹层副标题 + 模式卡描述由 /api/modes 提供）", page.Contains("模式决定暴露哪些工具与记忆层级", StringComparison.Ordinal));
+Check("★ 页面带新建任务选模式（开始屏 chips 选定，创建即钉住）",
+    page.Contains("welcome-modes", StringComparison.Ordinal)
+        && page.Contains("/api/modes", StringComparison.Ordinal)
+        && !page.Contains("id=\"pill-mode\"", StringComparison.Ordinal));
+Check("页面带模式差异说明（chips 提示 + 模式名由 /api/modes 提供）",
+    page.Contains("决定暴露哪些工具与记忆", StringComparison.Ordinal));
 
 using (var doc = JsonDocument.Parse(await http.GetStringAsync(server.Url + "api/status")))
 {

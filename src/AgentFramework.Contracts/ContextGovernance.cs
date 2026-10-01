@@ -21,6 +21,19 @@ public sealed class ContextOptions
     /// </summary>
     public double CompressionTriggerRatio { get; set; } = 0.8;
 
+    /// <summary>
+    /// **提前摘要水位**（MiMo Code 的 checkpoint 早提取）：估算 token 超过
+    /// <c>TokenBudget × 这个值</c> 就先做一次增量摘要落盘，但**不收紧窗口**。
+    ///
+    /// <para>
+    /// 为什么提前：等水位打满再压缩是「抢救」，那时模型的压缩能力正在退化
+    /// （lost-in-the-middle + 无处思考）；提前把状态提取出来，压缩时刻只需「变现」。
+    /// 每次都是对上一次摘要的**增量更新**，不是孤注一掷的重写。
+    /// </para>
+    /// <para>0 = 关闭提前摘要（回到「到 0.8 才一次性处理」的旧行为）。</para>
+    /// </summary>
+    public double EarlySummarizeRatio { get; set; } = 0.45;
+
     /// <summary>最近多少轮对话逐字保留（尾部窗口）。</summary>
     public int RecentTurnsKeptVerbatim { get; set; } = 6;
 
@@ -79,6 +92,7 @@ public sealed class ContextOptions
     {
         TokenBudget = TokenBudget,
         CompressionTriggerRatio = CompressionTriggerRatio,
+        EarlySummarizeRatio = EarlySummarizeRatio,
         RecentTurnsKeptVerbatim = RecentTurnsKeptVerbatim,
         MaskOldToolResults = MaskOldToolResults,
         SkeletonizeOldAssistant = SkeletonizeOldAssistant,
@@ -141,6 +155,12 @@ public static class CompactionTrigger
 {
     public const string Auto = "auto";
     public const string Manual = "manual";
+
+    /// <summary>提前摘要（MiMo Code 式 checkpoint 早提取）：只写摘要、不收紧窗口。</summary>
+    public const string Early = "early";
+
+    /// <summary>回合内护栏：AgentRunner 在单回合内折叠过旧工具结果。</summary>
+    public const string InTurn = "in-turn";
 }
 
 /// <summary>
@@ -151,9 +171,20 @@ public static class CompactionTrigger
 /// </summary>
 public interface IContextSummarizer
 {
-    /// <summary>把一段历史对话压成一段摘要（保持任务目标、约束、已完成结论）。</summary>
+    /// <summary>
+    /// 把一段历史对话压成一段摘要（保持任务目标、约束、已完成结论）。
+    ///
+    /// <para>
+    /// <paramref name="previousSummary"/> 是上一次压缩留下的摘要（可能为 null）：
+    /// 实现应当做**增量更新**（在旧摘要基础上补新内容），而不是每次全量重写 ——
+    /// MiMo Code 的 checkpoint 早提取就是「每次都是增量更新，没有一次是孤注一掷的总结」。
+    /// 也不要「压缩压缩产物」：旧摘要本身只作背景，不做二次压缩的输入主体
+    /// （不变量 <b>INV-C1</b>，细则见 <see cref="SyntheticContent"/>）。
+    /// </para>
+    /// </summary>
     ValueTask<string> SummarizeHistoryAsync(
         IReadOnlyList<LlmMessage> messages,
         string? taskCard,
+        string? previousSummary = null,
         CancellationToken ct = default);
 }

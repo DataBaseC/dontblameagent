@@ -83,9 +83,21 @@ public sealed partial class AgentHost
 
             // 水位超了才压：压缩必然打断前缀缓存，所以宁晚不频。
             // 闲聊模式直接不做这件事 —— 闲聊没有长任务，省掉每轮的投影比较与压缩决策。
-            if (profile.ContextGovernance && projection.NeedsCompression)
+            if (profile.ContextGovernance)
             {
-                projection = await CompactAsync(session, events, projection, contextOptions, ct).ConfigureAwait(false);
+                // 提前摘要（MiMo Code 的 checkpoint 早提取）：到低水位先把「工作记忆」
+                // 增量提取落盘，不收紧窗口；真正压缩时只需「变现」，不必在
+                // 模型压缩能力正在退化的时刻做最关键的总结。
+                if (await MaybeEarlySummarizeAsync(session, events, projection, contextOptions, ct).ConfigureAwait(false))
+                {
+                    // 新摘要刚落盘 → 重新投影，这一轮就用得上它
+                    projection = SessionContextBuilder.Project(session.Events, contextOptions, forceCollapse: true);
+                }
+
+                if (projection.NeedsCompression)
+                {
+                    projection = await CompactAsync(session, events, projection, contextOptions, ct).ConfigureAwait(false);
+                }
             }
 
             // 上下文装配（改造后）：冻结段在前、动态段在后。
@@ -113,6 +125,35 @@ public sealed partial class AgentHost
                 {
                     // user 而非 system：system 只能出现在消息流最前（本地 Jinja 模板会 500）
                     dynamicMessages.Add(new LlmMessage { Role = LlmRole.User, Content = "【工作小本本·非用户发言】\n" + notesSummary });
+                }
+            }
+
+            // 计划文件（plans/plan.md）—— **压缩冲不掉它**：每轮从磁盘重新注入
+            //（MiMo 的计划重注入：rebuild 后计划依旧在眼前）。存在才注入，默认零成本；
+            // 恒定大小上限，不随计划变长而膨胀。
+            var planPath = Path.Combine(projectDir, "plans", "plan.md");
+            if (File.Exists(planPath))
+            {
+                try
+                {
+                    var planText = File.ReadAllText(planPath).Trim();
+                    if (planText.Length > 1_200)
+                    {
+                        planText = planText[..1_200] + "\n…（计划文件已截断，全文在 plans/plan.md）";
+                    }
+
+                    if (planText.Length > 0)
+                    {
+                        dynamicMessages.Add(new LlmMessage
+                        {
+                            Role = LlmRole.User,
+                            Content = "【计划文件·非用户发言】（plans/plan.md —— 压缩不影响它，每轮重新注入）\n" + planText,
+                        });
+                    }
+                }
+                catch
+                {
+                    // 读不到就不注入 —— 计划文件是增强项，绝不阻断回合
                 }
             }
 
@@ -146,8 +187,15 @@ public sealed partial class AgentHost
                 }
             }
 
-            return await session.Runner.RunAsync(input, assembled.Messages, ct, rephrasedText, rephraseModel, images)
+            var runResult = await session.Runner
+                .RunAsync(input, assembled.Messages, ct, rephrasedText, rephraseModel, images)
                 .ConfigureAwait(false);
+
+            // 进化检查点（Dream / Distill 按累计回合数触发）：只计个数、到点派后台作业，
+            // 不到点零成本；放在回合真正跑完之后，中断/异常的回合不算经验。
+            MaybeEvolve(projectDir);
+
+            return runResult;
         }
         finally
         {

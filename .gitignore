@@ -41,3 +41,7 @@ Thumbs.db
 .zwork/
 agent.json
 agent.json.bak*
+
+# ── 回归/E2E 运行日志（本地证据，不进仓库）────────────────
+verify-all-*.txt
+e2e-*.txt

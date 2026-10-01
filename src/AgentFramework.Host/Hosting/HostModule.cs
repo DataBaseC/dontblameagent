@@ -77,6 +77,9 @@ public sealed class HostState
 
     public IContextSummarizer? ContextSummarizer { get; set; }
 
+    /// <summary>Goal 终止验证器（旁路小模型裁决「目标真的达成了吗」，防提前收工）。</summary>
+    public Contracts.IGoalVerifier? GoalVerifier { get; set; }
+
     // ── 数据平面（StorageModule 填）──────────────────────────
 
     public JsonlEventLog? Log { get; set; }
@@ -392,7 +395,16 @@ public sealed class HostState
             sessionLog,
             Kernel,
             // 任务 5：动态读取 —— 切档后下一次审批立即按新档判定。
-            e => Options.ApprovalPolicy(e),
+            // 完整链条（动态读取，运行期改规则/授权立即生效）：
+            // 计划模式闸（读会话当前 ModeId）→ 输入级规则（last-match-wins）→
+            // 分级审批策略 → external_directory 硬闸
+            e => ApprovalPolicyChain.Decide(
+                runtime?.ModeId ?? modeId,
+                e,
+                Options.ApprovalPolicy,
+                Options.WorkspaceRoot,
+                Options.ApprovalRules,
+                Options.AllowExternalDirectory),
             () => InteractionProvider?.Invoke() ?? NullUserInteraction.Instance,
             e =>
             {
@@ -419,6 +431,10 @@ public sealed class HostState
                 Temperature = Options.Temperature,
                 MaxSteps = maxSteps ?? Options.MaxSteps,
                 IncludeUsage = Options.IncludeUsage,
+
+                // Goal 终止验证（防提前收工）：配了停止条件才激活；运行期由 SetGoal 改。
+                Goal = Options.Goal,
+                GoalVerifier = GoalVerifier,
 
                 // 流式回调默认**不接**：子 agent 的思考过程不该串进主人的对话窗口，
                 // 要观察就显式传 onEvent —— 事件才是它的正经出口。

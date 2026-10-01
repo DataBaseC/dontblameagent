@@ -31,6 +31,11 @@ public sealed partial class WebUiServer
         Map(new DelegateRoute("GET", "/", (request, _) =>
         {
             var contributions = PluginUi.Collect(_baseOptions.PluginsDir, _host.LoadedPlugins.Select(p => p.Id));
+
+            // HTML 会随版本变化：给**协商缓存**（no-cache = 每次都来问一句），
+            // 否则浏览器按「启发式缓存」把旧页扣住 —— 表现就是「我这台机器怎么还是老界面」。
+            request.Http.Response.Headers["Cache-Control"] = "no-cache";
+
             request.Text(WebUiPage.WithPluginUi(WebUiPage.Html, contributions), "text/html; charset=utf-8");
             return ValueTask.CompletedTask;
         }));
@@ -64,6 +69,7 @@ public sealed partial class WebUiServer
                 // 否则刷新页面后停止按钮状态丢失，只剩会话列表的 busy 点。
                 turnRunning = _host.IsBusy,
                 projectDir = _host.Session?.ProjectDir,
+                workspaceRoot = _baseOptions.WorkspaceRoot,
                 tools = _host.ToolNames,
                 plugins = _host.LoadedPlugins.Select(p => new { p.Id, p.Version }).ToList(),
                 skipped = _host.SkippedPlugins,
@@ -364,6 +370,68 @@ public sealed partial class WebUiServer
             catch (Exception ex)
             {
                 request.Json(new { ok = false, error = ex.Message }, 400);
+            }
+        }));
+
+        // 「我的文件到底落在哪」一键可见：在系统文件管理器里打开工作目录。
+        // 不给 path = 当前会话的工作文件夹（没钉项目目录就用宿主工作区）。
+        // 只收**已存在的绝对目录** —— 与 /api/sessions/new 的工作文件夹同一口径，
+        // 顺手挡掉「相对路径按 CWD 拼出去打开个莫名其妙的地方」。
+        Map(new DelegateRoute("POST", "/api/fs/open", async (request, _) =>
+        {
+            var body = await request.ReadBodyAsync().ConfigureAwait(false);
+            var path = body is null ? null : ReadString(body.Value, "path");
+
+            if (string.IsNullOrWhiteSpace(path))
+            {
+                path = _host.Session?.ProjectDir ?? _baseOptions.WorkspaceRoot;
+            }
+
+            if (string.IsNullOrWhiteSpace(path))
+            {
+                request.Json(new { ok = false, error = "没有可打开的工作目录" }, 400);
+                return;
+            }
+
+            if (!Path.IsPathRooted(path))
+            {
+                request.Json(new { ok = false, error = "路径必须是绝对路径" }, 400);
+                return;
+            }
+
+            try
+            {
+                path = Path.GetFullPath(path);
+            }
+            catch (Exception ex)
+            {
+                request.Json(new { ok = false, error = $"路径非法：{ex.Message}" }, 400);
+                return;
+            }
+
+            if (!Directory.Exists(path))
+            {
+                request.Json(new { ok = false, error = $"目录不存在：{path}" }, 404);
+                return;
+            }
+
+            try
+            {
+                // 打开文件管理器是「让人看见」的动作，不是执行内容 —— 用 shell 启动即可；
+                // 非 Windows 平台退化为 xdg-open（服务器本机自用场景）。
+                var start = new System.Diagnostics.ProcessStartInfo
+                {
+                    FileName = OperatingSystem.IsWindows() ? "explorer.exe" : "xdg-open",
+                    UseShellExecute = true,
+                };
+                start.ArgumentList.Add(path);
+                System.Diagnostics.Process.Start(start);
+
+                request.Json(new { ok = true, path });
+            }
+            catch (Exception ex)
+            {
+                request.Json(new { ok = false, error = $"打开失败：{ex.Message}" }, 500);
             }
         }));
 

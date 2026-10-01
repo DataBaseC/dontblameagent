@@ -108,21 +108,34 @@ var options = new HostOptions
         ? AgentMode.Chat
         : AgentMode.Work,
     Temperature = config?.Temperature ?? 0.7,
-    MaxSteps = config?.MaxSteps ?? 12,
+    MaxSteps = config?.MaxSteps ?? 60,
     // 端点不认 stream_options（会直接 400）时，用 --no-usage 或配置单关掉用量回报
     IncludeUsage = HasFlag("--no-usage") ? false : config?.IncludeUsage ?? true,
     SearchBackends = Pick(GetArg("--search"), "AGENT_SEARCH_BACKENDS", config?.SearchBackends),
     SearxngBaseUrl = Pick(null, "AGENT_SEARXNG", config?.SearxngBaseUrl),
     // 分级审批：只读操作放行；写文件 / 执行命令需确认（Web 模式弹卡片，无界面则拒绝）
+    // --allow-command 是一次性 CLI 的全放行通道：连越界目录访问一并显式授予
     ApprovalPolicy = HasFlag("--allow-command")
         ? static _ => ApprovalDecision.Allow
         : DefaultApprovalPolicy.Decide,
+    AllowExternalDirectory = HasFlag("--allow-command"),
 };
 
 // 配置单里写了才覆盖 —— 这几项 HostOptions 自带默认值，不能拿 null 盖掉
 if (!string.IsNullOrWhiteSpace(config?.SystemPrompt))
 {
     options.SystemPrompt = config.SystemPrompt;
+}
+
+// Goal 停止条件：配置单 goal 字段，或 --goal "..." 命令行（命令行优先）
+var goalOverride = GetArg("--goal");
+if (!string.IsNullOrWhiteSpace(goalOverride))
+{
+    options.Goal = goalOverride;
+}
+else if (!string.IsNullOrWhiteSpace(config?.Goal))
+{
+    options.Goal = config!.Goal;
 }
 
 if (config?.Context is { } contextConfig)
@@ -137,6 +150,11 @@ if (config?.Context is { } contextConfig)
         options.Context.CompressionTriggerRatio = ratio;
     }
 
+    if (contextConfig.EarlySummarizeRatio is { } earlyRatio)
+    {
+        options.Context.EarlySummarizeRatio = earlyRatio;
+    }
+
     if (contextConfig.RecentTurnsKeptVerbatim is { } kept)
     {
         options.Context.RecentTurnsKeptVerbatim = kept;
@@ -148,7 +166,76 @@ if (config?.Context is { } contextConfig)
     }
 }
 
+// 输入级权限规则（agent.json 的 approvalRules）：模式匹配 + 三值处置，后写覆盖先写
+if (config?.ApprovalRules is { Count: > 0 } ruleConfigs)
+{
+    foreach (var ruleConfig in ruleConfigs)
+    {
+        if (ruleConfig?.Match is { } match
+            && match.Trim().Length > 0
+            && ApprovalRuleSet.ParseAction(ruleConfig.Action) is { } decision)
+        {
+            options.ApprovalRules.Add(new ApprovalRule(match, decision));
+        }
+        else
+        {
+            Console.WriteLine($"[警告] approvalRules 有一条认不出（match/action），已忽略：{ruleConfig?.Match} / {ruleConfig?.Action}");
+        }
+    }
+}
+
+// 越界目录访问授权（external_directory）：配置单显式写了才生效（默认不授予）
+if (config?.AllowExternalDirectory is { } allowExternal)
+{
+    options.AllowExternalDirectory = allowExternal;
+}
+
+// 进化节奏（agent.json 的 evolution）：Dream / Distill 按累计回合数触发
+if (config?.Evolution is { } evolutionConfig)
+{
+    if (evolutionConfig.DreamEveryTurns is { } dreamTurns)
+    {
+        options.Evolution.DreamEveryTurns = dreamTurns;
+    }
+
+    if (evolutionConfig.DistillEveryTurns is { } distillTurns)
+    {
+        options.Evolution.DistillEveryTurns = distillTurns;
+    }
+
+    if (evolutionConfig.DistillMinOccurrences is { } minOccurrences)
+    {
+        options.Evolution.DistillMinOccurrences = minOccurrences;
+    }
+
+    if (evolutionConfig.DistillMinSessions is { } minSessions)
+    {
+        options.Evolution.DistillMinSessions = minSessions;
+    }
+
+    if (evolutionConfig.DistillMaxSkills is { } maxSkills)
+    {
+        options.Evolution.DistillMaxSkills = maxSkills;
+    }
+}
+
 await using var host = await AgentHost.CreateAsync(options);
+
+// 会话模式：配置单直接写模式 id（work / chat / design / code / write …）。
+// 编程模式（code）由此一行启用 —— 字符串 id 钉在会话上，工具面 / 提示词 / 治理随之生效。
+if (!string.IsNullOrWhiteSpace(config?.Mode))
+{
+    var wanted = config!.Mode.Trim();
+    if (host.SetCurrentMode(wanted))
+    {
+        Console.WriteLine($"模式    ：{host.ModeProfile.Name}（{wanted}）");
+    }
+    else if (!wanted.Equals("chat", StringComparison.OrdinalIgnoreCase)
+             && !wanted.Equals("work", StringComparison.OrdinalIgnoreCase))
+    {
+        Console.WriteLine($"模式    ：未识别的「{wanted}」，已按默认模式继续（可用：work / chat / design / code / write）");
+    }
+}
 
 Console.WriteLine("═══ Agent Framework ═══");
 Console.WriteLine($"配置单  ：{(config is null ? $"{configPath}（没有，按默认值 / 环境变量跑）" : configPath)}");
@@ -210,10 +297,19 @@ if (HasFlag("--web"))
 var oneShot = GetArg("--prompt");
 if (oneShot is not null)
 {
-    var result = await host.SendAsync(oneShot);
-    Console.WriteLine($"[完成] {result.FinalText}");
-    Console.WriteLine($"[统计] 步数={result.Steps} 停止原因={result.StopReason}");
-    return result.Completed ? 0 : 1;
+    try
+    {
+        var result = await host.SendAsync(oneShot);
+        Console.WriteLine($"[完成] {result.FinalText}");
+        Console.WriteLine($"[统计] 步数={result.Steps} 停止原因={result.StopReason}");
+        return result.Completed ? 0 : 1;
+    }
+    catch (Exception ex)
+    {
+        // 回合级异常也要体面收尾：裸崩会让脚本化验收与自动化跑批全部失联
+        Console.WriteLine($"[异常] 回合未完成：{ex.GetType().Name}: {ex.Message}");
+        return 1;
+    }
 }
 
 // 交互模式

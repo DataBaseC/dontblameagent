@@ -148,7 +148,7 @@ public sealed class UserInputRephrasedEvent : SessionEvent
 /// </summary>
 public sealed class ContextCompactedEvent : SessionEvent
 {
-    /// <summary>auto（超水位）/ manual。</summary>
+    /// <summary>auto（超水位）/ manual / early（提前摘要）/ in-turn（回合内护栏）。</summary>
     public string Trigger { get; set; } = CompactionTrigger.Auto;
 
     /// <summary>压缩前后的估算 token 水位。</summary>
@@ -167,6 +167,20 @@ public sealed class ContextCompactedEvent : SessionEvent
 
     /// <summary>L5 摘要（默认关；开启时才有）。</summary>
     public string? Summary { get; set; }
+
+    /// <summary>
+    /// 摘要覆盖到第几轮（以 user 消息计数的轮次）。
+    ///
+    /// <para>
+    /// 摘要不是万能替身 —— 它只覆盖写它时已折叠的那些轮次。之后又有轮次变旧时，
+    /// 投影器必须知道「摘要管到哪」，才能对超出部分**如实标注**（而不是装作摘要什么都有）。
+    /// </para>
+    /// <para>
+    /// <b>可空</b>：老日志没有这个字段 —— null 表示覆盖范围未知，
+    /// 保守地按「可能没覆盖」处理（下次压缩会全量增量合并，不会丢）。
+    /// </para>
+    /// </summary>
+    public int? SummaryThroughTurn { get; set; }
 
     /// <summary>压缩时的任务卡快照（便于回放"那一刻的任务状态"）。</summary>
     public string? TaskCard { get; set; }

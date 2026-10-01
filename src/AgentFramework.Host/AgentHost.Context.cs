@@ -26,33 +26,24 @@ public sealed partial class AgentHost
         ContextOptions contextOptions,
         CancellationToken ct)
     {
-        var plan = ContextCompactor.Plan(events, contextOptions);
+        // forceCollapse:true —— 与装配用的投影同口径，Before/After 才是真实视图
+        var plan = ContextCompactor.Plan(events, contextOptions, forceCollapse: true);
         if (plan is null)
         {
             // 收紧也省不下东西 → 保持现状，不写空事件污染日志
             return current;
         }
 
-        string? summary = null;
+        // 自动压缩**不阻塞等摘要**（MiMo：主 agent 不维护自己的记忆）：
+        // 有后台 writer 的稿就用稿，没有就沿用旧摘要 —— 0.45 水位的 checkpoint 通常早已写好；
+        // 覆盖线如实记摘要真实覆盖到的轮次，超出部分由投影器标注（不假装摘要什么都有）。
+        // 这次折叠掉的新轮次派给后台 writer，增量补进**下一份**检查点。
+        var draft = System.Threading.Interlocked.Exchange(ref session.PendingCheckpoint, null);
+        var previous = LastSummary(events);
+        var summary = draft?.Summary ?? previous;
+        var summaryThroughTurn = draft?.ThroughTurn ?? LastSummaryCoverage(events);
 
-        // L5（默认关）：只在显式开启且确实有摘要器时才做；失败一律放弃摘要，不影响本轮
-        if (contextOptions.SummarizeOlderHistory
-            && _contextSummarizer is not null
-            && plan.OlderMessages.Count > 0)
-        {
-            try
-            {
-                var produced = await _contextSummarizer
-                    .SummarizeHistoryAsync(plan.OlderMessages, plan.After.TaskCard, ct)
-                    .ConfigureAwait(false);
-
-                summary = string.IsNullOrWhiteSpace(produced) ? null : produced;
-            }
-            catch
-            {
-                summary = null;
-            }
-        }
+        DispatchCheckpointWriter(session, events, plan.After, contextOptions);
 
         await session.Sink.EmitAsync(new ContextCompactedEvent
         {
@@ -67,11 +58,14 @@ public sealed partial class AgentHost
             //   不必从默认窗口重新减半 —— 收到底之后每轮重算的那笔白账就此消掉。
             TightenedTurns = plan.Tightened.RecentTurnsKeptVerbatim,
             Summary = summary,
+            // 覆盖线如实记摘要真实覆盖到的轮次（可能是旧摘要的覆盖线）——
+            // 超出部分由投影器标注「也已折叠」，不假装摘要什么都有
+            SummaryThroughTurn = summaryThroughTurn,
             TaskCard = plan.After.TaskCard,
         }, ct).ConfigureAwait(false);
 
         // 摘要刚落进日志 → 重新投影一次，这一轮就用得上它
-        return SessionContextBuilder.Project(session.Events, plan.Tightened);
+        return SessionContextBuilder.Project(session.Events, plan.Tightened, forceCollapse: true);
     }
 
     /// <summary>
@@ -87,7 +81,7 @@ public sealed partial class AgentHost
         var contextOptions = EffectiveContextOptions(_state.CurrentProfile);
         var projection = SessionContextBuilder.Project(events, contextOptions);
 
-        var plan = ContextCompactor.Plan(events, contextOptions);
+        var plan = ContextCompactor.Plan(events, contextOptions, forceCollapse: true);
         if (plan is null)
         {
             var estimated = projection.EstimatedTokens;
@@ -101,23 +95,16 @@ public sealed partial class AgentHost
             return (true, null, null, null, "当前上下文不需要压缩（未达压缩阈值）");
         }
 
-        string? summary = null;
-        if (contextOptions.SummarizeOlderHistory
-            && _contextSummarizer is not null
-            && plan.OlderMessages.Count > 0)
-        {
-            try
-            {
-                var produced = await _contextSummarizer
-                    .SummarizeHistoryAsync(plan.OlderMessages, plan.After.TaskCard, ct)
-                    .ConfigureAwait(false);
-                summary = string.IsNullOrWhiteSpace(produced) ? null : produced;
-            }
-            catch
-            {
-                summary = null;
-            }
-        }
+        var previous = LastSummary(events);
+        var summary = await TrySummarizeAsync(
+            plan.OlderMessages, plan.After.TaskCard, previous, contextOptions, ct).ConfigureAwait(false);
+
+        // 覆盖线只如实延伸到摘要**真正吃进去**的轮次（INV-C1 的配套账目）：
+        // 摘要没更新（失败/超时/无新原料）时沿用旧覆盖线 —— 把没吸收的轮次
+        // 记成「已覆盖」会让下一次增量摘要静默跳过它们，信息就此蒸发。
+        var cutoff = plan.After.TotalTurns - plan.After.KeptTurns;
+        var producedNew = summary is not null
+            && !string.Equals(summary, previous, StringComparison.Ordinal);
 
         await session.Sink.EmitAsync(new ContextCompactedEvent
         {
@@ -130,10 +117,220 @@ public sealed partial class AgentHost
             CollapsedTurns = plan.CollapsedTurns,
             TightenedTurns = plan.Tightened.RecentTurnsKeptVerbatim,
             Summary = summary,
+            SummaryThroughTurn = producedNew ? cutoff : LastSummaryCoverage(events),
             TaskCard = plan.After.TaskCard,
         }, ct).ConfigureAwait(false);
 
         return (true, summary, plan.Before.EstimatedTokens, plan.After.EstimatedTokens, null);
+    }
+
+    /// <summary>摘要调用的旁路超时 —— 慢端点上摘要本身不能拖死回合；超时按失败处理。</summary>
+    private static readonly TimeSpan SummarizeTimeout = TimeSpan.FromSeconds(90);
+
+    /// <summary>
+    /// 增量摘要的统一入口（自动压缩 / 手动压缩 / 提前摘要共用）。
+    /// 纪律：失败或超时**保留旧摘要**，绝不阻断本轮 —— 摘要是增强项，不是主链路。
+    /// </summary>
+    private async Task<string?> TrySummarizeAsync(
+        IReadOnlyList<LlmMessage> olderMessages,
+        string? taskCard,
+        string? previousSummary,
+        ContextOptions contextOptions,
+        CancellationToken ct)
+    {
+        if (!contextOptions.SummarizeOlderHistory || _contextSummarizer is null)
+        {
+            return previousSummary;
+        }
+
+        if (olderMessages.Count == 0)
+        {
+            return previousSummary;
+        }
+
+        try
+        {
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            timeout.CancelAfter(SummarizeTimeout);
+
+            var produced = await _contextSummarizer
+                .SummarizeHistoryAsync(olderMessages, taskCard, previousSummary, timeout.Token)
+                .ConfigureAwait(false);
+
+            return string.IsNullOrWhiteSpace(produced) ? previousSummary : produced;
+        }
+        catch
+        {
+            return previousSummary;
+        }
+    }
+
+    /// <summary>日志里最后一次非空摘要（没有 = null）。</summary>
+    private static string? LastSummary(IReadOnlyList<SessionEvent> events)
+    {
+        for (var i = events.Count - 1; i >= 0; i--)
+        {
+            if (events[i] is ContextCompactedEvent { Summary: { Length: > 0 } summary })
+            {
+                return summary;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>日志里最后一次摘要覆盖到的轮次（没有 = null = 覆盖范围未知）。</summary>
+    private static int? LastSummaryCoverage(IReadOnlyList<SessionEvent> events)
+    {
+        for (var i = events.Count - 1; i >= 0; i--)
+        {
+            if (events[i] is ContextCompactedEvent { Summary: { Length: > 0 }, SummaryThroughTurn: int through })
+            {
+                return through;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// checkpoint 早提取的回合边界入口（MiMo Code 的 writer 子代理）：
+    ///
+    ///   1) <b>消费稿</b> —— 后台 writer 写好的检查点在这里落一条事件（快，只是追加日志）；
+    ///   2) <b>派发稿</b> —— 水位到 <c>EarlySummarizeRatio</c> 且有未覆盖的旧轮时，
+    ///      派后台 writer 去提取，**回合不等它**（主 agent 不维护自己的记忆）。
+    ///
+    /// 返回 true = 落了新摘要事件（调用方应重新投影）。
+    /// </summary>
+    private async Task<bool> MaybeEarlySummarizeAsync(
+        Hosting.SessionRuntime session,
+        IReadOnlyList<SessionEvent> events,
+        ContextProjection projection,
+        ContextOptions contextOptions,
+        CancellationToken ct)
+    {
+        var consumed = false;
+
+        // ── 1) 消费后台 writer 的稿子 ─────────────────────────
+        //   single-writer：稿子只有 writer 写、只有这里取；在回合边界消费，
+        //   于是日志追加仍严格单线程，而昂贵的模型提取完全不占回合时间。
+        if (System.Threading.Interlocked.Exchange(ref session.PendingCheckpoint, null) is { } draft)
+        {
+            await session.Sink.EmitAsync(new ContextCompactedEvent
+            {
+                SessionId = session.SessionId,
+                Trigger = CompactionTrigger.Early,
+                PreTokens = projection.EstimatedTokens,
+                PostTokens = projection.EstimatedTokens,
+                MaskedSeqs = [],
+                MaskedCount = 0,
+                CollapsedTurns = 0,
+                Summary = draft.Summary,
+                // 覆盖线如实写 writer 记的那条 —— 摘要不保证覆盖之后新变旧的轮次
+                SummaryThroughTurn = draft.ThroughTurn,
+                TaskCard = draft.TaskCard,
+            }, ct).ConfigureAwait(false);
+
+            consumed = true;
+        }
+
+        // ── 2) 到水位就派发后台 writer（不等待）──────────────────
+        if (contextOptions.EarlySummarizeRatio > 0
+            && projection.WaterLevel >= contextOptions.EarlySummarizeRatio)
+        {
+            var cutoff = projection.TotalTurns - projection.KeptTurns;
+            var uncovered = cutoff > 0
+                && projection.OlderMessages.Count > 0
+                && !(LastSummaryCoverage(events) is int covered && covered >= cutoff);
+
+            if (uncovered)
+            {
+                DispatchCheckpointWriter(session, events, projection, contextOptions);
+            }
+        }
+
+        return consumed;
+    }
+
+    /// <summary>
+    /// 派发后台 checkpoint-writer（MiMo Code 的 writer 子代理）。
+    ///
+    /// 纪律：
+    ///   · <b>不阻塞</b> —— fire-and-forget，主 agent 继续干活；
+    ///   · <b>single-writer</b> —— 每会话同一时刻至多一个 writer 在跑（防堆积），
+    ///     稿子只有它写（<c>PendingCheckpoint</c>）；
+    ///   · <b>不打扰</b> —— writer 任何失败都吞掉，绝不影响主流程；
+    ///   · 产出同时落一份结构化检查点文件（人可读、可做下次 rebuild 的种子）。
+    /// </summary>
+    private void DispatchCheckpointWriter(
+        Hosting.SessionRuntime session,
+        IReadOnlyList<SessionEvent> events,
+        ContextProjection projection,
+        ContextOptions contextOptions)
+    {
+        if (_contextSummarizer is null)
+        {
+            return;
+        }
+
+        if (System.Threading.Interlocked.CompareExchange(ref session.CheckpointInFlight, 1, 0) != 0)
+        {
+            return;
+        }
+
+        var cutoff = projection.TotalTurns - projection.KeptTurns;
+        var previous = LastSummary(events);
+        var taskCard = projection.TaskCard;
+        var olderMessages = projection.OlderMessages;
+        var sessionId = session.SessionId;
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                var summary = await TrySummarizeAsync(
+                    olderMessages, taskCard, previous, contextOptions, CancellationToken.None).ConfigureAwait(false);
+
+                if (summary is not null && !string.Equals(summary, previous, StringComparison.Ordinal))
+                {
+                    session.PendingCheckpoint = new Hosting.CheckpointDraft(summary, cutoff, taskCard);
+                    TryWriteCheckpointFile(sessionId, summary, cutoff);
+                }
+            }
+            catch
+            {
+                // writer 永不打扰主流程
+            }
+            finally
+            {
+                System.Threading.Interlocked.Exchange(ref session.CheckpointInFlight, 0);
+            }
+        });
+    }
+
+    /// <summary>
+    /// 把检查点落成文件（<c>sessions/checkpoints/&lt;sessionId&gt;.md</c>）。
+    /// single-writer 之下它是安全的：只有 writer 写这个文件；人可随时查看/清理。
+    /// </summary>
+    private void TryWriteCheckpointFile(string sessionId, string summary, int throughTurn)
+    {
+        try
+        {
+            var dir = Path.Combine(Options.SessionsDir, "checkpoints");
+            Directory.CreateDirectory(dir);
+
+            File.WriteAllText(
+                Path.Combine(dir, sessionId + ".md"),
+                "# 会话检查点（checkpoint-writer 自动生成 —— single-writer，勿手改）\n\n"
+                + $"- 更新时间：{DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss}\n"
+                + $"- 覆盖至：第 {throughTurn} 轮\n\n"
+                + summary
+                + "\n");
+        }
+        catch
+        {
+            // 落盘失败不影响主流程
+        }
     }
 
     private ContextOptions EffectiveContextOptions(ModeProfile profile)

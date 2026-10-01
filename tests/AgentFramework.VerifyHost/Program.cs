@@ -441,6 +441,167 @@ Check("G3 ParseSteps：JSON 数组",
 Check("G3 ParseSteps：换行分隔带序号",
     AgentFramework.Tools.UpdatePlanTool.ParseSteps("- 1. 读文件\n2. 写总结") is ["读文件", "写总结"]);
 
+// ── G4. 计划模式（MiMo plan 档）：只读门 + 计划文件重注入 ─────
+Console.WriteLine("\n── G4. 计划模式（只读门 + 计划文件重注入）──");
+
+var alwaysAllow = (ToolPreExecuteEvent _) => ApprovalDecision.Allow;
+var rootDir = Path.Combine(Path.GetTempPath(), "af-plan-verify", Guid.NewGuid().ToString("N")[..8]);
+
+Check("计划模式：写源码文件被拒",
+    PlanModePolicy.Decide("plan", Call("write_file", ("path", "src/a.txt")), alwaysAllow, rootDir) == ApprovalDecision.Deny);
+var denied = Call("write_file", ("path", "src/a.txt"));
+PlanModePolicy.Decide("plan", denied, alwaysAllow, rootDir);
+Check("拒绝理由写明出路（切模式）", denied.RejectReason?.Contains("计划模式") == true && denied.RejectReason.Contains("切换"), denied.RejectReason);
+Check("计划模式：唯一可写 plans/plan.md",
+    PlanModePolicy.Decide("plan", Call("write_file", ("path", "plans/plan.md")), alwaysAllow, rootDir) == ApprovalDecision.Allow);
+Check("计划模式：edit_file 计划文件也放行",
+    PlanModePolicy.Decide("plan", Call("edit_file", ("path", "plans/x.md")), alwaysAllow, rootDir) == ApprovalDecision.Allow);
+Check("计划模式：plans/.. 逃逸被拒",
+    PlanModePolicy.Decide("plan", Call("write_file", ("path", "plans/../evil.txt")), alwaysAllow, rootDir) == ApprovalDecision.Deny);
+Check("计划模式：执行命令被拒",
+    PlanModePolicy.Decide("plan", Call("run_command", ("command", "echo hi")), alwaysAllow, rootDir) == ApprovalDecision.Deny);
+Check("计划模式：删除被拒",
+    PlanModePolicy.Decide("plan", Call("delete_path", ("path", "a.txt")), alwaysAllow, rootDir) == ApprovalDecision.Deny);
+Check("计划模式：只读工具照常放行",
+    PlanModePolicy.Decide("plan", Call("grep_files", ("pattern", "x")), alwaysAllow, rootDir) == ApprovalDecision.Allow
+    && PlanModePolicy.Decide("plan", Call("read_file", ("path", "a.txt")), alwaysAllow, rootDir) == ApprovalDecision.Allow);
+Check("计划模式：update_plan / ask_user 放行",
+    PlanModePolicy.Decide("plan", Call("update_plan", ("steps", "[\"a\"]")), alwaysAllow, rootDir) == ApprovalDecision.Allow
+    && PlanModePolicy.Decide("plan", Call("ask_user", ("question", "q")), alwaysAllow, rootDir) == ApprovalDecision.Allow);
+Check("非计划模式零影响（原策略透传）",
+    PlanModePolicy.Decide("work", Call("write_file", ("path", "src/a.txt")), alwaysAllow, rootDir) == ApprovalDecision.Allow);
+
+// 端到端：真实宿主 + 会话切 plan 档 —— 权限层真的把门焊死
+var planWs = Path.Combine(rootDir, "ws");
+var planFake = new QueuedScriptClient(
+    ("write_file", """{"path":"src/x.txt","content":"x"}"""),
+    ("write_file", """{"path":"plans/plan.md","content":"# 计划内容测试\n- 步骤一"}"""),
+    ("run_command", """{"command":"echo hi"}"""),
+    ("write_file", """{"path":"src/y.txt","content":"y"}"""));
+var planHost = await AgentHost.CreateAsync(new HostOptions
+{
+    WorkspaceRoot = planWs,
+    SessionsDir = Path.Combine(rootDir, "sessions"),
+    SessionId = "plan-e2e",
+    LlmOverride = planFake,
+    ApprovalPolicy = _ => ApprovalDecision.Allow,
+});
+
+planHost.SetCurrentMode("plan");
+
+await planHost.SendAsync("想改代码");
+var denyDone = planHost.Events().OfType<ToolCallCompletedEvent>().LastOrDefault();
+Check("★ 端到端：plan 档写源码被拒（工具卡如实失败）",
+    denyDone is { Success: false } && denyDone.Error?.Contains("计划模式") == true, denyDone?.Error);
+
+await planHost.SendAsync("写计划");
+var planDone = planHost.Events().OfType<ToolCallCompletedEvent>().LastOrDefault();
+Check("★ 端到端：plan 档写 plans/plan.md 成功", planDone is { Success: true }, planDone?.Error);
+Check("计划文件真的落盘", File.Exists(Path.Combine(planWs, "plans", "plan.md")));
+
+await planHost.SendAsync("跑个命令");
+var cmdDone = planHost.Events().OfType<ToolCallCompletedEvent>().LastOrDefault();
+Check("★ 端到端：plan 档执行命令被拒", cmdDone is { Success: false } && cmdDone.Error?.Contains("计划模式") == true, cmdDone?.Error);
+
+// 切回工作模式：门即刻放行；且计划文件在下一轮被重新注入（压缩冲不掉）
+planHost.SetCurrentMode("work");
+await planHost.SendAsync("现在动手");
+var workDone = planHost.Events().OfType<ToolCallCompletedEvent>().LastOrDefault();
+Check("★ 切回工作模式后写文件放行（门零影响）", workDone is { Success: true }, workDone?.Error);
+var planLastRequest = planFake.Requests[^1];
+Check("★ 计划文件每轮重注入（模型看得见计划）",
+    planLastRequest.Messages.Any(m => (m.Content ?? "").Contains("【计划文件") && (m.Content ?? "").Contains("计划内容测试")));
+
+// ── G5. 权限输入级匹配 + external_directory（MiMo permission rules）──
+Console.WriteLine("\n── G5. 权限输入级匹配 + external_directory ──");
+
+var alwaysAllow5 = (ToolPreExecuteEvent _) => ApprovalDecision.Allow;
+var alwaysAsk5 = (ToolPreExecuteEvent _) => ApprovalDecision.Ask;
+var rootDir5 = Path.Combine(Path.GetTempPath(), "af-rules-verify", Guid.NewGuid().ToString("N")[..8]);
+
+// 签名与通配
+Check("签名：run_command 拼命令",
+    ApprovalRuleSet.Signature(Call("run_command", ("command", "git status"))) == "run_command git status");
+Check("签名：write_file 拼路径（内容噪音不进签名）",
+    ApprovalRuleSet.Signature(Call("write_file", ("path", "docs/a.md"), ("content", "很长的内容"))) == "write_file docs/a.md");
+Check("通配：* 跨词匹配、? 单字符、大小写不敏感",
+    ApprovalRuleSet.IsMatch("run_command git *", "run_command git status")
+        && ApprovalRuleSet.IsMatch("edit_file *.mdx", "edit_file docs/a.mdx")
+        && ApprovalRuleSet.IsMatch("RUN_COMMAND GIT *", "run_command git push origin main"));
+
+// 输入级规则：命中即定，last-match-wins
+var gitAllow = new List<ApprovalRule> { new("run_command git *", ApprovalDecision.Allow) };
+Check("★ 规则放行盖过档位询问（git * = allow）",
+    ApprovalPolicyChain.Decide("work", Call("run_command", ("command", "git status")), DefaultApprovalPolicy.Decide, rootDir5, gitAllow) == ApprovalDecision.Allow);
+Check("规则未命中仍走档位（run_command 默认询问）",
+    ApprovalPolicyChain.Decide("work", Call("run_command", ("command", "npm test")), DefaultApprovalPolicy.Decide, rootDir5, gitAllow) == ApprovalDecision.Ask);
+
+var denyRm = new List<ApprovalRule>
+{
+    new("run_command *", ApprovalDecision.Allow),
+    new("run_command rm *", ApprovalDecision.Deny),
+};
+var rmCall = Call("run_command", ("command", "rm -rf build"));
+Check("★ 规则拒绝盖过档位放行（后写覆盖先写）",
+    ApprovalPolicyChain.Decide("work", rmCall, alwaysAllow5, rootDir5, denyRm) == ApprovalDecision.Deny);
+Check("规则拒绝理由写明命中的模式", rmCall.RejectReason?.Contains("run_command rm *") == true, rmCall.RejectReason);
+
+Check("顺序反过来就是放行（last-match-wins，顺序即语义）",
+    ApprovalPolicyChain.Decide("work", Call("run_command", ("command", "rm -rf build")), alwaysAsk5, rootDir5,
+        [new ApprovalRule("run_command rm *", ApprovalDecision.Deny), new ApprovalRule("run_command *", ApprovalDecision.Allow)]) == ApprovalDecision.Allow);
+Check("规则可以收紧到询问（allow → ask）",
+    ApprovalPolicyChain.Decide("work", Call("write_file", ("path", "a.md")), alwaysAllow5, rootDir5,
+        [new ApprovalRule("write_file *", ApprovalDecision.Ask)]) == ApprovalDecision.Ask);
+
+// external_directory：越界写不许静默放行
+Check("★ external_directory：越界写升级为询问（档位放行也一样）",
+    ApprovalPolicyChain.Decide("work", Call("write_file", ("path", Path.Combine(Path.GetTempPath(), "af-outside.txt"))), alwaysAllow5, rootDir5) == ApprovalDecision.Ask);
+Check("区内写不受影响", ApprovalPolicyChain.Decide("work", Call("write_file", ("path", "src/a.txt")), alwaysAllow5, rootDir5) == ApprovalDecision.Allow);
+Check("★ .. 逃逸视为越界",
+    ApprovalPolicyChain.Decide("work", Call("write_file", ("path", "../evil.txt")), alwaysAllow5, rootDir5) == ApprovalDecision.Ask);
+Check("★ 越界闸压过规则放行（规则不是越界授权）",
+    ApprovalPolicyChain.Decide("work", Call("write_file", ("path", Path.Combine(Path.GetTempPath(), "af-outside.txt"))), alwaysAllow5, rootDir5,
+        [new ApprovalRule("write_file *", ApprovalDecision.Allow)]) == ApprovalDecision.Ask);
+Check("★ 显式授予 external_directory 后放行",
+    ApprovalPolicyChain.Decide("work", Call("write_file", ("path", Path.Combine(Path.GetTempPath(), "af-outside.txt"))), alwaysAllow5, rootDir5,
+        allowExternalDirectory: true) == ApprovalDecision.Allow);
+Check("越界读不管（读不是伤害向量，仍按档位）",
+    ApprovalPolicyChain.Decide("work", Call("read_file", ("path", Path.Combine(Path.GetTempPath(), "af-outside.txt"))), alwaysAllow5, rootDir5) == ApprovalDecision.Allow);
+Check("没有工作区概念时不瞎拦",
+    ApprovalPolicyChain.Decide("work", Call("write_file", ("path", "x.txt")), alwaysAllow5, workspaceRoot: null,
+        allowExternalDirectory: false) == ApprovalDecision.Allow);
+
+// 计划模式闸最高优先：规则推不翻模式的承诺
+Check("★ 计划模式闸最高优先（规则 write_file * = allow 也推不翻）",
+    ApprovalPolicyChain.Decide("plan", Call("write_file", ("path", "src/a.txt")), alwaysAllow5, rootDir5,
+        [new ApprovalRule("write_file *", ApprovalDecision.Allow)]) == ApprovalDecision.Deny);
+Check("计划模式下规则放行命令也不行（只读承诺）",
+    ApprovalPolicyChain.Decide("plan", Call("run_command", ("command", "git status")), alwaysAllow5, rootDir5, gitAllow) == ApprovalDecision.Deny);
+
+// 端到端：真实宿主 + agent.json 等价的规则配置 —— 链条真的接进了工具执行
+var ruleWs = Path.Combine(rootDir5, "ws");
+var ruleFake = new QueuedScriptClient(
+    ("run_command", """{"command":"echo hi"}"""),
+    ("run_command", """{"command":"rm -rf x"}"""));
+var ruleHost = await AgentHost.CreateAsync(new HostOptions
+{
+    WorkspaceRoot = ruleWs,
+    SessionsDir = Path.Combine(rootDir5, "sessions"),
+    SessionId = "rules-e2e",
+    LlmOverride = ruleFake,
+    ApprovalPolicy = DefaultApprovalPolicy.Decide,
+    ApprovalRules = [new ApprovalRule("run_command echo *", ApprovalDecision.Allow)],
+});
+
+await ruleHost.SendAsync("打个招呼");
+var echoDone = ruleHost.Events().OfType<ToolCallCompletedEvent>().LastOrDefault();
+Check("★ 端到端：规则放行的命令成功（echo * = allow）", echoDone is { Success: true }, echoDone?.Error);
+
+await ruleHost.SendAsync("把 x 删掉");
+var rmDone = ruleHost.Events().OfType<ToolCallCompletedEvent>().LastOrDefault();
+Check("★ 端到端：未获规则放行的命令被拒（默认询问→无界面拒绝）",
+    rmDone is { Success: false } && rmDone.Error?.Contains("拒绝") == true, rmDone?.Error);
+
 Console.WriteLine($"\n═══ 结果：{passes} 通过 / {failures} 失败 ═══");
 return failures == 0 ? 0 : 1;
 
@@ -496,6 +657,45 @@ internal sealed class CommandScriptClient : ILlmClient
         }
 
         yield return new LlmStreamChunk.TextDelta("命令被拒绝了，我换别的方式。");
+        yield return new LlmStreamChunk.Completed("stop");
+    }
+}
+
+/// <summary>
+/// 按队列逐轮回放工具调用的假模型：每次回合的第一次调用发队列里的工具调用、第二次收尾；
+/// 全部请求入档（用来检查「模型到底看到了什么」）。
+/// </summary>
+internal sealed class QueuedScriptClient(params (string Tool, string ArgsJson)[] turns) : ILlmClient
+{
+    private readonly Queue<(string Tool, string ArgsJson)> _turns = new(turns);
+    private int _calls;
+
+    public string Name => "queued-script";
+
+    public List<LlmRequest> Requests { get; } = [];
+
+    public async IAsyncEnumerable<LlmStreamChunk> StreamAsync(
+        LlmRequest request,
+        [EnumeratorCancellation] CancellationToken ct = default)
+    {
+        await Task.Yield();
+
+        lock (Requests)
+        {
+            Requests.Add(request);
+        }
+
+        if (++_calls % 2 == 1 && _turns.TryDequeue(out var spec))
+        {
+            yield return new LlmStreamChunk.ToolCallsReady(
+            [
+                new ToolCallRequest($"qc-{_calls}", spec.Tool, spec.ArgsJson),
+            ]);
+            yield return new LlmStreamChunk.Completed("tool_calls");
+            yield break;
+        }
+
+        yield return new LlmStreamChunk.TextDelta("好的，这一步处理完了。");
         yield return new LlmStreamChunk.Completed("stop");
     }
 }

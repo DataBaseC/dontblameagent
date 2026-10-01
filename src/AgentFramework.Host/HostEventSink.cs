@@ -107,7 +107,8 @@ public sealed class HostEventSink(
                     break;
 
                 case ApprovalDecision.Deny:
-                    Deny(toolPreExecuteEvent, "策略拒绝");
+                    // 策略层（如计划模式的只读门）预置的拒绝理由优先 —— 让模型知道出路
+                    Deny(toolPreExecuteEvent, toolPreExecuteEvent.RejectReason ?? "策略拒绝");
                     break;
 
                 case ApprovalDecision.Ask:

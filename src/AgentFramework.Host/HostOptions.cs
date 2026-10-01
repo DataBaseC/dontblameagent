@@ -80,7 +80,11 @@ public sealed class HostOptions
 
     public double Temperature { get; set; } = 0.7;
 
-    public int MaxSteps { get; set; } = 12;
+    /// <summary>
+    /// 一个回合的最大步数。默认 60 —— 编程任务一次回合动辄几十步工具调用，
+    /// 12 步的旧默认会在任务中途把 agent 掐死（「跑一会儿就自己停了」）。
+    /// </summary>
+    public int MaxSteps { get; set; } = 60;
 
     /// <summary>
     /// 是否要求端点回报用量（成本与缓存命中率的数据来源）。
@@ -102,6 +106,21 @@ public sealed class HostOptions
     /// </summary>
     public Func<Contracts.ToolPreExecuteEvent, ApprovalDecision> ApprovalPolicy { get; set; }
         = DefaultApprovalPolicy.Decide;
+
+    /// <summary>
+    /// 输入级权限规则（MiMo 的 permission rules）：对「工具名 + 关键参数」签名做模式匹配，
+    /// 三值处置（allow / ask / deny），后写覆盖先写（last-match-wins）。
+    /// 例：<c>run_command git * = allow</c>、<c>run_command rm * = deny</c>。
+    /// 空 = 不配规则，纯按档位判定。<strong>活配置</strong> —— 列表改完下一次调用即生效。
+    /// </summary>
+    public List<ApprovalRule> ApprovalRules { get; set; } = [];
+
+    /// <summary>
+    /// <c>external_directory</c> 特殊防护的解除授权。默认 <c>false</c>：
+    /// 越界写（写到工作区之外）一律不静默放行，最多问用户（无界面即拒绝），
+    /// 规则与档位都推不翻。<c>true</c> = 用户显式授予越界访问。
+    /// </summary>
+    public bool AllowExternalDirectory { get; set; }
 
     /// <summary>
     /// 输入转述（澄清模式）配置。
@@ -143,6 +162,22 @@ public sealed class HostOptions
     /// 若不注入，宿主会在配了本地端点时自动用本地小模型做摘要。
     /// </summary>
     public Contracts.IContextSummarizer? ContextSummarizerOverride { get; set; }
+
+    /// <summary>
+    /// Goal 停止条件（自然语言，如「所有测试通过且代码已提交」）。空 = 不启用目标核验。
+    /// 模型每次想收尾时由旁路验证者裁决「真的达成了吗」—— 防止提前宣称完成（MiMo Goal 机制）。
+    /// </summary>
+    public string? Goal { get; set; }
+
+    /// <summary>Goal 验证器覆盖（验收测试 / 自定义裁决用）。</summary>
+    public Contracts.IGoalVerifier? GoalVerifierOverride { get; set; }
+
+    /// <summary>
+    /// 进化配置（PLAN-memory-evolution 支柱四）：Dream（记忆周期整理）/ Distill（技能固化）。
+    /// 按<b>累计回合数</b>触发（不是挂钟）；Dream 默认开、Distill 默认关（会写工作区）。
+    /// 同样是活实例 —— 改完即生效。
+    /// </summary>
+    public EvolutionOptions Evolution { get; set; } = new();
 
     /// <summary>
     /// 是否启用会话历史派生索引（SQLite）。
@@ -236,6 +271,9 @@ public sealed class HostOptions
         SearxngBaseUrl = SearxngBaseUrl,
         ApprovalPolicy = ApprovalPolicy,
         ApprovalTier = ApprovalTier,
+        // 权限规则与越界防护同理：「这台机器的安全边界」，不随会话漂移。
+        ApprovalRules = ApprovalRules,
+        AllowExternalDirectory = AllowExternalDirectory,
         AllowOfflineDemo = AllowOfflineDemo,
         LlmOverride = LlmOverride,
         // 刻意共享同一个实例：转述设置是「用户偏好」，不该随会话走。
@@ -246,6 +284,11 @@ public sealed class HostOptions
         // checkpoint（写盘）配置同样共享同一实例 —— 切会话不该分裂出第二份水位。
         Checkpoint = Checkpoint,
         ContextSummarizerOverride = ContextSummarizerOverride,
+        // Goal 是「这次任务要做到什么」——全局一份，不随会话走（SetGoal 运行期改）。
+        Goal = Goal,
+        GoalVerifierOverride = GoalVerifierOverride,
+        // 进化节奏同理是机器级配置，不随会话漂移。
+        Evolution = Evolution,
         IndexEnabled = IndexEnabled,
         IndexOverride = IndexOverride,
         // 记忆与模式：记忆是「这台机器/这个项目的事实」，模式是运行期状态 —— 都不随会话走

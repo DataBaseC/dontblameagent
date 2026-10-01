@@ -477,6 +477,12 @@ public sealed class ModeProfile
     /// <summary>拼到系统提示词末尾的模式说明。</summary>
     public string? SystemPromptSuffix { get; init; }
 
+    /// <summary>
+    /// 只读规划档（MiMo 的 plan 模式）：权限层强制「禁写禁执行，唯一例外 plans/*.md」。
+    /// 光靠提示词说"别改文件"挡不住模型手滑 —— 这个标记让审批层直接把门焊死。
+    /// </summary>
+    public bool ReadOnly { get; init; }
+
     /// <summary>这种模式是否把工具暴露给模型。</summary>
     public bool ExposesTools => AllowedTools is null || AllowedTools.Count > 0;
 }
@@ -603,6 +609,32 @@ public static class AgentModes
             "长文分段推进，每段写完回看与上文的衔接。",
     };
 
+    /// <summary>
+    /// 计划模式（MiMo 的 plan 档）：只读规划 —— 全工具面调研，但权限层焊死
+    /// 「禁写禁执行」，唯一例外是写 <c>plans/*.md</c>（计划文件，压缩冲不掉、每轮重注入）。
+    /// 要动手实现？提示用户切编程/工作模式 —— 模式切换是一句话的事。
+    /// </summary>
+    public static ModeProfile Plan { get; } = new()
+    {
+        CustomId = "plan",
+        Name = "计划模式",
+        MemoryScopes = [MemoryScope.Project],
+        AllowedTools = null,
+        // 工具面不收窄（调研需要 grep/web/子代理）——真正的约束是权限层的只读门（ReadOnly）
+        AllowedToolsets = null,
+        InjectTaskCard = true,
+        InjectNotes = true,
+        ContextGovernance = true,
+        MemoryIndexLimit = 8,
+        MemoryRecallLimit = 5,
+        PriorityStrategy = MemoryPriorityStrategy.Temperature,
+        ReadOnly = true,
+        SystemPromptSuffix =
+            "当前是计划模式：只读调研与规划，不得修改任何文件、不得执行任何命令（权限层会直接拒绝）。\n" +
+            "产出计划写入 plans/plan.md（唯一可写的文件），结构：目标 / 约束 / 步骤清单 / 每步的验证方式。\n" +
+            "计划要落到执行时，提示用户切换到编程模式或工作模式。",
+    };
+
     public static ModeProfile For(AgentMode mode) => mode switch
     {
         AgentMode.Chat => Chat,
@@ -630,7 +662,7 @@ public static class AgentModes
         if (IsBuiltinId(id))
         {
             throw new ArgumentException(
-                $"模式 id「{id}」与内置档位冲突（work / chat / design / code / write 不可覆盖）", nameof(profile));
+                $"模式 id「{id}」与内置档位冲突（work / chat / design / code / write / plan 不可覆盖）", nameof(profile));
         }
 
         Custom[id] = profile;
@@ -655,6 +687,7 @@ public static class AgentModes
             case "design": profile = Design; return true;
             case "code": profile = Code; return true;
             case "write": profile = Write; return true;
+            case "plan": profile = Plan; return true;
             default:
                 if (Custom.TryGetValue(id.Trim(), out var custom))
                 {
@@ -670,14 +703,14 @@ public static class AgentModes
 
     /// <summary>内置档位 id（插件不得覆盖 —— 冲突时显式报错）。</summary>
     public static bool IsBuiltinId(string id) =>
-        id is "work" or "chat" or "design" or "code" or "write";
+        id is "work" or "chat" or "design" or "code" or "write" or "plan";
 
     /// <summary>全部可用档位（内置五档 + 插件注册）—— 新建会话选择器与 /api/modes 的数据源。</summary>
     public static IReadOnlyList<ModeProfile> Available
     {
         get
         {
-            var list = new List<ModeProfile> { Work, Design, Chat, Code, Write };
+            var list = new List<ModeProfile> { Work, Design, Chat, Code, Write, Plan };
             list.AddRange(Custom.Values);
             return list;
         }

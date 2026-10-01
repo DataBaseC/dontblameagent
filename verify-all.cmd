@@ -1,6 +1,6 @@
 @echo off
 rem ============================================================
-rem  Run all 17 verify projects. Encoding MUST be ANSI/GBK.
+rem  Run all 19 verify projects. Encoding MUST be ANSI/GBK.
 rem  Expect: every suite reports M failures = 0.
 rem
 rem  Build uses -m:1 + UseSharedCompilation=false: parallel or
@@ -39,7 +39,7 @@ if errorlevel 1 (
 echo [2/2] Running verify suites ...
 rem Serial + 1s gap: suites share plugin DLL outputs; a still-open
 rem process causes false "file in use" failures.
-for %%n in (Verify VerifyData VerifyAgent VerifyTools VerifySandbox VerifyPlugins VerifyLlm VerifyHost VerifyLauncher VerifyWeb VerifySummary VerifyRephrase VerifyContext VerifyMemory VerifyToolsets VerifyBaseKit VerifyCheckpoint VerifySecrets) do (
+for %%n in (Verify VerifyData VerifyAgent VerifyTools VerifySandbox VerifyPlugins VerifyLlm VerifyHost VerifyLauncher VerifyWeb VerifySummary VerifyRephrase VerifyContext VerifyMemory VerifyToolsets VerifyBaseKit VerifyCheckpoint VerifyEvolution VerifySecrets) do (
     echo.
     echo ============== %%n ==============
     dotnet run --project "tests\AgentFramework.%%n\AgentFramework.%%n.csproj" -c Debug --no-build --nologo

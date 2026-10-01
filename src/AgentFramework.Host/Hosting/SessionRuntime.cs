@@ -105,6 +105,16 @@ public sealed class SessionRuntime : IAsyncDisposable
     /// <summary>本会话的回合闸：同一会话不允许两个回合同时跑。</summary>
     public SemaphoreSlim TurnGate { get; } = new(1, 1);
 
+    /// <summary>
+    /// 后台 checkpoint-writer 的待消费稿（MiMo Code 的 writer 子代理）。
+    /// <b>single-writer</b>：只有 writer 写、只有回合边界（MaybeEarlySummarizeAsync）取走 ——
+    /// 于是摘要提取不占回合时间，而日志追加仍严格单线程。
+    /// </summary>
+    internal CheckpointDraft? PendingCheckpoint;
+
+    /// <summary>是否有 writer 在跑（1 = 是）。同一会话同一时刻至多一个 —— 防堆积。</summary>
+    internal int CheckpointInFlight;
+
     /// <summary>本会话的日志路径（诊断与 UI 用）。</summary>
     public string LogPath => Log.Path;
 
@@ -169,3 +179,10 @@ public sealed class SessionRuntime : IAsyncDisposable
         return ValueTask.CompletedTask;
     }
 }
+
+/// <summary>
+/// 后台 checkpoint-writer 的产出稿（一次增量提取的结果）。
+/// 覆盖线 <see cref="ThroughTurn"/> 同 <c>ContextCompactedEvent.SummaryThroughTurn</c> 语义：
+/// 摘要只保证覆盖到这一轮，之后变旧的轮次由投影器如实标注。
+/// </summary>
+internal sealed record CheckpointDraft(string Summary, int ThroughTurn, string? TaskCard);

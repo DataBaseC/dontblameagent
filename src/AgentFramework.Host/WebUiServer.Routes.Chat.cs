@@ -244,6 +244,26 @@ public sealed partial class WebUiServer
             return ValueTask.CompletedTask;
         }));
 
+        // ── Goal 停止条件（防提前收工）：读 / 设 ─────────────────
+        Map(new DelegateRoute("GET", "/api/goal", (request, _) =>
+        {
+            request.Json(new
+            {
+                ok = true,
+                goal = _host.Goal,
+                active = !string.IsNullOrWhiteSpace(_host.Goal),
+            });
+            return ValueTask.CompletedTask;
+        }));
+
+        Map(new DelegateRoute("POST", "/api/goal", async (request, ct) =>
+        {
+            var body = await request.ReadBodyAsync().ConfigureAwait(false);
+            var goal = body is null ? null : ReadString(body.Value, "goal");
+            _host.SetGoal(goal);
+            request.Json(new { ok = true, goal = _host.Goal, active = !string.IsNullOrWhiteSpace(_host.Goal) });
+        }));
+
         // ── G2 技能系统：列表与启停（回合边界生效）──────────────
         Map(new DelegateRoute("GET", "/api/skills", (request, ct) =>
         {
