@@ -66,3 +66,25 @@
 看顶栏模型徽标是否「离线演示」（是 = 凶手 3）；Ctrl+F5 强刷（好了 = 凶手 2）。
 
 验证：VerifyWeb +2（reduce 模式保留状态指示 / 首页协商缓存），172/0；打包件随包交付。
+
+---
+
+## 6. 补丁 2：打开工作目录入口
+
+「文件到底落在哪」一键可见：顶栏常驻 `📁 工作区`（显示文件夹名、悬浮看全路径）+
+开始屏「📂 打开当前」。后端 `POST /api/fs/open`：不传 path = 当前会话项目目录 ?? 宿主工作区；
+只收已存在的绝对目录（相对 400 / 缺失 404）。VerifyWeb +3（页面入口 + API 拒绝路径），175/0。
+
+## 7. 补丁 3：POSIX-on-Windows 命令沙箱两处缺陷（CI VerifySandbox 失败暴露）
+
+CI（windows-latest 自带 Git Bash）上 VerifySandbox 失败，本机（无 bash、回落 cmd）全绿 ——
+差异精确指向**只有「机器上有 Git Bash」才走的 POSIX 分支**。用 PortableGit 在本地把 bash
+摆上 PATH 复现后抓到两条真实缺陷（都不是测试问题，是产品承诺失效）：
+
+| # | 缺陷 | 机制（实测） | 修复 |
+|---|------|--------------|------|
+| 1 | **临时目录重定向静默失效** | MSYS 运行时把 Windows 形式的 `TMPDIR` 改写成 `/tmp` ——「临时文件不出工作区」在 Git Bash 下破功 | `ProcessRunner`：POSIX-on-Windows 时 `TMPDIR` 改给 **POSIX 形式**（`/c/Users/…`，实测照单全收）；`TMP`/`TEMP` 保持 Windows 形式（bash 里唤起的原生 exe 只认它） |
+| 2 | **`bash -c` 找不到自家 coreutils** | Git Bash 的 `sleep`/`seq`/`touch` 住在 `<git>\usr\bin`，Windows PATH 上通常只有 `Git\bin`/`Git\cmd` —— `bash -c "sleep 5"` 都 command not found | `ProcessRunner.AugmentPosixPath`：把 shell 自己的家当目录（自身目录 + `..\usr\bin` + `..\bin`）补进子进程 PATH —— Windows 上的 bash 才真的当 bash 用 |
+
+复现矩阵（PortableGit 2.56）：bash + coreutils 可见 → 25/0；真实 GfW 布局（只见 `Git\bin`
+的 bash、coreutils 不在 PATH）→ 25/0；无 bash（cmd 回落）→ 25/0。全量回归 19 套件 1148/0 不变。

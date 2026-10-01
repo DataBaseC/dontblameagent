@@ -92,16 +92,27 @@ internal static class ProcessRunner
             startInfo.Environment[key] = value;
         }
 
+        // POSIX-on-Windows：补上 shell 自己的家当目录（coreutils 才找得到）
+        AugmentPosixPath(startInfo, shell);
+
         // ── 临时目录重定向 ────────────────────────────────────────
         // 没有这一步，命令想「随手写点临时文件」就落到系统临时目录去了 —— 那是最容易
         // 绕过「写只能在工作区内」的一条暗道。把 TMP/TEMP/TMPDIR 指进工作区后，
         // 命令的落地全在同一个地方：可审计、可清理，也在写边界之内。
+        //
+        // POSIX-on-Windows（Git Bash / MSYS）有个坑：给它 Windows 形式的路径，
+        // msys 运行时会把 TMPDIR 改写成 /tmp —— 重定向**静默失效**（实测）。
+        // 所以 POSIX 工具用的 TMPDIR 必须给 POSIX 形式（/c/Users/…），它才照单全收；
+        // TMP/TEMP 仍留 Windows 形式 —— 从 bash 里唤起的原生 exe（dotnet、ping…）只认它。
+        // 两类工具各得其所，「临时文件不出工作区」的承诺才在每种 shell 下都成立。
         if (!string.IsNullOrWhiteSpace(run.TempDirectory))
         {
             Directory.CreateDirectory(run.TempDirectory);
             startInfo.Environment["TMP"] = run.TempDirectory;
             startInfo.Environment["TEMP"] = run.TempDirectory;
-            startInfo.Environment["TMPDIR"] = run.TempDirectory;
+            startInfo.Environment["TMPDIR"] = shell.IsPosix && OperatingSystem.IsWindows()
+                ? ToMsysPath(run.TempDirectory)
+                : run.TempDirectory;
         }
 
         using var process = new Process { StartInfo = startInfo };
@@ -275,6 +286,72 @@ internal static class ProcessRunner
     /// </summary>
     private static IEnumerable<KeyValuePair<string, string>> SafeEnvironment(ShellSpec shell)
         => ProcessEnvironment.Allowlist(shell.IsPosix || shell.Id is "pwsh" or "powershell");
+
+    /// <summary>
+    /// Windows 路径 → MSYS/POSIX 形式（<c>C:\x\y</c> → <c>/c/x/y</c>）。
+    /// Git Bash 只认这种形式的 TMPDIR；Windows 形式会被 msys 运行时改写成 /tmp。
+    /// </summary>
+    private static string ToMsysPath(string path)
+    {
+        var full = Path.GetFullPath(path).Replace('\\', '/');
+        return full.Length >= 2 && full[1] == ':'
+            ? "/" + char.ToLowerInvariant(full[0]) + full[2..]
+            : full;
+    }
+
+    /// <summary>
+    /// POSIX shell 在 Windows 上的 PATH 补全：Git Bash 的 coreutils（sleep / seq / touch…）
+    /// 住在 <c>&lt;git&gt;\usr\bin</c>，而 Windows PATH 上通常只有 <c>Git\cmd</c> ——
+    /// 于是 <c>bash -c "sleep 5"</c> 都会「command not found」（实测）。
+    /// 把 shell 自己的家当目录补进子进程 PATH：Windows 上的 bash 才真的当 bash 用。
+    /// </summary>
+    private static void AugmentPosixPath(ProcessStartInfo startInfo, ShellSpec shell)
+    {
+        if (!shell.IsPosix || !OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        try
+        {
+            var extras = new List<string>();
+            var shellDir = Path.GetDirectoryName(shell.FileName);
+            if (!string.IsNullOrWhiteSpace(shellDir))
+            {
+                extras.Add(shellDir!);
+                extras.Add(Path.Combine(shellDir!, "..", "usr", "bin"));
+                extras.Add(Path.Combine(shellDir!, "..", "bin"));
+            }
+
+            var current = startInfo.Environment.TryGetValue("PATH", out var p) ? p : string.Empty;
+            var parts = current.Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries).ToList();
+
+            foreach (var extra in extras)
+            {
+                string full;
+                try
+                {
+                    full = Path.GetFullPath(extra);
+                }
+                catch
+                {
+                    continue;
+                }
+
+                if (!parts.Any(x => string.Equals(x.TrimEnd(Path.DirectorySeparatorChar),
+                        full.TrimEnd(Path.DirectorySeparatorChar), StringComparison.OrdinalIgnoreCase)))
+                {
+                    parts.Insert(0, full);
+                }
+            }
+
+            startInfo.Environment["PATH"] = string.Join(Path.PathSeparator, parts);
+        }
+        catch
+        {
+            // PATH 是放行项而非成败项：补不全就维持原样，命令照跑
+        }
+    }
 
     private static int SafeExitCode(Process process)
     {
