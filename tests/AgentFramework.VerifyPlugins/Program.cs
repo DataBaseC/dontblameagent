@@ -4,6 +4,7 @@ using AgentFramework.Contracts;
 using AgentFramework.Host;
 using AgentFramework.Kernel;
 using Microsoft.Extensions.Logging;
+using static AgentFramework.Harness.Suite;
 
 // ═══════════════════════════════════════════════════════════
 //  脚本插件 + 自我升级闭环 垂直切片验证
@@ -11,23 +12,6 @@ using Microsoft.Extensions.Logging;
 //  不需要 API key / 联网 / 真实模型：全程只碰插件内核与仓库。
 // ═══════════════════════════════════════════════════════════
 
-var passes = 0;
-var failures = 0;
-
-void Check(string name, bool ok, string? detail = null)
-{
-    var suffix = detail is null ? "" : $"  ({detail})";
-    if (ok)
-    {
-        passes++;
-        Console.WriteLine($"  [PASS] {name}{suffix}");
-    }
-    else
-    {
-        failures++;
-        Console.WriteLine($"  [FAIL] {name}{suffix}");
-    }
-}
 
 var root = Path.Combine(Path.GetTempPath(), "af-plugins-verify", Guid.NewGuid().ToString("N")[..8]);
 var workspace = Path.Combine(root, "workspace");

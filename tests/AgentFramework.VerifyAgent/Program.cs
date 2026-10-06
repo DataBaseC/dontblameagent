@@ -7,6 +7,7 @@ using AgentFramework.Contracts;
 using AgentFramework.Data;
 using AgentFramework.Kernel;
 using AgentFramework.Llm;
+using static AgentFramework.Harness.Suite;
 
 // ═══════════════════════════════════════════════════════════
 //  Agent 主干垂直切片验证
@@ -14,23 +15,6 @@ using AgentFramework.Llm;
 //  用脚本化假模型，不依赖任何 API key
 // ═══════════════════════════════════════════════════════════
 
-var passes = 0;
-var failures = 0;
-
-void Check(string name, bool ok, string? detail = null)
-{
-    var suffix = detail is null ? "" : $"  ({detail})";
-    if (ok)
-    {
-        passes++;
-        Console.WriteLine($"  [PASS] {name}{suffix}");
-    }
-    else
-    {
-        failures++;
-        Console.WriteLine($"  [FAIL] {name}{suffix}");
-    }
-}
 
 var root = Path.Combine(Path.GetTempPath(), "af-agent-verify", Guid.NewGuid().ToString("N")[..8]);
 Directory.CreateDirectory(root);
@@ -140,7 +124,7 @@ Console.WriteLine("\n── 3. 模型路由：规则打底 ──");
 
 var cloudClient = new ScriptedLlmClient("cloud", new ScriptedTurn(["云端回答"], null, "stop"));
 var localClient = new ScriptedLlmClient("local", new ScriptedTurn(["本地回答"], null, "stop"));
-var router = new RouterLlmClient(DefaultRouting.Rule(longContextChars: 200));
+var router = new RouterLlmClient(DefaultRouting.Rule(longContextTokens: 200));
 router.AddTarget(cloudClient);
 router.AddTarget(localClient);
 
@@ -181,7 +165,7 @@ Check("解除覆盖后回归规则", router.History[3].Target == "cloud" && rout
 
 // ── 4b：只配了一个端点时，规则不该把请求送到不存在的地方 ────
 Console.WriteLine("\n── 4b. 只配一个端点：规则退让 ──");
-var soloRouter = new RouterLlmClient(DefaultRouting.Rule(longContextChars: 200));
+var soloRouter = new RouterLlmClient(DefaultRouting.Rule(longContextTokens: 200));
 var soloCloud = new ScriptedLlmClient("cloud", new ScriptedTurn(["只有云端"], null, "stop"));
 soloRouter.AddTarget(soloCloud);
 
@@ -200,6 +184,55 @@ catch (InvalidOperationException)
 Check("★ 只配云端时，本该走本地的请求退回云端（不抛异常）", fallbackSurvived);
 Check("★ 回退时真实调用了唯一那个端点", soloCloud.ReceivedRequests.Count == 1,
     $"{soloCloud.ReceivedRequests.Count} 次");
+
+// ── 4c：多目标 + 规则指向不存在的端点 → 按确定顺序回落，不抛（v3.23）──
+Console.WriteLine("\n── 4c. 规则指错也不打挂整轮 ──");
+var orphanRouter = new RouterLlmClient(_ => "nonexistent-target");
+var orphanCloud = new ScriptedLlmClient("cloud", new ScriptedTurn(["云端顶上"], null, "stop"));
+var orphanLocal = new ScriptedLlmClient("local", new ScriptedTurn(["本地顶上"], null, "stop"));
+orphanRouter.AddTarget(orphanLocal);
+orphanRouter.AddTarget(orphanCloud);
+
+var orphanText = new System.Text.StringBuilder();
+var orphanThrew = false;
+try
+{
+    await foreach (var chunk in orphanRouter.StreamAsync(longRequest))
+    {
+        if (chunk is LlmStreamChunk.TextDelta delta)
+        {
+            orphanText.Append(delta.Text);
+        }
+    }
+}
+catch (InvalidOperationException)
+{
+    orphanThrew = true;   // 旧行为：直接抛，把整轮打挂
+}
+
+Check("★ 规则指向不存在的端点时回落（不抛、不打挂整轮）", !orphanThrew && orphanText.Length > 0, orphanText.ToString());
+Check("★ 回落按**名字排序**取第一个（顺序确定、可复现，不靠字典枚举顺序）",
+    orphanRouter.History[^1].Target == "cloud" && orphanCloud.ReceivedRequests.Count == 1,
+    $"{orphanRouter.History[^1].Target}");
+Check("★ 回落也如实记进路由历史（Source=fallback，诊断看得见）",
+    orphanRouter.History[^1].Source == "fallback",
+    orphanRouter.History[^1].Source);
+
+// ── 4d：长上下文判据是 token 估算，不是字符数（v3.23）──
+Console.WriteLine("\n── 4d. 长上下文判据按 token ──");
+var tokenRule = DefaultRouting.Rule(longContextTokens: 200);
+var cjkHeavy = new LlmRequest
+{
+    Model = "test",
+    Messages = [new LlmMessage { Role = LlmRole.User, Content = new string('中', 300) }],
+};
+var asciiHeavy = new LlmRequest
+{
+    Model = "test",
+    Messages = [new LlmMessage { Role = LlmRole.User, Content = new string('a', 400) }],
+};
+Check("300 个汉字 ≈ 300 token → 判给本地（字符数口径下会被误判）", tokenRule(cjkHeavy) == "local");
+Check("400 个 ASCII ≈ 100 token → 判给云端（同一个字符数口径下会误判成「长」）", tokenRule(asciiHeavy) == "cloud");
 
 // ── 场景 5：步数上限保护 ──────────────────────────────────
 Console.WriteLine("\n── 5. 死循环保护（步数上限）──");
@@ -422,6 +455,33 @@ Check("GAP 被提取", LlmGoalVerifier.Parse("VERDICT: NOT_MET\nGAP: 缺测试")
 Check("IMPOSSIBLE 被识别", LlmGoalVerifier.Parse("VERDICT: IMPOSSIBLE\nGAP: -").Verdict == GoalVerdict.Impossible);
 Check("MET 被识别", LlmGoalVerifier.Parse("VERDICT: MET\nGAP: -").Verdict == GoalVerdict.Met);
 Check("认不出裁决时放行（fail-open）", LlmGoalVerifier.Parse("我想想……").Verdict == GoalVerdict.Met);
+
+Console.WriteLine("\n── 7g. 验证器格式歪掉时先纠正一次再放行（v3.22）──");
+{
+    var retryClient = new ScriptedLlmClient("cloud",
+        new ScriptedTurn(["我想了想，应该可以吧。"], null, "stop"),
+        new ScriptedTurn(["VERDICT: MET\nEVIDENCE: 都做完了\nGAP: -"], null, "stop"));
+    var retryVerdict = await new LlmGoalVerifier(retryClient, new LlmGoalVerifierOptions())
+        .VerifyAsync("所有测试通过", "跑测试", [], "做完了。");
+    Check("★ 首次解析不出 → 重试一次并采纳纠正后的裁决",
+        retryVerdict.Verdict == GoalVerdict.Met && retryClient.ReceivedRequests.Count == 2,
+        $"verdict={retryVerdict.Verdict}, calls={retryClient.ReceivedRequests.Count}");
+
+    var strictClient = new ScriptedLlmClient("cloud",
+        new ScriptedTurn(["VERDICT: NOT_MET\nGAP: 还没跑测试"], null, "stop"));
+    var strictVerdict = await new LlmGoalVerifier(strictClient, new LlmGoalVerifierOptions())
+        .VerifyAsync("所有测试通过", "跑测试", [], "做完了。");
+    Check("首次就有裁决时不重试（省一次调用）",
+        strictVerdict.Verdict == GoalVerdict.NotMet && strictClient.ReceivedRequests.Count == 1);
+
+    var hopelessClient = new ScriptedLlmClient("cloud",
+        new ScriptedTurn(["嗯……"], null, "stop"),
+        new ScriptedTurn(["还是不想说格式"], null, "stop"));
+    var hopelessVerdict = await new LlmGoalVerifier(hopelessClient, new LlmGoalVerifierOptions())
+        .VerifyAsync("随便", "随便", [], "好了。");
+    Check("两次都解析不出才放行（fail-open 保持不变）",
+        hopelessVerdict.Verdict == GoalVerdict.Met && hopelessClient.ReceivedRequests.Count == 2);
+}
 
 // ── 8. SSE 坏帧容错（P0-1）────────────────────────────────
 Console.WriteLine("\n── 8. SSE 坏帧容错 ──");

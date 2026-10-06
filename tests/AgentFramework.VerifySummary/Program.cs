@@ -5,29 +5,13 @@ using System.Text;
 using AgentFramework.Contracts;
 using AgentFramework.Llm;
 using AgentFramework.Tools;
+using static AgentFramework.Harness.Suite;
 
 // ═══════════════════════════════════════════════════════════
 //  摘要 + 提示注入防护 垂直切片验证
 //  「原文不出机」到底有没有做到，这里说了算
 // ═══════════════════════════════════════════════════════════
 
-var passes = 0;
-var failures = 0;
-
-void Check(string name, bool ok, string? detail = null)
-{
-    var suffix = detail is null ? "" : $"  ({detail})";
-    if (ok)
-    {
-        passes++;
-        Console.WriteLine($"  [PASS] {name}{suffix}");
-    }
-    else
-    {
-        failures++;
-        Console.WriteLine($"  [FAIL] {name}{suffix}");
-    }
-}
 
 var root = Path.Combine(Path.GetTempPath(), "af-summary-verify", Guid.NewGuid().ToString("N")[..8]);
 Directory.CreateDirectory(root);

@@ -11,4 +11,8 @@
     <ProjectReference Include="../../src/AgentFramework.Llm/AgentFramework.Llm.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <ProjectReference Include="../AgentFramework.Harness/AgentFramework.Harness.csproj" />
+  </ItemGroup>
+
 </Project>

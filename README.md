@@ -8,7 +8,7 @@
 
 不是从底层往上堆，而是先打通**五条最细但端到端的线**，把架构假设全部验证掉，再往上加肉。
 
-## 当前进度：二十二条切片已跑通（总数以 verify-all 输出为准）
+## 当前进度：二十八条切片已跑通（总数以 verify-all 输出为准）
 
 | 切片 | 验证内容 | 结果 |
 |------|---------|------|
@@ -30,11 +30,16 @@
 | **⑯ 架构优化（地基）** | **宿主自己也是一组插件**：宿主模块走内核 seam（注册即副作用）→ **加功能 = 加模块**；工具注册表（**注册 ≠ 可见**、运行期可挂卸）；交互缝（审批只是它的特例）；会话派生（子 agent 地基）；路由可注册 | 架构 26 项 ✔ |
 | **⑰ 安全加固（外部审查）** | SSE **坏帧容错** · **悬空工具调用自愈**（否则会话每轮 400）· 切会话等回合 · Origin 校验 + 会话 id 白名单 · **SSRF 归一化**（`::ffff:` / ULA / CGNAT）· 密钥不出门 · cmd 参数 · 订阅者异常隔离 · SSE 队列化 · 命令输出过程中封顶 | +18 项异常路径 ✔ |
 | **⑱ 脚本插件 + 自我升级** | **agent 自己写插件**（JS，免编译）→ 热装载、免重启 → 下一轮工具即可见；坏版本**自动回滚**到上次装载成功的版本；`capabilities` **未声明即拒**；`tools/pre-execute` 脚本钩子做**确定性把关**；装载即自测 | VerifyPlugins 20 项 ✔ |
-| **⑲ 基石插件（官方三件套）** | **编程扩展工具包**（`edit_file` 精确替换 / `grep_files` / `find_files` / `read_lines` / 建目录 / 搬移 / 删除：agent 从「整篇重写」升级为「局部改」）· **写作扩展工具包**（字数 / 段落节奏 / 口头禅 / 标点 / 提纲）· **基础 UI 美化控制台**（主题色板 + 阅读模式，**注入主界面**而不只是 iframe 面板）；配套新增 `IWorkspaceService` 工作区 seam 与 `ui.styles/scripts` 界面注入声明 | VerifyBaseKit 41 项 ✔ |
-| **⑳ 命令沙箱** | 跑命令真的「关进笼子」：**临时目录重定向进工作区**（堵住绕开写边界的暗道）· **超时/取消连子孙进程一起终结**（不再留孤儿）· Windows 上用 **Job Object** 加内存/CPU/进程数配额 · 档位可替换（**换沙箱 = 加插件**） | VerifySandbox 24 项 ✔ |
+| **⑲ 基石插件（官方三件套）** | **编程扩展工具包**（`edit_file` 精确替换 / `grep_files` / `find_files` / `read_lines` / 建目录 / 搬移 / 删除：agent 从「整篇重写」升级为「局部改」；**2026-09 已上收 core**）· **写作扩展工具包**（字数 / 段落节奏 / 口头禅 / 标点 / 提纲）· **基础 UI 美化控制台**（主题色板 + 阅读模式，**注入主界面**而不只是 iframe 面板）；配套新增 `IWorkspaceService` 工作区 seam 与 `ui.styles/scripts` 界面注入声明 | VerifyBaseKit 41 项 ✔ |
+| **⑳ 命令沙箱** | 跑命令真的「关进笼子」：**临时目录重定向进工作区**（堵住绕开写边界的暗道）· **超时/取消连子孙进程一起终结**（不再留孤儿）· Windows 上 **Job Object** 配额 · Linux 上 **`bwrap` 命名空间隔离**（`auto` 首选档；`--sandbox-network none` 时一并禁网）· **容器档（Docker/Podman）**独立 rootfs + 可禁网 · 档位可替换（**换沙箱 = 加插件**） | VerifySandbox 51 项 ✔ |
 | **㉑ 工具包与暴露面** | **装得多 ≠ 负担重**：工具按**包**（core / exec / web / devkit …）分组，会话里按包开合；**装载与暴露解耦** —— 插件照常装着，用不上的包收起来，省每轮的 schema token，也少让模型在几十个工具里挑错；顺手统一了两处各算一套的可见面逻辑 | VerifyToolsets 31 项 ✔ |
-| **㉒ 记忆与进化（计划 + 契约）** | 对照 MiMo Code 把差距**从「缺功能」重新定位成「缺时机与角色」**：拆开「**写入**」（旁路落盘、上下文不动 → 可以早）与「**裁剪**」（换投影函数、打断缓存 → 必须晚）两个触发点，压缩线因此一个字不用改；契约先行 —— `CheckpointEvent`（**不进模型上下文**、追加不覆盖、带增量区间）+ `ICheckpointWriter`；**31 项契约桩**先立住 | VerifyCheckpoint 31 项 ✔ |
+| **㉒ 记忆与进化（checkpoint 已接入）** | 对照 MiMo Code 把差距**从「缺功能」重新定位成「缺时机与角色」**：拆开「**写入**」（旁路落盘、上下文不动 → 可以早）与「**裁剪**」（换投影函数、打断缓存 → 必须晚）两个触发点，压缩线因此一个字不用改；**v3.22 起契约真接进主循环** —— `LlmCheckpointWriter` 旁路提取结构化状态 → 回合边界消费（**只追加日志、上下文一个字节不动**），`PromoteMemory` 把跨任务发现升进记忆 | VerifyCheckpoint 49 项 ✔ |
 | **㉓ 记忆降档按「使用频率」判定** | 降档判据从「30 天时间线」改为**调用频率 + 半衰期衰减**：热度 = `(1 + 使用次数) × 0.5^(闲置天数 / 半衰期)`，**越用越新、老而常用永不掉线**；给「本轮检索命中」补上**隐式使用信号**（不再只看显式 `recall_memory`）；预览与执行**共用同一判据**；面板「清扫」改称「巩固」 | VerifyMemory **165 项** ✔ |
+| **㉔ 电脑操作（Computer Use）** | 让 agent 像人一样用桌面：**截屏注入视觉上下文** + 鼠标 / 键盘注入（Unicode 文本不依赖键盘布局，中文 / emoji 直通）+ 窗口 / 应用操作（列窗 / 聚焦 / 启动）。平台驱动可替换（Windows `user32`·GDI / macOS `screencapture`·`osascript` / Linux `xdotool`·`import`），缺依赖或平台不支持时**如实报告不可用**；失败不炸回合 | VerifyComputerUse 30 项 ✔ |
+| **㉕ 审批按「工具自报的风险」判定** | 「哪些动作有副作用」这条知识，从前在宿主里写了**三份**且互不同步（Ask 档 5 个名字 / Build 档一长串 / 越界写硬闸 6 个名字，还含一枚**从未注册过的幽灵 `copy_path`**）—— 于是 `read_lines` / `grep_files` / `read_image` 在默认档弹卡、在 Build 档却被当只读放行：**同一动作两档判成两种性质**。现在工具自己声明 `ToolRisk`（只读 / 写 / 破坏性 / 执行，**没声明的一律按最保守的执行档**），审批只认这一个来源；MCP 工具从 `annotations.readOnlyHint` / `destructiveHint` 映射 | VerifyHost 107 项 ✔ |
+| **㉖ 重建：checkpoint 当种子开新窗口** | 「上下文满了、但状态很清楚」的长任务不必拖着全史跑：`RebuildSession` 从 checkpoint 起一个**只带状态不带史**的新会话（header 记血缘 + 一条开场状态），与「分叉」（复制历史前缀）分工清楚。界面会话菜单一键「重建」，API `POST /api/sessions/rebuild` | VerifyCheckpoint 54 项 ✔ |
+| **㉗ 子 Agent 管控面** | 从前派子 Agent 只能**干等**（同步一次性）—— 并行、中途追加指令、叫停都做不到，而真实长任务正是「几块活同时推 + 谁出岔子停谁」。现在：`spawn_subagent` 加 `run_in_background`（立刻拿句柄、不阻塞）· `subagent` 工具管**名单 / 状态 / 取结果 / wait / 追加指令 / 打断**（`interrupt=true` 可**抢占**：作废当前轮、立刻改用新指令）· **派生深度闸**（默认 2 层，超出如实拒绝）· 侧栏「子 Agent」面板（只在真有子 Agent 时出现）· `GET /api/subagents`。追加默认的语义刻意做小：它只是**下一个回合的输入**（跑完当前轮就接上），要立刻掰过来才用 `interrupt`。另：**关停纪律** —— 宿主 `DisposeAsync` 先叫停子 Agent 与全部后台作业（checkpoint / 进化）并**有界等待**，不给「宿主已拆、它还在写盘」留窗口 | VerifyHost 138 项 ✔ |
+| **㉘ 工具检索（Tool Search）** | 工具定义不该在开跑前就塞满上下文（50 个工具吃 10–20k token，**30–50 个是选择准确率拐点**）。v3.10 已让 `Eager=false` 的包（如 `mcp:<server>`）默认不进 schema，v3.26 补上**工具级**拉起：`tool_search` 检索 → 命中即把**完整定义**交回模型 → **下一轮**进工具表；`list` 看未加载索引、`reset` 卸下。拉起是**会话级粘性**的（只活在回合内、不外溢），且仍受模式包集 / 模式白名单 / 技能白名单约束 —— 「补一个工具」不该把闲聊模式变成全功能模式。对齐 Anthropic `defer_loading`（延迟工具连名字都不给）与 Claude Code `ToolSearchTool`（搜索工具自己必须常驻） | VerifyToolsets 45 项 ✔ |
 
 > 口径：表中「N 项」= 该切片验证工程的通过条数；**合计以 `verify-all.cmd` 输出为准**（工程有增减时总数会变，不要写死）。
 
@@ -123,10 +128,10 @@ verify-all.cmd
 手工逐个跑时请与脚本同配置（**Debug**）：
 
 ```powershell
-$p = @("Verify","VerifyData","VerifyAgent","VerifyTools","VerifyHost",
-       "VerifyLauncher","VerifyWeb","VerifySummary","VerifyRephrase","VerifyContext",
-       "VerifyMemory","VerifyLlm","VerifyPlugins","VerifyBaseKit","VerifySandbox","VerifyToolsets",
-       "VerifyCheckpoint")
+$p = @("Verify","VerifyData","VerifyAgent","VerifyTools","VerifySandbox",
+       "VerifyComputerUse","VerifyPlugins","VerifyLlm","VerifyHost","VerifyLauncher",
+       "VerifyWeb","VerifySummary","VerifyRephrase","VerifyContext","VerifyMemory",
+       "VerifyToolsets","VerifyBaseKit","VerifyCheckpoint","VerifyEvolution","VerifySecrets")
 foreach ($n in $p) {
   dotnet run --project "tests\AgentFramework.$n\AgentFramework.$n.csproj" -c Debug --no-build
 }
@@ -148,7 +153,10 @@ foreach ($n in $p) {
 | `--plugins <dir>` | 插件目录（其下每个子目录一个插件） |
 | `--plugins-enabled a,b` | 只装配这些插件（启动器的 profile 会生成它） |
 | `--disable-toolsets a,b` | **本次收起的工具包**（逗号分隔）。留空 = 全部开启；`core` / `meta` 是保留包，写了不生效 |
-| `--sandbox <档位>` | **命令沙箱**：`auto`（默认）/ `off` / `process` / `job`，或插件注册的后端名。名字不认识或平台不可用会回落并说明原因 |
+| `--sandbox <档位>` | **命令沙箱**：`auto`（默认）/ `off` / `process` / `job` / `bwrap` / `container`，或插件注册的后端名。名字不认识或平台不可用会回落并说明原因 |
+| `--sandbox-image <镜像>` | **`container` 档用的镜像**（如 `node:22`）。选容器档**必配** —— 独立 rootfs 没有普适默认 |
+| `--sandbox-network <none\|bridge\|host>` | 容器网络策略，默认 `none`（禁网）；装依赖等需要出网时设 `bridge` |
+| `--sandbox-runtime <docker\|podman>` | 容器运行时，省略则自动探测（docker 优先） |
 | `--session <id>` | 会话 ID（同名即续接同一会话） |
 | `--prompt "<text>"` | 一次性模式 |
 | `--allow-command` | **放开命令审批**（默认需确认；无界面时直接拒绝） |
@@ -231,12 +239,12 @@ dotnet publish src\AgentFramework.Host\AgentFramework.Host.csproj `
 | `src/AgentFramework.Launcher` | 启动器：勾选插件 → profile → 按勾选装配（**不引用本体，各编各的**；可打包成内嵌本体的单文件 exe，见 `pack-launcher.cmd`） |
 | `src/AgentFramework.Desktop` | **桌面壳**：WebView2 原生窗口装下整个界面（Windows） |
 | `src/AgentFramework.SamplePlugin` | 示例插件 |
-| `src/AgentFramework.Plugins.DevKit` | **基石插件 · 编程扩展工具包**（编辑/检索/搬移，注入 `IWorkspaceService`） |
+| `src/AgentFramework.Plugins.ComputerUse` | **基石插件 · 电脑操作**（截屏 + 鼠标/键盘注入 + 窗口/应用操作；平台驱动可替换） |
 | `src/AgentFramework.Plugins.WritingKit` | **基石插件 · 写作扩展工具包**（字数/段落/口头禅/标点/提纲） |
 | `src/AgentFramework.Plugins.ConsoleKit` | **基石插件 · 基础 UI 美化控制台**（`ui.styles/scripts` 注入主界面） |
 | `src/AgentFramework.Index` | **SQLite 派生索引**：可查历史 + 历史检索（随时可从日志重建） |
-| `src/AgentFramework.Sandbox` | **命令沙箱**：`off` / `process`（跨平台护栏）/ `job`（Windows Job Object 配额）+ 可注册后端 |
-| `tests/AgentFramework.Verify*` | 二十二条切片验证（**总数以 verify-all 输出为准**） |
+| `src/AgentFramework.Sandbox` | **命令沙箱**：`off` / `process`（跨平台护栏）/ `job`（Windows Job Object 配额）/ `bwrap`（Linux 命名空间隔离）/ `container`（Docker·Podman）+ 可注册后端 |
+| `tests/AgentFramework.Verify*` | 二十八条切片验证（**总数以 verify-all 输出为准**） |
 
 ## 核心铁律（全部有验证覆盖）
 
@@ -455,12 +463,13 @@ public sealed class MyModule : IHostModule
 
 前面十八条切片里，agent 手上的官方工具虽有 20 个（含 `search_history`；索引不可用时为 19），编辑能力却**只有整篇覆盖** ——
 改一行代码要重发整个文件；想找一处代码，只能 `run_command` 拼各平台不一样的 `findstr` / `grep`。
-这一版把这些**基石能力**补齐，而且是**当插件补**、不是塞进宿主源码：
-「能当插件做的，就不要进内核」。
+这一版把这些**基石能力**补齐。当初它们以 devkit 插件形态交付，**2026-09 依「日常干活链全收 core」上收为内建** ——
+模型不必先 `use_toolset` 才能改文件，少一轮、也少一次猜错包；写作 / 界面两件仍以插件分发
+（「能当插件做的，就不要进内核」依然成立）。
 
 | 插件（`src/AgentFramework.Plugins.*`） | 补什么 | 工具 |
 |------|------|------|
-| **devkit** · 编程扩展工具包 | 从「整篇重写」升级为**局部改**；找东西不再靠拼平台命令 | `edit_file` · `grep_files` · `find_files` · `read_lines` · `make_dir` · `move_path` · `delete_path` |
+| **（devkit，已上收 core）** · 编程扩展 | 从「整篇重写」升级为**局部改**；找东西不再靠拼平台命令。**2026-09 已上收为 core 内建工具**（模型不必先 `use_toolset` 才能改文件），不再作为独立插件工程分发 | `edit_file` · `grep_files` · `find_files` · `read_lines` · `make_dir` · `move_path` · `delete_path` |
 | **writing-kit** · 写作扩展工具包 | 写作里**模型最不擅长自测**的那几项：字数、段落节奏、口头禅、标点 | `word_count` · `paragraph_report` · `repeat_words` · `check_punctuation` · `outline` |
 | **console-kit** · 基础 UI 美化控制台 | 界面外观可调：主题色板 / 阅读模式（**一个工具都不注册** —— 插件不只会给 agent 加能力） | 面板（主题 · 阅读模式） |
 
@@ -506,9 +515,47 @@ public interface IWorkspaceService
 不是「插件目录随便读」。验证里钉了：未声明的文件、带 `..` 的路径，一律拒。
 
 - 验证：`tests/AgentFramework.VerifyBaseKit` **41 项**（含端到端 HTTP：首页是否真被注入、`/plugin-ui` 是否真能取到样式）
-- 开发态：`run.cmd` 会把三个插件的 Debug 产物同步到 `plugins\`；打包时 `pack-launcher.cmd` 会把它们 Release 发布进去
+- 开发态：`run.cmd` 会把 **writing-kit / console-kit / computer-use 三个**插件的 Debug 产物同步到 `plugins\`；打包时 `pack-launcher.cmd` 会把它们 Release 发布进去（devkit 已上收 core，不再随包分发）
 - 想再加一个基石插件：照 `AgentFramework.Plugins.*` 建工程 → 写 `plugin.json`（含 `injects`）→ `ActivateAsync` 里 `ctx.RegisterTool(...)`
   → 加进 `AgentFramework.sln` → 在 `run.cmd` / `pack-launcher.cmd` 里各加一行同步
+
+## 🖱️ 电脑操作（Computer Use）：让 agent 像人一样用桌面
+
+有些软件**没有 CLI，也没有 API** —— 剪辑、设计、聊天工具、老式内部系统。要接管它们，
+唯一的路是像人一样：看屏幕、点按钮、打字。
+
+这一版把这条路铺好（对齐 dsh-orb / computer-control 的能力面）：
+
+| 工具 | 干什么 |
+|---|---|
+| `screenshot` | 截屏并**注入视觉上下文**（模型直接看画面）；`region` 可只截一块省 token |
+| `screen_size` | 屏幕像素尺寸（给坐标一个边界） |
+| `click` / `move` / `drag` / `scroll` | 鼠标：点（单/双/右/中）、移动、拖拽、滚轮 |
+| `type` / `key` | 键盘：Unicode 文本（中文 / emoji，不依赖键盘布局）、组合键（`ctrl+c` / `alt+tab` / `F5`） |
+| `list_windows` / `focus_window` | 看有哪些窗口、把目标带到前台 |
+| `open_app` / `open_url` | 启动应用 / 打开链接 |
+| `wait` | 等界面稳定再截屏 |
+
+**核心用法是「截图驱动闭环」**：先 `screenshot` 看 → `click` / `type` 动 → 再 `screenshot` 确认。
+坐标永远基于刚看到的那张图 —— 否则模型是在「凭记忆点坐标」。
+
+几处刻意的设计：
+
+- **平台驱动可替换**：Windows 走 `user32` + GDI（`SendInput` 注入，Unicode 文本不依赖键盘布局）；
+  macOS 走 `screencapture` + `osascript`（指针要 `cliclick`）；Linux(X11) 走 `xdotool` + `import` / `scrot`。
+  驱动按平台 / 依赖**自报能力**，缺什么就如实说缺什么。
+- **不做半吊子模拟**：平台不支持 / 缺依赖时返回明确的「不可用」，而不是假装点到了 ——
+  模型的下一步才不会建立在假前提上。
+- **安全交给审批链**：这里不判「危险性」，每个调用都过宿主的**分级审批**（默认未知工具 = 询问）——
+  与 dsh-orb 的「安装即同意门」不同，保留了逐次确认的可能。
+- **失败不炸回合**：驱动一律 `throw DesktopException`，工具层在**最外层**一处接住转成工具结果
+  （参数校验抛的错也在这一层内 —— 这是本工程验证抓到的第一个真实缺陷）。
+
+**边界（如实说明）**：本插件只做**前台可见操作**，不含 dsh-orb 的悬浮球 UI、后台会话派发与截屏观察边框 ——
+那些是界面形态，dba 的入口仍是 Web UI / 桌面壳。Windows 的 UAC 提升窗口点不进、打不了字（系统限制，如实报错）。
+
+- 验证：`tests/AgentFramework.VerifyComputerUse` **30 项**（键名解析 / 参数校验 / 兜底驱动如实拒绝 / 工具契约完整性）——
+  不碰真实桌面，验的是**出错路径与纯逻辑**这两块最该钉死的。
 
 ## 🧰 命令沙箱：跑命令「关进笼子」（平台强度不同）
 
@@ -520,18 +567,24 @@ public interface IWorkspaceService
 - 一条 `npm install` 的日志能吃到几百 MB 内存；跑疯的构建把机器一起拖死。
 
 这一版把「放行之后」也管起来，而且**做成可替换的后端**（学 dsh：sandbox 本身就是插件）——
-宿主内置三档，插件可以注册新后端（容器、远程执行、带审计的包装……）。
+宿主内置五档（`off` / `process` / `job` / `bwrap` / `container`），插件可以再注册新后端（远程执行、带审计的包装……）。
 
 | 档位 | 管住什么 | 平台 |
 |------|---------|------|
 | `off` | 不管。**保留它是有意的**：出事时能一键退回「没有沙箱的世界」，才好判断问题出在命令本身还是沙箱身上 | 全平台 |
-| **`process`**（非 Windows 上 auto 的落点） | 工作目录钉在工作区；**临时目录重定向进工作区**（TMP/TEMP/TMPDIR）；**超时/取消连子孙进程一起终结**；输出过程中封顶 | 全平台 |
-| **`job`**（Windows 上 auto 的落点） | 在 process 之上加**内核配额**：内存上限、CPU 时间上限、活动进程数上限，且**宿主退出时连同子孙一并终结**（Job Object 的 `KILL_ON_JOB_CLOSE`） | Windows |
+| **`process`** | 工作目录钉在工作区；**临时目录重定向进工作区**（TMP/TEMP/TMPDIR）；**超时/取消连子孙进程一起终结**；输出过程中封顶 | 全平台 |
+| **`job`**（Windows） | 在 process 之上加**内核配额**：内存上限、CPU 时间上限、活动进程数上限，且**宿主退出时连同子孙一并终结**（Job Object 的 `KILL_ON_JOB_CLOSE`） | Windows |
+| **`bwrap`**（Linux，装了 bubblewrap） | **命名空间隔离**：根文件系统只读、工作区可写、`/tmp` 独立、PID/UTS/IPC/用户命名空间隔离 | Linux |
+| **`container`**（装了 docker / podman） | **容器隔离**：独立 rootfs（镜像自带工具链）、**网络可完全隔绝**、根只读（`/tmp` 为可写临时区）、内存上限、工作区挂载可写、按宿主 uid 映射。**需显式配镜像** | 全平台 |
 
-> ⚠️ **隔离强度说清楚**：`job` 档给的是**资源配额**（内存 / CPU / 进程数），`process` 档给的是**进程级护栏**
+> ⚠️ **隔离强度说清楚**：`job` 给的是**资源配额**（内存 / CPU / 进程数），`process` 给的是**进程级护栏**
 > （cwd 钉死 / TMP 重定向 / 超时终结 / 输出封顶 / 环境白名单）。**两者都不是隔离** —— 命令仍以宿主进程同等 uid 权限运行。
-> 非 Windows 上当前没有 chroot / namespace / seccomp / cgroup / landlock，命令能读写 `~/.ssh`、能访问内网。
-> 要更强的隔离，请走插件后端（容器 / bwrap）。
+> 真正隔离的是 **`bwrap`**（借宿主根、**默认不禁网** —— `--unshare-net` 会让 `npm install` 直接失效）与
+> **`container`**（独立 rootfs + 可彻底禁网）。
+> **`auto` 的优先链**（2026-10 起）：Linux 有 bwrap 用 bwrap → Windows 用 job → 其余 process（默认就用能拿到的最强护栏）。
+> **`container` 刻意不进 `auto`**：容器要一个镜像，而「用哪个镜像」没有普适默认（跑 .NET / Node / Python 各不相同），
+> 没有合理默认的东西不该被自动选中 —— 它是显式选用的档：`--sandbox container --sandbox-image <镜像>`。
+> 容器网络**默认 `none`（禁网）**，装依赖等需要出网时加 `--sandbox-network bridge`。
 
 为什么 Windows 上选 Job Object：它是**系统自带、零依赖**的进程配额机制，而 agent 跑命令真正要的
 就是这几条。容器（要装运行环境）、低完整性级别（会把普通程序跑坏）、防火墙（要管理员权限）
@@ -545,16 +598,35 @@ public interface IWorkspaceService
   「以为自己被保护着」比「知道自己没被保护」更危险。
 - **结果里标明经过哪一档**：`run_command` 输出里有一行 `sandbox=process`，
   出问题时第一眼就知道当时有什么护栏。
-- **shell 会话级一次决定**：优先 POSIX（bash → sh），Windows 找不到才回落 cmd（并写明）。
-  同一会话内不再每条命令重猜；结果里有 `shell=bash` / `shell=cmd(非 POSIX)`。
+- **shell 会话级默认，可按调用覆盖（v3.22）**：优先 POSIX（bash → sh），Windows 找不到才回落 cmd（并写明）。
+  会话默认不再每条命令重猜；需要时模型可传 `shell` 参数**按调用**选（`auto`/`bash`/`sh`/`pwsh`/`powershell`/`cmd`）——
+  白名单**只收关键字、不收任意路径**（`ShellResolver` 会把认不出的字符串当显式路径直接执行，那等于给模型一个任意执行入口）。
+  结果里有 `shell=bash` / `shell=cmd(非 POSIX)`。
   配置：`--shell` / `AGENT_SHELL` / `agent.json` 的 `shell`（`bash`/`sh`/`cmd`/`powershell`/`pwsh`/路径/`auto`）。
+- **网络档是统一语义**：`--sandbox-network none` 时容器档 `--network none`、bwrap 档 `--unshare-net` ——
+  「禁网」在两个后端上说法一致（默认放开，不打断 `npm install` 之类）。
 - **换沙箱 = 加插件**：`ctx.Effect(() => registry.Register(backend))`，卸载即撤销。
   沙箱档位不认识、或后端在平台不可用时一律回落，并且**回落原因必须可读**。
 - **超时与取消是两件事**：前者是命令自己的问题，后者是用户叫停 —— 结果里分开报。
 
-- 验证：`tests/AgentFramework.VerifySandbox` **25 项**，其中「超时连子孙一起终结」用的是
-  **三步采样**（起之前 → 跑起来时 → 终结之后）：不先证明命令真起了子进程，
-  这条断言就是假阳性。
+- 验证：`tests/AgentFramework.VerifySandbox` **51 项**（含 bwrap 隔离参数的纯函数断言：只读根 / 只挂工作区 / 可切换禁网），
+  其中「超时连子孙一起终结」用的是**三步采样**（起之前 → 跑起来时 → 终结之后）：
+  不先证明命令真起了子进程，这条断言就是假阳性。
+
+## 🐚 持久 shell 与后台作业（2026-10）
+
+`run_command` 有两条硬伤，这一版一次补齐：
+
+| 痛点 | 新出口 |
+|---|---|
+| 每次都是**全新进程** —— `cd` / `export` / venv 激活跨调用全丢 | **`shell`** 工具：常驻会话，这三样跨调用**保留**（POSIX shell，对齐 dsh 的 persistent shell · Claude Code 的 Bash） |
+| **同步阻塞** —— 一条 `npm install` / `dotnet build` 能把回合钉到超时 | **`job`** 工具：`start` 扔后台 → 继续干活 → `status` / `output` / `kill` 收回结果 |
+
+- **`shell`**：cwd 钉工作区、TMP 重定向、环境白名单、输出封顶（与 `run_command` 同一批护栏）。命令**超时 = 杀掉并重建**会话（半死的 shell 不可信）。仅支持 POSIX shell（bash / sh）—— Windows 的 cmd / powershell 会拿到**明确拒绝**而不是半吊子模拟。
+- **`shell` 的三个可选参数**（照 Claude Code Bash 工具补齐）：`description`（一句话说明这条命令在干什么，进报告便于审计）· `timeout`（秒，覆盖默认超时但**夹在运维设的硬上限内**，模型越不过上限）· `run_in_background`（扔后台跑，**与 `job` 共用同一份作业池** —— 两个入口、一张作业表，于是「shell 起的后台」在 `job` 列表里看得见）。报告另给 `cwd=` 一行，`cd` 的效果一眼可见，不必再跑一条 `pwd` 确认。
+- **`job`**：一个工具多动作（`start` / `status` / `output` / `kill` / `list`）。输出**有界**（超限从头部裁剪，保留最新）；宿主关闭时**连同子孙一并终结**，不留孤儿。
+- 两者都在 `exec` 包里（可整体收起）、都过审批链、都受进程级护栏。
+- 验证：`tests/AgentFramework.VerifySandbox`（含「cd / export 跨调用保留」「超时后会话自动重建」）+ `tests/AgentFramework.VerifyTools`（shell 的 `description` / `timeout` 夹取 / 后台作业与 `job` 同池）。
 
 ## 🧳 工具包：装得多 ≠ 负担重
 
@@ -571,12 +643,12 @@ public interface IWorkspaceService
 | 包 | 装什么 | 可否关闭 |
 |---|---|---|
 | `core` | 完整文件链（读/写/列/改/行读/建/移/删/搜/找）· 问用户 · 记忆 · 计划/笔记 · 历史 · 派子 Agent · 结构化转换 | **不可关**（关了 agent 就成残废） |
-| `meta` | `toolsets` · `use_toolset` · `tool_catalog` | **不可关**（关了再也开不回来） |
+| `meta` | `toolsets` · `use_toolset` · `tool_catalog` · `tool_search` | **不可关**（关了再也开不回来） |
 | `exec` | `run_command`（受命令沙箱保护） | 可关 ——「这次不许它跑命令」有出口了 |
 | `web` | `web_search` · `web_fetch` | 可关 |
 | `self` | 插件四件套 + 技能工坊（给自己长能力） | 可关 |
 | `writing-kit` | 基石插件带来的写作分析包（**包名与显示名来自插件清单**） | 可关 |
-| `mcp:<server>` | （下一步）每个 MCP server 一个包 | 可关 |
+| `mcp:<server>` | 每个 MCP server 一个包（v3.22 起生效）；工具**默认延迟**（不进 schema），模型经 `tool_search` 按需拉起 | 可关 |
 
 **三个开关入口**（读的是同一份视图，永远一致）：
 
@@ -590,10 +662,10 @@ public interface IWorkspaceService
 - **保留包不许关**：`core` 与 `meta` —— 关掉它们不是省负担，是把 agent 关成残废，
   或让开关本身再也开不回来（宿主直接拒绝，并说明理由）；
 - **包 = 能力的用途，不是代码的来源**：所以「写小说时才用的那些」能和「天天要用的那些」分开；
-- **包是可见性的最小单位**，也是下一步的两块地基：MCP 工具会落进 `mcp:<server>` 包并默认
-  **延迟**（不进 schema），Tool Search 再按需把它们拉进上下文。
+- **包是可见性的最小单位**：MCP 工具落进 `mcp:<server>` 包并默认**延迟**（不进 schema），
+  **v3.26 起**模型可用 `tool_search` 按需把**单件**拉进上下文 —— 不必为一个工具开一整包。
 
-- 验证：`tests/AgentFramework.VerifyToolsets` **31 项**（含端到端 HTTP：
+- 验证：`tests/AgentFramework.VerifyToolsets` **45 项**（含端到端 HTTP：
   开关是否真的改变暴露面、保留包是否真的被拒、配置里写保留包是否真的不生效）
 
 ## 🔌 脚本插件：agent 自己给自己写插件（免编译热更新）
@@ -649,7 +721,13 @@ agent 想给自己加个能力
 
 - **契约**：`CheckpointEvent`（第 16 种事件）+ `ICheckpointWriter` + `CheckpointOptions`（默认**关**，长任务显式开）
 - **三条纪律**：**不进模型上下文** · **追加而非覆盖**（旧的那条永不改） · 带 `FromSeq` / `ToSeq` **增量区间**（于是「改主意」在时间线上可见，而不是被悄悄覆盖）
-- **验证**：`tests/AgentFramework.VerifyCheckpoint` **31 项**（专门断言「加入 checkpoint 后投影消息数不变、哨兵文本不出现在任何消息里」）
+- **实现（v3.22 接入）**：`LlmCheckpointWriter`（旁路小模型，按固定字段吐 JSON → 解析成结构化事件；超限按「杂项 → 错误修复 → 发现 → 文件 → 约束 → 决策 → 当前工作 → 下一步 →（最后）**意图**」逐级裁到 `MaxChars`，意图是锚点的锚点）· 主循环在回合边界**消费**（只追加日志、不动上下文）与**派发**（水位跨 `TriggerRatio` 且距上次至少新增 `MinNewEvents` 个事件，防抖）· `PromoteMemory` 把「跨任务发现」升进记忆并把 id 写回事件（可审计「这条记忆是谁写的」）· 手动 `POST /api/context/checkpoint`
+- **验证**：`tests/AgentFramework.VerifyCheckpoint` **49 项**（「加入 checkpoint 后投影消息数不变、哨兵文本不出现在任何消息里」+ writer 解析/裁剪 + 宿主接入与记忆升级）
+
+> ✅ **实现状态（v3.22，2026-10 对账）**：契约**已接进主循环**，「写盘不动上下文」现在是**真的** ——
+> checkpoint 事件由投影器忽略，只落盘、只供 rebuild 读；压缩水位（`0.8`）一个字没改。
+> 默认仍**关**（`CheckpointOptions.Enabled=false`）：它每触发一次要花一次模型调用，长任务显式开。
+> 「早摘要」（`EarlySummarizeRatio` 派发的后台 writer）是**另一条**通道，产 `ContextCompactedEvent`、会改变模型可见上下文 —— 两者各管各的。
 
 完整计划（五个支柱 / 分期 / 非目标 / 纪律）见 `docs/PLAN-memory-evolution.md`。
 
@@ -683,23 +761,38 @@ ALC 共享 `ILogger` 类型同一性、索引按 seq 水位判落后等。细节
 
 ## 下一步
 
-**记忆与进化（进行中，与 `docs/PLAN-memory-evolution.md` 同一套版本号）**
+> 本段已与代码**对账过**（2026-10）。「已实现」= 代码里真的接着、能跑；「契约就位」= 只有接口、无生产实现。
 
-- **v3.11 剩余**：`LlmCheckpointWriter`（旁路独立提取者，照 `LlmContextSummarizer` 的缝）→ 水位触发接进主循环 → writer 顺带把稳定观察升级进记忆（`CheckpointEvent` / `ICheckpointWriter` 契约已就位）
-- **v3.12**：`rebuild` —— 用 `SessionForker` **分叉新会话** + checkpoint 当种子 = 逻辑会话无界、物理窗口有界
-- **v3.13**：Dream / Distill —— 定期整理记忆、把重复出现的流程**固化成 B 通道插件**（可执行、可热装载，不只是文档）
-- **v3.14**：MCP 子进程通道（默认延迟 + 首次用到才启动）
-- **v3.15**：Goal 完成度验证器 + Max Mode —— 两个「用算力换可靠性」的开关，默认关
+**记忆与进化（`docs/PLAN-memory-evolution.md`）**
 
-**其余**
+- **v3.11 checkpoint**：**已实现（v3.22 接入）** —— `LlmCheckpointWriter`（旁路小模型，JSON → 结构化事件）+ 回合边界消费与水位派发（**写盘不动上下文**），另可手动写（`POST /api/context/checkpoint`）。「早摘要」（`EarlySummarizeRatio` 水位派发后台 writer，产 `ContextCompactedEvent`）仍在跑，是**另一条**通道。
+- **v3.12 rebuild**：**已实现（v3.23）** —— `RebuildSession` 从 checkpoint 起一个「只带状态不带史」的新窗口（界面「重建」按钮 / `POST /api/sessions/rebuild`）。与「分叉」（复制历史前缀）分工清楚。
+- **v3.13 Dream / Distill**：**已实现**（`DreamJob` / `DistillJob`）。
 
-- **真实模型联调**：`OpenAiCompatibleClient` 已就绪，设好环境变量就能连
-- **干活三件套**：`ask_user`（缝已就位）/ 持久 shell / 后台 jobs
-- **技能系统**：注册表 + 文件 provider + 按需加载（对齐 dsh 的 `dsh-skill`）
-- **子 agent 委派**：会话派生已就位，差派活 / 发消息 / 打断 / 名单
-- **计划模式 + 结构化 todo**：小本本升级版
-- **工具包下一步**：MCP 工具落进 `mcp:<server>` 包并默认延迟加载 → Tool Search 按需拉 schema
-- **更多基石插件**：后台 jobs + 持久 shell（长任务不再被 30 秒上限掐断）
-- **MCP 子进程通道**：把外部 MCP 服务接进来当工具（决策已定：直接兼容 MCP，不自造 RPC）
-- **沙箱后端插件**：容器档（Docker/Podman）—— 机制已就位，缺的是那个后端
-- **运行期挂载插件**：已完成（`plugin_write` / `plugin_reload`，见上）
+**已实现（曾列在这里的「下一步」）**
+
+- **MCP 子进程通道**：`src/AgentFramework.Host/Mcp/`（`McpModule` Order 450，stdio JSON-RPC，默认延迟启动）。支持 `initialize` / `tools/list` / `tools/call`，**v3.22 补上 `resources/list` / `resources/read`**（只对声明了 resources 能力的 server 注册 `mcp__<id>__resource_list` / `resource_read` 两个只读工具，落在同一个 `mcp:<id>` 延迟包里）；prompts / sampling 仍留白。
+- **v3.22 能力与健壮性批**（2026-10）：**按调用选 shell**（`run_command` 的 `shell` 参数，白名单只管关键字，拒绝任意路径 → 不给「任意程序执行」入口）· **原子写**（`write_file` / `edit_file` / 笔记 / 产物落盘改「临时文件 → Move 覆盖」，崩溃不留半截文件）· **Goal 验证器格式纠正**（首次解析不出裁决时按强约束重问一次，再 fail-open）· **bwrap 网络档统一**（`--sandbox-network none` 时 bwrap 也 `--unshare-net`）· **checkpoint 接入**（见上）。
+- **v3.23 批**（2026-10）：**审批按「工具自报的风险」判定**（`IToolWithRisk` + `ToolRisk`；删掉三份互不同步的硬编码工具名名单与幽灵 `copy_path` —— 工具与 MCP 工具都自报，**没声明的一律按最保守的执行档**）· **路由不再打挂整轮**（规则指错时按「显式回落 → 默认目标 → 唯一目标 → 名字排序的第一个」回落并记 `fallback`；长上下文判据从**字符数**换成 **token 估算**）· **重建 rebuild**（checkpoint 当种子开新窗口，见上）。
+- **v3.24 批**（2026-10）：**子 Agent 管控面** —— `spawn_subagent` 加 `run_in_background`（后台并行、立刻拿句柄）+ 新 `subagent` 工具（名单 / 状态 / 取结果 / **追加指令** / **打断** / 等待）+ `GET /api/subagents`。追加的语义刻意做小：它只是**下一个回合的输入**。
+- **v3.25 批**（2026-10）：**子 Agent 收尾**（`interrupt` **抢占**式追加 · **派生深度闸** · 侧栏子 Agent 面板）+ **一轮主动 bug 排查**，修掉 10 处 —— 其中几个值得单独点名：**多个子 Agent 并发回报同一父会话会让内存事件表乱序**（落盘 Seq 与入表是两把锁两步，投影会把 completed 排到 requested 前面）、**宿主关停不设退休**（`MarkRetired()` 建好却零调用，外部审查 P1-2）、**宿主关停不叫停后台作业**（checkpoint / 进化还在往盘上写 → 加生命周期取消源 + 有界等待）、**子 Agent 启动异常无结局**（`OpenSession` 落在 try 外 → 条目永远卡 Running）。细节见 [`docs/history/CHANGES-v3.25-subagent-finish-bugfix.md`](docs/history/CHANGES-v3.25-subagent-finish-bugfix.md)。
+- **v3.30 批**（2026-10）：**文件族工具统一口径** —— 抽出 `FileHints`（单一来源），把 v3.28/v3.29 的「失败必须给下一步」落到 `read_file` · `write_file` · `list_dir` · `read_lines` · `grep_files` · `find_files` · `make_dir` · `move_path` · `delete_path`：文件不存在给「find_files 找 / list_dir 看」、内容过长给「分两次写」、正则写错给「去掉 regex=true」、越界给「改用工作区内路径」、漏参数给路径形状示例。细节见 [`docs/history/CHANGES-v3.30-file-hints.md`](docs/history/CHANGES-v3.30-file-hints.md)。
+- **v3.29 批**（2026-10）：**命令类工具统一口径** —— 把 v3.28 定下的「退出码非零不是失败 / 失败必须给下一步 / 报告非默认才回显」推广到 `shell` · `job` · `edit_file`：抽出 `CommandHints` 做单一来源；`shell` 非零退出改判「跑完了」并补 `[hint]` 与超时三步自救；`job` id 打错时给出 `action=list` 的出路；`edit_file` 失败时指路（**多处匹配列出每一处行号**，改错地方比改不动更贵）。细节见 [`docs/history/CHANGES-v3.29-command-hints-unified.md`](docs/history/CHANGES-v3.29-command-hints-unified.md)。
+- **v3.28 批**（2026-10）：**`run_command` 调得顺** —— 退出码非零不再算工具失败（从前它走 `ToolResult.Fail`，主循环给正文加 `ERROR:` 前缀，于是**编译失败 / 测试不过 / grep 无匹配**在模型眼里都成了「工具坏了」；现在只有「命令根本没起来」才算失败），并补 `timeout`（夹在运维上限内）/`description` 参数、非零退出给一行自救提示（127/126/9009）、超时提示三步自救，描述里写明与 `shell` / `job` 的分工。细节见 [`docs/history/CHANGES-v3.28-command-ergonomics.md`](docs/history/CHANGES-v3.28-command-ergonomics.md)。
+- **v3.27 批**（2026-10）：**外包任务书收口** —— `PLAN-outsourcing.md` 八项逐项对账（全 ✅）并补上两处「只有单测、没有真实链路证据」的缺口：ask_user **前端端到端**（新增 `tools/ask-user-e2e.js`：把页面内嵌脚本放进 jsdom 真跑，11 项 —— 弹卡 / 选项提交 / 自由输入 / 失败文案可诊断 / 不串会话 / 老帧兼容）、**冻结段字节哈希诊断**（`HostOptions.CacheDiagnostics` 默认关；`/api/context.cache` 把「前缀有没有被打掉」变成可看的数字）。细节见 [`docs/history/CHANGES-v3.27-outsourcing-closeout.md`](docs/history/CHANGES-v3.27-outsourcing-closeout.md)。
+- **v3.26 批**（2026-10）：**Tool Search**（工具级按需检索）—— `tool_search` 把延迟包里的**单件**工具拉进本会话（不必整包 `use_toolset`）：命中即把完整定义交回模型、**下一轮**进工具表，`list` 看未加载索引、`reset` 卸下；拉起是**会话级粘性**且只豁免「包」这道闸（模式包集 / 模式白名单 / 技能白名单照旧），回合外不外溢。对齐 Anthropic 的 `defer_loading`（延迟工具连名字都不给）与 Claude Code 的 `ToolSearchTool`（搜索工具自己必须常驻）。细节见 [`docs/history/CHANGES-v3.26-tool-search.md`](docs/history/CHANGES-v3.26-tool-search.md)。
+- **Goal 完成度验证器**：`LlmGoalVerifier`（旁路小模型，`HostBuilder` 接入）。
+- **子 agent 委派**：`SubAgentRunner` + `spawn_subagent`（**v3.23 起有完整管控面**：`run_in_background` 并行派发 · `subagent` 工具的名单 / 状态 / 取结果 / 追加指令 / 打断 / 等待 —— 见下）。
+- **技能系统**：`SkillLoader` + 技能工坊（`skill_scaffold` / `skill_validate` / `skill_extract` / `skill_from_toolset`）+ **模型侧按需加载**（`use_skill`）。
+- **计划模式 + 结构化 note**：`PlanModePolicy` + `update_plan` / `update_notes`。
+- **持久 shell + 后台作业**（2026-10 新增）：`shell`（常驻会话，`cd` / `export` / venv 跨调用保留 + `description` / `timeout` / `run_in_background`）· `job`（后台作业，长命令不阻塞回合）—— 见下方「🐚 持久 shell 与后台作业」。
+- **容器沙箱后端（Docker / Podman）**（2026-10 新增）：`container` 档 —— 独立 rootfs / 可彻底禁网 / 根只读 / 内存上限；需显式配镜像（`--sandbox-image`），刻意不进 `auto`；与内建的 `bwrap`（Linux 命名空间隔离）并列。
+
+**仍未完成**
+
+- **MCP prompts / sampling**：资源面（resources）已在 v3.22 补上；prompts 与 sampling 仍留白。
+- **长尾集成**：定时调度 / Webhook / ACP / Claude Code·Codex Hooks 兼容 —— 仍是「打开界面才干活」。
+- **子 Agent 会话日志**：派工会在 `sessions/` 留下 `sub-*.jsonl`（有审计价值，当前不自动清理）。
+- **真实模型联调**：`OpenAiCompatibleClient` 已就绪，设好环境变量就能连。
+- **工具检索升级**：Tool Search 已在 **v3.26** 落地（`tool_search` 工具级拉起）；当前检索是关键词 AND，工具上百且描述相近时值得上 **BM25 / 向量**（Anthropic 有 bm25 / regex 两档）。
+- **沙箱后端插件**：`bwrap`（Linux）+ `container`（Docker/Podman）均已内建；更强的后端（远程执行 / 带审计的包装）仍可插件注册。

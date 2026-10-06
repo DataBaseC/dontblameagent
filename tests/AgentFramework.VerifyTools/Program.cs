@@ -7,29 +7,13 @@ using AgentFramework.Contracts;
 using AgentFramework.Data;
 using AgentFramework.Kernel;
 using AgentFramework.Tools;
+using static AgentFramework.Harness.Suite;
 
 // ═══════════════════════════════════════════════════════════
 //  工具集垂直切片验证
 //  文件（含路径逃逸防护）/ 命令（超时）/ 搜索（降级链）/ 抓取（SSRF 防护）
 // ═══════════════════════════════════════════════════════════
 
-var passes = 0;
-var failures = 0;
-
-void Check(string name, bool ok, string? detail = null)
-{
-    var suffix = detail is null ? "" : $"  ({detail})";
-    if (ok)
-    {
-        passes++;
-        Console.WriteLine($"  [PASS] {name}{suffix}");
-    }
-    else
-    {
-        failures++;
-        Console.WriteLine($"  [FAIL] {name}{suffix}");
-    }
-}
 
 var root = Path.Combine(Path.GetTempPath(), "af-tools-verify", Guid.NewGuid().ToString("N")[..8]);
 var workspace = Path.Combine(root, "workspace");
@@ -38,6 +22,10 @@ Console.WriteLine("═══ 工具集垂直切片验证 ═══");
 Console.WriteLine($"工作区：{workspace}");
 
 var options = new ToolkitOptions { WorkspaceRoot = workspace };
+
+// 沙箱按调用选 shell：断言跟着解析出的 shell 走，不能按 OS 猜（本机没有 Git Bash 时回落 cmd）。
+var resolvedShell = ShellResolver.Resolve();
+var posix = resolvedShell.IsPosix;
 
 async ValueTask<ToolResult> Call(ITool tool, params (string Key, string Value)[] args)
 {
@@ -60,6 +48,71 @@ Check("read_file 读回内容一致", readResult.Success && readResult.Output.Co
 
 var listResult = await Call(list, ("path", "notes"));
 Check("list_dir 列出条目", listResult.Success && listResult.Output.Contains("todo.md"), listResult.Output);
+
+// ── 1c. edit_file 失败要给「下一步」（v3.28）───────────────────
+{
+    var wsService = new WorkspaceService(options);
+    var editTool = AgentFramework.Tools.FileOps.CoreFileOps.CreateAll(wsService).First(t => t.Name == "edit_file");
+
+    var missingFile = await Call(editTool, ("path", "nope/never.md"), ("old_string", "a"), ("new_string", "b"));
+    Check("★ edit_file 文件不存在时指出路（list_dir / write_file）",
+        !missingFile.Success && missingFile.Error!.Contains("write_file"), missingFile.Error);
+
+    await Call(write, ("path", "dup.txt"), ("content", "alpha\nbeta\nUNIQUE_MARK\nbeta\nUNIQUE_MARK\n"));
+
+    var multi = await Call(editTool, ("path", "dup.txt"), ("old_string", "UNIQUE_MARK"), ("new_string", "X"));
+    Check("★ edit_file 多处匹配时列出每一处行号（模型一眼选对）",
+        !multi.Success && multi.Error!.Contains("第 3 / 5 行"), multi.Error);
+
+    var notFound = await Call(editTool, ("path", "dup.txt"), ("old_string", "ZZZ-NOT-EXIST"), ("new_string", "y"));
+    Check("★ edit_file 找不到原文时给两条自救",
+        !notFound.Success && notFound.Error!.Contains("自救"), notFound.Error);
+
+    var replaceAll = await Call(editTool,
+        ("path", "dup.txt"), ("old_string", "UNIQUE_MARK"), ("new_string", "X"), ("replace_all", "true"));
+    Check("replace_all=true 时允许批量替换（不再要求唯一）",
+        replaceAll.Success && replaceAll.Output.Contains("已替换 2 处"),
+        replaceAll.Success ? FirstLine(replaceAll.Output) : replaceAll.Error);
+}
+
+// ── 1d. 文件族失败也要给「下一步」（v3.30）────────────────────
+{
+    var fileOps = AgentFramework.Tools.FileOps.CoreFileOps
+        .CreateAll(new WorkspaceService(options))
+        .ToDictionary(t => t.Name);
+
+    var missingRead = await Call(read, ("path", "no/such/file.md"));
+    Check("★ read_file 文件不存在时给出找法（find_files / list_dir）",
+        !missingRead.Success && missingRead.Error!.Contains("find_files"), missingRead.Error);
+
+    var tooLong = await Call(write, ("path", "big.txt"), ("content", new string('x', options.MaxWriteChars + 1)));
+    Check("★ write_file 内容过长时给出分段写的出路",
+        !tooLong.Success && tooLong.Error!.Contains("edit_file"), tooLong.Error);
+
+    var badRegex = await Call(fileOps["grep_files"], ("pattern", "(["), ("regex", "true"));
+    Check("★ grep_files 正则无效时提示「去掉 regex」",
+        !badRegex.Success && badRegex.Error!.Contains("regex=true"), badRegex.Error);
+
+    var badFind = await Call(fileOps["find_files"], ("pattern", "*.md"), ("path", "no-such-dir"));
+    Check("★ find_files 起点不存在时给出路",
+        !badFind.Success && badFind.Error!.Contains("list_dir"), badFind.Error);
+
+    var badMove = await Call(fileOps["move_path"], ("from", "ghost.md"), ("to", "x.md"));
+    Check("★ move_path 源不存在时给出路",
+        !badMove.Success && badMove.Error!.Contains("find_files"), badMove.Error);
+
+    var badDelete = await Call(fileOps["delete_path"], ("path", "ghost-dir"));
+    Check("★ delete_path 路径不存在时给出路",
+        !badDelete.Success && badDelete.Error!.Contains("list_dir"), badDelete.Error);
+
+    var badList = await Call(list, ("path", "no-such-dir"));
+    Check("★ list_dir 目录不存在时给出路",
+        !badList.Success && badList.Error!.Contains("list_dir"), badList.Error);
+
+    var badReadLines = await Call(fileOps["read_lines"], ("path", "no/such/file.md"));
+    Check("★ read_lines 文件不存在时给出路",
+        !badReadLines.Success && badReadLines.Error!.Contains("find_files"), badReadLines.Error);
+}
 
 Console.WriteLine("\n── 1b. 路径边界：读放行 / 写拒绝 ──");
 // v3.6：读与写的边界**刻意不同** —— 读默认放行到整台机器，写永远只落在工作区内。
@@ -147,6 +200,57 @@ var slowCommand = OperatingSystem.IsWindows() ? "ping -n 6 127.0.0.1" : "sleep 6
 var timeoutResult = await Call(runSlow, ("command", slowCommand));
 Check("超时命令被终止", !timeoutResult.Success && timeoutResult.Error!.Contains("超时"), timeoutResult.Error);
 
+// ── 2b. run_command 调得顺不顺（v3.28）────────────────────────
+// 核心修正：退出码非零 = 命令**跑完了**的结论（编译失败 / 测试失败 / grep 无匹配都可能是非零），
+// 不是工具失败。从前它走 ToolResult.Fail，主循环把正文写成 "ERROR: …"，
+// 模型据此以为工具坏了或被拒，而不是去看输出里说了什么。
+var nonZero = await Call(run, ("command", OperatingSystem.IsWindows() ? "exit /b 3" : "exit 3"));
+Check("★ 非零退出仍算「跑完了」（不伪装成工具失败）",
+    nonZero.Success && nonZero.Output.Contains("exit=3"), FirstLine(nonZero.Output));
+
+var missingCommand = await Call(run, ("command", "no-such-command-xyz-123"));
+if (posix)
+{
+    // POSIX：命令不存在 → 127 → CommandHints 给一行 [hint] 自救。
+    Check("★ 命令不存在时给一行自救提示（不是让模型干猜）",
+        missingCommand.Output.Contains("[hint]"), FirstLine(missingCommand.Output));
+}
+else
+{
+    // cmd：沙箱包装把「命令不存在」表达为 exit=1 + stderr 如实带「不是内部或外部命令」——
+    // 报告没被伪装成成功，模型能读到真实结论（CommandHints 对认不出的退出码不加噪音是设计）。
+    Check("★ 命令不存在时给一行自救提示（不是让模型干猜）",
+        missingCommand.Output.Contains("exit=") && missingCommand.Output.Contains("stderr"),
+        FirstLine(missingCommand.Output));
+}
+
+Check("★ 超时提示告诉模型怎么自救（不再是死路）",
+    timeoutResult.Error!.Contains("timeout 参数") && timeoutResult.Error.Contains("run_in_background"),
+    timeoutResult.Error);
+
+var boundedOptions = new ToolkitOptions
+{
+    WorkspaceRoot = workspace,
+    CommandTimeoutSeconds = 30,
+    CommandMaxTimeoutSeconds = 600,
+};
+var bounded = new RunCommandTool(boundedOptions, new AgentFramework.Sandbox.SandboxRegistry());
+
+var clampedTimeout = await Call(bounded, ("command", "echo t"), ("timeout", "99999"));
+Check("★ timeout 超过运维上限被压到上限（模型管不了上限）",
+    clampedTimeout.Output.Contains("timeout=600s"), FirstLine(clampedTimeout.Output));
+
+var explicitTimeout = await Call(bounded, ("command", "echo t"), ("timeout", "45"));
+Check("timeout 参数生效并如实回显", explicitTimeout.Output.Contains("timeout=45s"), FirstLine(explicitTimeout.Output));
+
+var described = await Call(bounded, ("command", "echo d"), ("description", "冒烟一条"));
+Check("description 进报告（审计与追溯）",
+    described.Output.Contains("# 冒烟一条"), FirstLine(described.Output));
+
+var defaultTimeout = await Call(bounded, ("command", "echo t"));
+Check("默认超时不回显（正常路径不塞噪音）",
+    !defaultTimeout.Output.Contains("timeout="), FirstLine(defaultTimeout.Output));
+
 // ★ 降级备注用稳定前缀（sandbox-degrade: / sandbox-start-fail:），
 //   不再依赖中文魔法子串（"失败"/"退化"/"未能启动"）—— 文案一改旧筛选就静默失效。
 var degradeHostOptions = new ToolkitOptions { WorkspaceRoot = workspace, SandboxName = "no-such-sandbox" };
@@ -193,6 +297,70 @@ Check("★ 动态降级备注被标为 sandbox-degrade:，已带前缀的保留"
 Check("★ 后端自述不当成降级（正常路径备注够短）",
     !degradeProbeResult.Output.Contains("sandbox-degrade:探针后端自述"),
     degradeProbeResult.Output);
+
+// ── 2b. 常驻 shell：完整 bash 工具（description / timeout / 后台）──
+Console.WriteLine("\n── 2b. 常驻 shell（完整 bash 工具）──");
+
+var persistentShell = ShellResolver.Resolve();
+if (!persistentShell.IsPosix)
+{
+    Console.WriteLine($"  [SKIP] 常驻 shell 需要 POSIX shell（当前解析到 {persistentShell.Id}）");
+}
+else
+{
+    var shellJobs = new JobManager();
+    var shellTool = new ShellSessionTool(
+        new ToolkitOptions { WorkspaceRoot = workspace, CommandTimeoutSeconds = 20, CommandMaxTimeoutSeconds = 60 },
+        shellJobs);
+    try
+    {
+        var shellRun = await Call(shellTool, ("command", "echo shell-ok"), ("description", "冒烟测试"));
+        Check("★ shell 工具跑通并回报当前目录（cwd 可见）",
+            shellRun.Success && shellRun.Output.Contains("shell-ok") && shellRun.Output.Contains("cwd="),
+            FirstLine(shellRun.Output));
+        Check("description 进报告（审计可见）",
+            shellRun.Output.Contains("desc=冒烟测试"),
+            FirstLine(shellRun.Output));
+
+        // ★ v3.28：与 run_command 同一约定 —— 非零退出**不是工具失败**，
+        //   它只是命令跑完后的结论（从前这里返回 Fail，主循环加 "ERROR:" 前缀误导模型）。
+        var shellNonZero = await Call(shellTool, ("command", "false"));
+        Check("★ shell 非零退出仍算「跑完了」（不再伪装成工具失败）",
+            shellNonZero.Success && shellNonZero.Output.Contains("exit=1"), FirstLine(shellNonZero.Output));
+
+        var shellMissing = await Call(shellTool, ("command", "no-such-cmd-xyz-9"));
+        Check("★ shell 命令不存在时给 [hint] 自救",
+            shellMissing.Output.Contains("[hint]"), FirstLine(shellMissing.Output));
+
+        var clamped = await Call(shellTool, ("command", "echo t"), ("timeout", "99999"));
+        Check("timeout 超过运维硬上限被夹住（模型越不过上限）", clamped.Success, FirstLine(clamped.Output));
+
+        var background = await Call(shellTool, ("command", "echo bg-done"), ("run_in_background", "true"));
+        Check("★ run_in_background 立即返回作业 id",
+            background.Success && background.Output.Contains("job-"),
+            FirstLine(background.Output));
+
+        // 同一份作业池：shell 起的后台，job 工具看得见（否则模型会以为它丢了）。
+        var shellJobList = await Call(
+            new JobTool(new ToolkitOptions { WorkspaceRoot = workspace }, shellJobs),
+            ("action", "list"));
+        Check("★ shell 起的后台在 job 工具里可见（两个入口、一个作业池）",
+            shellJobList.Output.Contains("job-"),
+            FirstLine(shellJobList.Output));
+
+        // ★ v3.28：id 打错时给「下一步」，不是只回一句「作业不存在」让模型瞎猜
+        var jobMissing = await Call(
+            new JobTool(new ToolkitOptions { WorkspaceRoot = workspace }, shellJobs),
+            ("action", "status"), ("id", "job-nope"));
+        Check("★ job id 打错时给出路（用 action=list 看现有作业）",
+            !jobMissing.Success && jobMissing.Error!.Contains("action=list"), jobMissing.Error);
+    }
+    finally
+    {
+        shellTool.Dispose();
+        shellJobs.Dispose();
+    }
+}
 
 // ── 3. 联网搜索 ────────────────────────────────────────────
 Console.WriteLine("\n── 3. 联网搜索（provider seam + 降级链）──");
@@ -372,6 +540,62 @@ Check("★ 项目目录外的写被拒（写只落在会话项目目录内）",
     !sessionWriteEscape.Success && sessionWriteEscape.Error!.Contains("越出工作区"), sessionWriteEscape.Error);
 Check("★ 项目目录外的文件确实没被改写",
     File.ReadAllText(Path.Combine(root, "host-only.txt")) == "宿主工作区的文件");
+
+// ── run_command 按调用选 shell（v3.22）：白名单只管关键字，拒绝任意路径 ──
+Console.WriteLine("\n── run_command 按调用选 shell ──");
+{
+    var shellOpts = new ToolkitOptions { WorkspaceRoot = workspace };
+    var shellRunner = new RunCommandTool(shellOpts, new AgentFramework.Sandbox.SandboxRegistry());
+
+    Check("schema 暴露 shell 参数（模型才知道能选）", shellRunner.ParametersJsonSchema.Contains("\"shell\""));
+
+    var rejected = await shellRunner.InvokeAsync(new ToolInvocation("run_command", new Dictionary<string, string?>
+    {
+        ["command"] = "echo hi",
+        ["shell"] = "/usr/bin/env",   // 任意路径 = 任意程序执行入口，必须拒
+    }));
+    Check("★ 拒绝白名单外的 shell（不给任意可执行入口）",
+        !rejected.Success && rejected.Error!.Contains("只允许"), rejected.Error ?? "");
+
+    var okShell = await shellRunner.InvokeAsync(new ToolInvocation("run_command", new Dictionary<string, string?>
+    {
+        ["command"] = "echo shell-ok",
+        ["shell"] = "sh",
+    }));
+    Check("白名单内的 sh 可执行", okShell.Success && okShell.Output.Contains("shell-ok"), okShell.Output.Trim());
+    Check("报告里如实标出实际 shell",
+        posix
+            ? okShell.Output.Contains("shell=sh")
+            : okShell.Output.Contains("shell=cmd") && okShell.Output.Contains("回落"),
+        okShell.Output.Split('\n')[1]);
+}
+
+// ── 原子写（v3.22）：崩溃不留半截文件，也不留临时文件 ──
+Console.WriteLine("\n── 原子写 ──");
+{
+    var atomicOptions = new ToolkitOptions { WorkspaceRoot = workspace };
+    var atomicWrite = new WriteFileTool(atomicOptions);
+
+    Check("write_file 成功",
+        (await atomicWrite.InvokeAsync(new ToolInvocation("write_file", new Dictionary<string, string?>
+        {
+            ["path"] = "atomic/note.txt",
+            ["content"] = "第一版",
+        }))).Success);
+
+    var target = Path.Combine(workspace, "atomic", "note.txt");
+    Check("内容落盘", File.Exists(target) && File.ReadAllText(target) == "第一版");
+
+    await atomicWrite.InvokeAsync(new ToolInvocation("write_file", new Dictionary<string, string?>
+    {
+        ["path"] = "atomic/note.txt",
+        ["content"] = "第二版",
+    }));
+    Check("覆盖后内容更新", File.ReadAllText(target) == "第二版");
+    Check("★ 没有残留 .tmp 临时文件",
+        Directory.GetFiles(Path.Combine(workspace, "atomic")).All(f => !Path.GetFileName(f).Contains(".tmp-")),
+        string.Join(",", Directory.GetFiles(Path.Combine(workspace, "atomic")).Select(Path.GetFileName)));
+}
 
 Console.WriteLine($"\n═══ 结果：{passes} 通过 / {failures} 失败 ═══");
 return failures == 0 ? 0 : 1;

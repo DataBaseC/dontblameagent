@@ -209,6 +209,14 @@ public sealed partial class AgentHost
         ContextOptions contextOptions,
         CancellationToken ct)
     {
+        // L5 摘要是**默认关**的（README 与契约注释都是这个口径，配了端点也不该自动开）。
+        // 早摘要（EarlySummarizeRatio 水位派发的后台 writer）同属 L5，必须一并受这个开关管 ——
+        // 否则「默认关」只在代码默认值上成立、在行为上不成立（安全/一致性审查 P1-1）。
+        if (!contextOptions.SummarizeOlderHistory)
+        {
+            return false;
+        }
+
         var consumed = false;
 
         // ── 1) 消费后台 writer 的稿子 ─────────────────────────
@@ -284,12 +292,12 @@ public sealed partial class AgentHost
         var olderMessages = projection.OlderMessages;
         var sessionId = session.SessionId;
 
-        _ = Task.Run(async () =>
+        TrackBackground(Task.Run(async () =>
         {
             try
             {
                 var summary = await TrySummarizeAsync(
-                    olderMessages, taskCard, previous, contextOptions, CancellationToken.None).ConfigureAwait(false);
+                    olderMessages, taskCard, previous, contextOptions, LifetimeToken).ConfigureAwait(false);
 
                 if (summary is not null && !string.Equals(summary, previous, StringComparison.Ordinal))
                 {
@@ -305,7 +313,280 @@ public sealed partial class AgentHost
             {
                 System.Threading.Interlocked.Exchange(ref session.CheckpointInFlight, 0);
             }
-        });
+        }));
+    }
+
+    /// <summary>
+    /// checkpoint **状态锚点**的回合边界入口（v3.22 —— 兑现 v3.11 定下的契约）。
+    ///
+    /// <para>
+    /// 与早摘要各自一条 pending 槽，互不干扰：
+    /// </para>
+    /// <list type="number">
+    ///   <item><b>消费稿</b> —— 后台 writer 写好的 <see cref="CheckpointEvent"/> 在这里落一条事件。
+    ///   <b>只追加日志，一个字节都不动模型上下文</b>（投影器不处理它）；</item>
+    ///   <item><b>派发稿</b> —— 水位跨过 <see cref="CheckpointOptions.TriggerRatio"/>（默认 0.35，
+    ///   远低于压缩线 0.8）且距上次至少新增 <c>MinNewEvents</c> 个事件时，派后台 writer 提取；回合不等它。</item>
+    /// </list>
+    /// <para>返回 true = 落了新锚点事件。</para>
+    /// </summary>
+    private async Task<bool> MaybeCheckpointAnchorAsync(
+        Hosting.SessionRuntime session,
+        IReadOnlyList<SessionEvent> events,
+        ContextProjection projection,
+        CancellationToken ct)
+    {
+        var options = Options.Checkpoint;
+        var consumed = false;
+
+        // ── 1) 消费后台 writer 的锚点稿 ────────────────────────
+        if (System.Threading.Interlocked.Exchange(ref session.PendingCheckpointAnchor, null) is { } anchor)
+        {
+            anchor.SessionId = session.SessionId;
+
+            // 记忆升级在**落盘之前**做：promoted id 要一并写进这条事件（可审计「这条记忆是谁写的」）。
+            if (options.PromoteMemory)
+            {
+                anchor.PromotedMemoryIds = await PromoteCheckpointMemoryAsync(session, anchor, ct).ConfigureAwait(false);
+            }
+
+            await session.Sink.EmitAsync(anchor, ct).ConfigureAwait(false);
+            TryWriteCheckpointBlock(session.SessionId, anchor);
+            consumed = true;
+        }
+
+        // ── 2) 到水位就派发（不等待，单飞）────────────────────
+        if (options.Enabled
+            && _checkpointWriter is not null
+            && projection.WaterLevel >= options.TriggerRatio
+            && ShouldDispatchCheckpoint(events, options)
+            && session.PendingCheckpointAnchor is null)
+        {
+            DispatchCheckpointAnchor(session, events, projection);
+        }
+
+        return consumed;
+    }
+
+    /// <summary>防抖：距上次锚点至少新增 <c>MinNewEvents</c> 个事件才值得再派一次。</summary>
+    private static bool ShouldDispatchCheckpoint(IReadOnlyList<SessionEvent> events, CheckpointOptions options)
+    {
+        if (events.Count == 0)
+        {
+            return false;
+        }
+
+        var last = LastCheckpointEvent(events);
+        var newEvents = last is null ? events.Count : events[^1].Seq - last.Seq;
+        return newEvents >= Math.Max(1, options.MinNewEvents);
+    }
+
+    /// <summary>最近一条 checkpoint 事件（增量窗口与上一份渲染块的来源）。</summary>
+    private static CheckpointEvent? LastCheckpointEvent(IReadOnlyList<SessionEvent> events)
+    {
+        for (var i = events.Count - 1; i >= 0; i--)
+        {
+            if (events[i] is CheckpointEvent checkpoint)
+            {
+                return checkpoint;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// 派后台 checkpoint writer（fire-and-forget）。
+    /// 纪律同早摘要：不阻塞、single-writer、失败吞掉（writer 永不打扰主流程）。
+    /// 产物进 <c>PendingCheckpointAnchor</c>，由回合边界消费 —— 日志追加仍严格单线程。
+    /// </summary>
+    private void DispatchCheckpointAnchor(
+        Hosting.SessionRuntime session,
+        IReadOnlyList<SessionEvent> events,
+        ContextProjection projection)
+    {
+        if (_checkpointWriter is null)
+        {
+            return;
+        }
+
+        if (System.Threading.Interlocked.CompareExchange(ref session.CheckpointAnchorInFlight, 1, 0) != 0)
+        {
+            return;
+        }
+
+        var request = BuildCheckpointRequest(session, events, projection, CheckpointTrigger.Auto);
+        var estimatedTokens = projection.EstimatedTokens;
+
+        TrackBackground(Task.Run(async () =>
+        {
+            try
+            {
+                var anchor = await _checkpointWriter.WriteAsync(request, LifetimeToken).ConfigureAwait(false);
+                if (anchor is not null && anchor.RenderBlock().Length > 0)
+                {
+                    anchor.SessionId = session.SessionId;
+                    anchor.PreTokens = estimatedTokens;
+                    session.PendingCheckpointAnchor = anchor;
+                }
+            }
+            catch
+            {
+                // writer 永不打扰主流程
+            }
+            finally
+            {
+                System.Threading.Interlocked.Exchange(ref session.CheckpointAnchorInFlight, 0);
+            }
+        }));
+    }
+
+    /// <summary>组装一次 checkpoint 请求（自动 / 手动共用）。</summary>
+    private CheckpointRequest BuildCheckpointRequest(
+        Hosting.SessionRuntime session,
+        IReadOnlyList<SessionEvent> events,
+        ContextProjection projection,
+        string trigger)
+    {
+        var last = LastCheckpointEvent(events);
+        var toSeq = events.Count > 0 ? events[^1].Seq : 0;
+        var notesPath = Path.Combine(Options.WorkspaceRoot, WorkNotes.DefaultFileName);
+
+        return new CheckpointRequest
+        {
+            SessionId = session.SessionId,
+            Messages = projection.Messages,
+            TaskCard = projection.TaskCard,
+            Notes = WorkNotes.TryRead(notesPath),
+            PreviousBlock = last?.RenderBlock(),
+            WaterLevelPermille = (int)Math.Round(projection.WaterLevel * 1000),
+            Trigger = trigger,
+            FromSeq = (last?.ToSeq ?? 0) + 1,
+            ToSeq = toSeq,
+        };
+    }
+
+    /// <summary>
+    /// 手动写一次状态锚点（界面按钮 / 命令）。与自动通道同源，只是不受水位与防抖限制。
+    /// 取不到回合闸（会话正忙）就如实回「稍后再试」，不硬插。
+    /// </summary>
+    public async Task<(bool ok, string message)> ManualCheckpointAsync(CancellationToken ct = default)
+    {
+        var session = _session;
+        if (session is null)
+        {
+            return (false, "没有活跃会话");
+        }
+
+        if (_checkpointWriter is null)
+        {
+            return (false, "当前没有可用的模型端点，无法提取状态锚点");
+        }
+
+        if (!await session.TurnGate.WaitAsync(0, ct).ConfigureAwait(false))
+        {
+            return (false, "会话正忙（有回合在跑），请稍后再试");
+        }
+
+        try
+        {
+            var events = session.Events;
+            var contextOptions = EffectiveContextOptions(_state.CurrentProfile);
+            var projection = SessionContextBuilder.Project(events, contextOptions, forceCollapse: true);
+            var request = BuildCheckpointRequest(session, events, projection, CheckpointTrigger.Manual);
+
+            var anchor = await _checkpointWriter.WriteAsync(request, ct).ConfigureAwait(false);
+            if (anchor is null || anchor.RenderBlock().Length == 0)
+            {
+                return (false, "提取没有产出有效内容（模型未给出结构化状态）");
+            }
+
+            anchor.SessionId = session.SessionId;
+            anchor.PreTokens = projection.EstimatedTokens;
+            anchor.PromotedMemoryIds = Options.Checkpoint.PromoteMemory
+                ? await PromoteCheckpointMemoryAsync(session, anchor, ct).ConfigureAwait(false)
+                : [];
+
+            await session.Sink.EmitAsync(anchor, ct).ConfigureAwait(false);
+            TryWriteCheckpointBlock(session.SessionId, anchor);
+            return (true, $"已写入状态锚点（升级 {anchor.PromotedMemoryIds.Count} 条记忆）");
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            return (false, $"写入失败：{ex.Message}");
+        }
+        finally
+        {
+            session.TurnGate.Release();
+        }
+    }
+
+    /// <summary>
+    /// 把 checkpoint 的「跨任务发现」升级进记忆（<see cref="CheckpointOptions.PromoteMemory"/>）。
+    /// 只升 Discoveries —— 那是「在别处也成立的事实」；设计与决策留在笔记里，不塞进记忆。
+    /// 逐条独立 try：一条写失败不影响其余，也不打扰主流程。
+    /// </summary>
+    private async Task<List<string>> PromoteCheckpointMemoryAsync(
+        Hosting.SessionRuntime session,
+        CheckpointEvent anchor,
+        CancellationToken ct)
+    {
+        var ids = new List<string>();
+        if (Memory.Kind == "none" || anchor.Discoveries.Count == 0)
+        {
+            return ids;
+        }
+
+        foreach (var discovery in anchor.Discoveries.Take(5))
+        {
+            try
+            {
+                var entry = await Memory.AppendAsync(
+                    MemoryScope.Project,
+                    discovery,
+                    tags: ["checkpoint"],
+                    sourceSession: session.SessionId,
+                    source: "checkpoint",
+                    ct: ct).ConfigureAwait(false);
+
+                ids.Add(entry.Id);
+            }
+            catch
+            {
+                // 单条失败不影响其余
+            }
+        }
+
+        return ids;
+    }
+
+    /// <summary>
+    /// 状态锚点也落一份人可读文件（<c>sessions/checkpoints/&lt;id&gt;.anchor.md</c>）。
+    /// 与早摘要的 <c>&lt;id&gt;.md</c> 分开 —— 两者语义不同（那个是摘要，这个是结构化状态）。
+    /// 用**追加**写入以符合契约的「追加而非覆盖」。
+    /// </summary>
+    private void TryWriteCheckpointBlock(string sessionId, CheckpointEvent anchor)
+    {
+        try
+        {
+            var dir = Path.Combine(Options.SessionsDir, "checkpoints");
+            Directory.CreateDirectory(dir);
+
+            File.AppendAllText(
+                Path.Combine(dir, sessionId + ".anchor.md"),
+                $"\n## {DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss} · {anchor.Trigger} · "
+                + $"水位 {anchor.WaterLevelPermille / 10.0:0.0}%（约 {anchor.PreTokens} tokens）· "
+                + $"Seq {anchor.FromSeq}–{anchor.ToSeq}\n\n"
+                + anchor.RenderBlock() + "\n");
+        }
+        catch
+        {
+            // 落文件是给人看的，失败不该影响任何流程
+        }
     }
 
     /// <summary>
@@ -364,6 +645,49 @@ public sealed partial class AgentHost
     /// 「不用的那一级根本不打开文件」依然成立：按模式只读该读的层级。
     /// 而「这一轮用得上的细节」不走这里，走 <see cref="BuildRecallBlockAsync"/>（动态段）。
     /// </summary>
+    // ── 冻结段哈希诊断（任务 8 可选增强；默认关，见 HostOptions.CacheDiagnostics）──
+
+    private readonly Dictionary<string, string> _frozenHashes = new(StringComparer.Ordinal);
+
+    /// <summary>冻结段哈希变化次数（诊断；开关关时恒为 0）。</summary>
+    public int FrozenBlockChanges { get; private set; }
+
+    /// <summary>某会话最近一次的冻结段哈希（诊断；开关关时恒为 null）。</summary>
+    public string? FrozenBlockHashOf(string sessionId)
+    {
+        lock (_frozenHashes)
+        {
+            return _frozenHashes.GetValueOrDefault(sessionId);
+        }
+    }
+
+    /// <summary>
+    /// 冻结段（缓存前缀那一段）的字节哈希诊断：同一会话两次装配不一致 = 前缀被打掉、缓存必 miss。
+    /// 这是把「为什么 cached_tokens 偏低」从猜想到证据的那一步。
+    /// </summary>
+    private void ObserveFrozenBlock(string sessionId, string? frozen)
+    {
+        if (!Options.CacheDiagnostics)
+        {
+            return;
+        }
+
+        var hash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(
+            System.Text.Encoding.UTF8.GetBytes(frozen ?? string.Empty)))[..16];
+
+        lock (_frozenHashes)
+        {
+            if (_frozenHashes.TryGetValue(sessionId, out var previous)
+                && !string.Equals(previous, hash, StringComparison.Ordinal))
+            {
+                FrozenBlockChanges++;
+                Console.WriteLine($"[cache] 冻结段哈希变化（会话 {sessionId}）：{previous} → {hash} —— 前缀必 miss");
+            }
+
+            _frozenHashes[sessionId] = hash;
+        }
+    }
+
     private async Task<string?> BuildFrozenBlockAsync(ModeProfile profile, IReadOnlyList<string> scopes, CancellationToken ct)
     {
         var blocks = new List<string>();

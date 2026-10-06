@@ -1,0 +1,10 @@
+{
+  "id": "computer-use",
+  "name": "电脑操作（Computer Use）",
+  "version": "1.0.0",
+  "apiVersion": "1",
+  "assembly": "AgentFramework.Plugins.ComputerUse.dll",
+  "entry": "AgentFramework.Plugins.ComputerUse.ComputerUsePlugin",
+  "description": "基石插件：让 agent 直接操作电脑桌面 —— 截屏观察（screenshot，注入视觉上下文）、鼠标注入（click / move / drag / scroll）、键盘注入（type / key）、窗口与应用操作（list_windows / focus_window / open_app / open_url）、等待（wait / screen_size）。坐标用截图像素；所有调用都过审批链；平台/依赖不具备时如实报告不可用，不做半吊子模拟。",
+  "injects": []
+}

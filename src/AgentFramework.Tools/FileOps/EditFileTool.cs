@@ -18,9 +18,11 @@ namespace AgentFramework.Tools.FileOps;
 /// 这是「明确失败优于静默猜错」在编辑场景的落点。
 /// </para>
 /// </summary>
-internal sealed class EditFileTool(IWorkspaceService ws) : ITool, IToolWithSchema
+internal sealed class EditFileTool(IWorkspaceService ws) : IToolWithRisk, ITool, IToolWithSchema
 {
     public string Name => "edit_file";
+
+    public ToolRisk Risk => ToolRisk.Write;
 
     public string Description =>
         "对工作区内的文本文件做精确替换：把 old_string 改成 new_string。" +
@@ -62,7 +64,7 @@ internal sealed class EditFileTool(IWorkspaceService ws) : ITool, IToolWithSchem
 
         if (!File.Exists(fullPath))
         {
-            return Fail($"文件不存在：{path}");
+            return Fail($"文件不存在：{path}（用 list_dir 确认路径；要新建文件请用 write_file）");
         }
 
         string text;
@@ -102,15 +104,26 @@ internal sealed class EditFileTool(IWorkspaceService ws) : ITool, IToolWithSchem
 
         if (count == 0)
         {
-            return Fail($"文件里找不到 old_string 的原文（{path}）。请先用 read_file / read_lines 读取该处，" +
-                        "把 old_string 连缩进与空行一起复制过来 —— 注意逐字符一致。");
+            return Fail($"文件里找不到 old_string 的原文（{path}）。" +
+                        "自救：① 用 read_file / read_lines 读该处，把 old_string 连缩进与空行一起复制过来（逐字符一致）；" +
+                        "② 若这处刚被别的编辑动过，重读一次再改。");
         }
 
         if (count > 1 && !replaceAll)
         {
-            var firstLine = LineOf(text, text.IndexOf(oldText, StringComparison.Ordinal) is var i && i >= 0 ? i : 0);
-            return Fail($"old_string 在文件中出现了 {count} 次（首次约在第 {firstLine} 行），" +
-                        "无法确定改哪一处。请把上下文写得更长使匹配唯一，或传 replace_all=true 全部替换。");
+            // 把**每一处**的行号摆出来：模型据此一眼看出该扩写哪一段上下文，
+            // 比只给「首次在第 N 行」少一轮来回（改错地方比改不动更贵）。
+            var needleForReport = candidate.Needs ?? oldText;
+            var hitLines = new List<int>();
+            for (var at = text.IndexOf(needleForReport, StringComparison.Ordinal);
+                 at >= 0 && hitLines.Count < 5;
+                 at = text.IndexOf(needleForReport, at + Math.Max(1, needleForReport.Length), StringComparison.Ordinal))
+            {
+                hitLines.Add(LineOf(text, at));
+            }
+
+            return Fail($"old_string 在文件中出现了 {count} 次（第 {string.Join(" / ", hitLines)} 行），" +
+                        "无法确定改哪一处。自救：① 把上下文写得更长使匹配唯一；② 或传 replace_all=true 全部替换。");
         }
 
         var before = text;
@@ -122,7 +135,7 @@ internal sealed class EditFileTool(IWorkspaceService ws) : ITool, IToolWithSchem
 
         try
         {
-            File.WriteAllText(fullPath, after);
+            AtomicFile.WriteAllText(fullPath, after);
         }
         catch (Exception ex)
         {

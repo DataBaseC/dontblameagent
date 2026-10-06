@@ -84,8 +84,8 @@ public static class WorkspacePath
         if (!IsInsideRoot(realCandidate, realRoot))
         {
             error = forWrite
-                ? $"路径越出工作区（写只能落在会话项目目录内），已拒绝：{path}"
-                : $"路径越出工作区，已拒绝：{path}";
+                ? $"路径越出工作区（写只能落在会话项目目录内），已拒绝：{path}{FileHints.OutsideWrite}"
+                : $"路径越出工作区，已拒绝：{path}{FileHints.OutsideRead}";
             return false;
         }
 
@@ -159,9 +159,11 @@ public static class WorkspacePath
     }
 }
 
-public sealed class ReadFileTool(ToolkitOptions options) : ITool, IToolWithSchema
+public sealed class ReadFileTool(ToolkitOptions options) : IToolWithRisk, ITool, IToolWithSchema
 {
     public string Name => "read_file";
+
+    public ToolRisk Risk => ToolRisk.ReadOnly;
 
     public string Description =>
         "读取工作区内的文本文件内容。默认整读（超过上限即截断）；" +
@@ -180,7 +182,7 @@ public sealed class ReadFileTool(ToolkitOptions options) : ITool, IToolWithSchem
     {
         if (!invocation.Arguments.TryGetValue("path", out var path) || string.IsNullOrWhiteSpace(path))
         {
-            return ValueTask.FromResult(ToolResult.Fail("缺少参数 path"));
+            return ValueTask.FromResult(ToolResult.Fail($"缺少参数 path{FileHints.PathShape}"));
         }
 
         // 读：forWrite=false —— 默认允许越出工作区（「读得到、写不出去」）。
@@ -191,7 +193,7 @@ public sealed class ReadFileTool(ToolkitOptions options) : ITool, IToolWithSchem
 
         if (!File.Exists(fullPath))
         {
-            return ValueTask.FromResult(ToolResult.Fail($"文件不存在：{path}"));
+            return ValueTask.FromResult(ToolResult.Fail($"文件不存在：{FileHints.NotFound(path!)}"));
         }
 
         // 行模式（v3.16）：给了 offset / limit 就按行分段读。要害是让「往下翻」一击可达 ——
@@ -319,9 +321,11 @@ public sealed class ReadFileTool(ToolkitOptions options) : ITool, IToolWithSchem
     }
 }
 
-public sealed class WriteFileTool(ToolkitOptions options) : ITool, IToolWithSchema
+public sealed class WriteFileTool(ToolkitOptions options) : IToolWithRisk, ITool, IToolWithSchema
 {
     public string Name => "write_file";
+
+    public ToolRisk Risk => ToolRisk.Write;
 
     public string Description => "把内容写入工作区内的文件，会自动创建父目录并覆盖已有文件。";
 
@@ -332,19 +336,19 @@ public sealed class WriteFileTool(ToolkitOptions options) : ITool, IToolWithSche
     {
         if (!invocation.Arguments.TryGetValue("path", out var path) || string.IsNullOrWhiteSpace(path))
         {
-            return ValueTask.FromResult(ToolResult.Fail("缺少参数 path"));
+            return ValueTask.FromResult(ToolResult.Fail($"缺少参数 path{FileHints.PathShape}"));
         }
 
         if (!invocation.Arguments.TryGetValue("content", out var content))
         {
-            return ValueTask.FromResult(ToolResult.Fail("缺少参数 content"));
+            return ValueTask.FromResult(ToolResult.Fail("缺少参数 content（要写入的完整文本；建空文件传 \"\"）"));
         }
 
         content ??= string.Empty;
 
         if (content.Length > options.MaxWriteChars)
         {
-            return ValueTask.FromResult(ToolResult.Fail($"内容过长：{content.Length} > {options.MaxWriteChars}"));
+            return ValueTask.FromResult(ToolResult.Fail(FileHints.TooLongToWrite(content.Length, options.MaxWriteChars)));
         }
 
         // 写：forWrite=true —— 落笔只能落在会话项目目录内。
@@ -355,17 +359,19 @@ public sealed class WriteFileTool(ToolkitOptions options) : ITool, IToolWithSche
             return ValueTask.FromResult(ToolResult.Fail(error!));
         }
 
-        Directory.CreateDirectory(Path.GetDirectoryName(fullPath)!);
-        File.WriteAllText(fullPath, content);
+        // 原子写（临时文件 → Move 覆盖）：崩溃/断电不会留下半截文件。
+        AtomicFile.WriteAllText(fullPath, content);
 
         // 回显真实落点：让「经符号链接写入」的最终位置可审计（也方便测试钉住落盘路径）。
         return ValueTask.FromResult(ToolResult.Ok($"已写入 {path}（真实落点：{fullPath}，{content.Length} 字符）"));
     }
 }
 
-public sealed class ListDirTool(ToolkitOptions options) : ITool, IToolWithSchema
+public sealed class ListDirTool(ToolkitOptions options) : IToolWithRisk, ITool, IToolWithSchema
 {
     public string Name => "list_dir";
+
+    public ToolRisk Risk => ToolRisk.ReadOnly;
 
     public string Description => "列出工作区内某个目录下的条目。";
 
@@ -390,7 +396,7 @@ public sealed class ListDirTool(ToolkitOptions options) : ITool, IToolWithSchema
 
         if (!Directory.Exists(fullPath))
         {
-            return ValueTask.FromResult(ToolResult.Fail($"目录不存在：{path}"));
+            return ValueTask.FromResult(ToolResult.Fail($"目录不存在：{path}；用 list_dir 传 \".\" 看工作区根有哪些目录"));
         }
 
         var lines = Directory

@@ -8,6 +8,7 @@ using AgentFramework.Contracts;
 using AgentFramework.Data;
 using AgentFramework.Host;
 using AgentFramework.Llm;
+using static AgentFramework.Harness.Suite;
 
 // ═══════════════════════════════════════════════════════════
 //  输入转述（澄清模式）垂直切片验证
@@ -20,23 +21,6 @@ using AgentFramework.Llm;
 //    4. 开关关掉就零开销
 // ═══════════════════════════════════════════════════════════
 
-var passes = 0;
-var failures = 0;
-
-void Check(string name, bool ok, string? detail = null)
-{
-    var suffix = detail is null ? "" : $"  ({detail})";
-    if (ok)
-    {
-        passes++;
-        Console.WriteLine($"  [PASS] {name}{suffix}");
-    }
-    else
-    {
-        failures++;
-        Console.WriteLine($"  [FAIL] {name}{suffix}");
-    }
-}
 
 void Section(string title) => Console.WriteLine($"\n── {title} ──");
 

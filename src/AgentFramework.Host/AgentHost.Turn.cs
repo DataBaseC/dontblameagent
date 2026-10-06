@@ -94,6 +94,10 @@ public sealed partial class AgentHost
                     projection = SessionContextBuilder.Project(session.Events, contextOptions, forceCollapse: true);
                 }
 
+                // 状态锚点（checkpoint，v3.22）：写盘不动上下文 —— 与「压缩」是两个触发点。
+                // 落下的 CheckpointEvent 不进投影，因此这里**不需要**重新投影。
+                await MaybeCheckpointAnchorAsync(session, session.Events, projection, ct).ConfigureAwait(false);
+
                 if (projection.NeedsCompression)
                 {
                     projection = await CompactAsync(session, events, projection, contextOptions, ct).ConfigureAwait(false);
@@ -166,6 +170,9 @@ public sealed partial class AgentHost
             var frozen = await BuildFrozenBlockAsync(profile, MapScopes(profile.MemoryScopes, projectDir), ct).ConfigureAwait(false);
             var assembled = ContextAssembler.Assemble(frozen, dynamicMessages);
             LastAssembly = assembled;
+
+            // 任务 8：冻结段字节哈希诊断（默认关）—— 前缀被打掉时给一行证据，而不是靠猜。
+            ObserveFrozenBlock(session.SessionId, frozen);
 
             // 「发送前自动澄清」（可选，默认关）：
             // 先让便宜的模型把话说清楚，再交给主模型。

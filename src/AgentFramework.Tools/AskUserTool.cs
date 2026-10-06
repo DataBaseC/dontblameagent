@@ -12,9 +12,11 @@ namespace AgentFramework.Tools;
 /// 没有界面时**如实说问不出去**，并把「该自行判断 + 标注不确定」一并告诉它 ——
 /// 假装用户答过，是这条缝上最不能犯的错。
 /// </summary>
-public sealed class AskUserTool(Func<IUserInteraction> interactionProvider) : ITool, IToolWithSchema
+public sealed class AskUserTool(Func<IUserInteraction> interactionProvider) : IToolWithRisk, ITool, IToolWithSchema
 {
     public string Name => "ask_user";
+
+    public ToolRisk Risk => ToolRisk.ReadOnly;
 
     public string Description =>
         "当信息不足、或存在多个合理做法需要主人拍板时，直接向用户提问并等待回答。"

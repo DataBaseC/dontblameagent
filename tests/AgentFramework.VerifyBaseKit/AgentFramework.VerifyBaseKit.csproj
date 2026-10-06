@@ -27,4 +27,8 @@
     <None Include="../../src/AgentFramework.Plugins.ConsoleKit/panel.html" Link="baseplugins/console-kit/panel.html" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
+  <ItemGroup>
+    <ProjectReference Include="../AgentFramework.Harness/AgentFramework.Harness.csproj" />
+  </ItemGroup>
+
 </Project>

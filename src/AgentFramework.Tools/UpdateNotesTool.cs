@@ -14,9 +14,11 @@ namespace AgentFramework.Tools;
 /// 每次写入前都重新读文件（不缓存内存副本），所以人在中间改过的内容一定会被读到 ——
 /// 这就是调研里那句「人机共写，业界没有成熟冲突方案」最朴素也最可靠的一半答案。
 /// </summary>
-public sealed class UpdateNotesTool(Func<string> notesPathProvider) : ITool, IToolWithSchema
+public sealed class UpdateNotesTool(Func<string> notesPathProvider) : IToolWithRisk, ITool, IToolWithSchema
 {
     public string Name => "update_notes";
+
+    public ToolRisk Risk => ToolRisk.Write;
 
     public string Description =>
         "更新工作小本本（工作目录里的 AGENT_NOTES.md）—— 你的计划与进度写在这儿。"
@@ -60,7 +62,7 @@ public sealed class UpdateNotesTool(Func<string> notesPathProvider) : ITool, ITo
                 Directory.CreateDirectory(dir);
             }
 
-            await File.WriteAllTextAsync(path, updated, ct).ConfigureAwait(false);
+            await AtomicFile.WriteAllTextAsync(path, updated, ct).ConfigureAwait(false);
 
             return ToolResult.Ok($"已更新小本本「{sectionName}」（{(append ? "追加" : "替换")}）：{path}");
         }

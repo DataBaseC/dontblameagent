@@ -30,6 +30,13 @@ public enum SandboxMode
     /// 管的是"跑疯的东西别把机器拖死"。
     /// </summary>
     Job = 2,
+
+    /// <summary>
+    /// <b>容器隔离（Docker / Podman）</b>：独立 rootfs、网络可隔绝、资源配额、写边界可钉死。
+    /// 比 <c>bwrap</c> 更彻底（bwrap 借宿主根、默认不隔网），代价是需要镜像与容器运行时。
+    /// 因此它是<b>显式选用</b>的档（要配镜像），不进 <c>auto</c> —— 详见 <see cref="ContainerSandboxOptions"/>。
+    /// </summary>
+    Container = 3,
 }
 
 /// <summary>
@@ -124,6 +131,17 @@ public interface ISandboxBackend
 
     /// <summary>本平台能不能用（如 job 后端只在 Windows 可用）。</summary>
     bool IsAvailable { get; }
+
+    /// <summary>
+    /// <see cref="IsAvailable"/> 为 false 时说明「为什么不可用」—— 进回落文案；可用时返回 null。
+    ///
+    /// <para>
+    /// 有默认实现（接口默认成员）是刻意的：这是<b>纯附加</b>的诊断信息，
+    /// 老后端与外部插件不改一行也照常编译 —— 但注册表在回落时能多说一句
+    /// 「是平台不对，还是镜像没配」。
+    /// </para>
+    /// </summary>
+    string? UnavailableReason => null;
 
     /// <summary>一句话说明这一档到底管住了什么（进诊断面与工具结果）。</summary>
     string Describe();

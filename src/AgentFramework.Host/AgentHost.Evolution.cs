@@ -44,11 +44,11 @@ public sealed partial class AgentHost
             return;
         }
 
-        _ = Task.Run(async () =>
+        TrackBackground(Task.Run(async () =>
         {
             try
             {
-                await RunDreamAsync(projectDir, CancellationToken.None).ConfigureAwait(false);
+                await RunDreamAsync(projectDir, LifetimeToken).ConfigureAwait(false);
             }
             catch
             {
@@ -58,7 +58,7 @@ public sealed partial class AgentHost
             {
                 Interlocked.Exchange(ref _dreamInFlight, 0);
             }
-        });
+        }));
     }
 
     private void DispatchDistill()
@@ -68,11 +68,11 @@ public sealed partial class AgentHost
             return;
         }
 
-        _ = Task.Run(async () =>
+        TrackBackground(Task.Run(async () =>
         {
             try
             {
-                await RunDistillAsync(CancellationToken.None).ConfigureAwait(false);
+                await RunDistillAsync(LifetimeToken).ConfigureAwait(false);
             }
             catch
             {
@@ -82,7 +82,7 @@ public sealed partial class AgentHost
             {
                 Interlocked.Exchange(ref _distillInFlight, 0);
             }
-        });
+        }));
     }
 
     /// <summary>

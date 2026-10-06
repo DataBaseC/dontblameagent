@@ -7,6 +7,7 @@ using AgentFramework.Contracts;
 using AgentFramework.Data;
 using AgentFramework.Host;
 using AgentFramework.Tools;
+using static AgentFramework.Harness.Suite;
 
 // ═══════════════════════════════════════════════════════════
 //  分级记忆 + 工作模式 垂直切片验证
@@ -19,23 +20,6 @@ using AgentFramework.Tools;
 //    4. 切模式不需要重启
 // ═══════════════════════════════════════════════════════════
 
-var passes = 0;
-var failures = 0;
-
-void Check(string name, bool ok, string? detail = null)
-{
-    var suffix = detail is null ? "" : $"  ({detail})";
-    if (ok)
-    {
-        passes++;
-        Console.WriteLine($"  [PASS] {name}{suffix}");
-    }
-    else
-    {
-        failures++;
-        Console.WriteLine($"  [FAIL] {name}{suffix}");
-    }
-}
 
 void Section(string title) => Console.WriteLine($"\n── {title} ──");
 
@@ -459,6 +443,43 @@ asmClient.Reset();
 await asmHost.SendAsync("确认一下项目风格");
 var markedFrozen = string.Join('\n', asmHost.LastAssembly!.Frozen.Select(m => m.Content ?? ""));
 Check("★ agent 自记的记忆被标出来源", markedFrozen.Contains("我自己记的"));
+
+// ── 7b. 冻结段哈希诊断（任务 8 可选增强，默认关）────────────
+// 默认关：什么都不记 —— 不给所有会话白加一次 SHA256。
+Check("★ 诊断默认关：不记哈希（零成本）",
+    asmHost.FrozenBlockHashOf("asm") is null && asmHost.FrozenBlockChanges == 0);
+
+var diagClient = new RecordingClient();
+var diagOptions = new HostOptions
+{
+    WorkspaceRoot = Path.Combine(asmRoot, "diag-ws"),
+    SessionsDir = Path.Combine(asmRoot, "diag-sessions"),
+    SessionId = "diag",
+    LlmOverride = diagClient,
+    CacheDiagnostics = true,
+};
+Directory.CreateDirectory(diagOptions.WorkspaceRoot);
+
+await using var diagHost = await AgentHost.CreateAsync(diagOptions);
+await diagHost.Memory.AppendAsync(MemoryScope.Project, "诊断宿主：本文件只验证前缀哈希", ["约定"], null, "user");
+
+await diagHost.SendAsync("第一轮");
+var firstFrozenHash = diagHost.FrozenBlockHashOf("diag");
+Check("★ 开了诊断就有哈希（「前缀有没有被打掉」变成可看的数）",
+    firstFrozenHash is { Length: 16 }, firstFrozenHash);
+
+await diagHost.SendAsync("第二轮（状态没变）");
+Check("★ 状态不变 → 哈希不变、变化计数为 0（前缀稳定，缓存可命中）",
+    string.Equals(diagHost.FrozenBlockHashOf("diag"), firstFrozenHash, StringComparison.Ordinal)
+    && diagHost.FrozenBlockChanges == 0,
+    $"{diagHost.FrozenBlockHashOf("diag")} / 变化 {diagHost.FrozenBlockChanges}");
+
+await diagHost.Memory.AppendAsync(MemoryScope.Project, "诊断宿主：新记忆让索引卡变字节", null, null, "user");
+await diagHost.SendAsync("第三轮（记忆真变了）");
+Check("★ 记忆真变化 → 哈希变、计数 +1（该失效时如实记一笔）",
+    diagHost.FrozenBlockChanges == 1
+    && !string.Equals(diagHost.FrozenBlockHashOf("diag"), firstFrozenHash, StringComparison.Ordinal),
+    $"变化 {diagHost.FrozenBlockChanges} 次");
 
 // ── 8. 工作小本本（人机共写的计划本）───────────────────────
 Section("8. 工作小本本：计划外化，且人可共写");

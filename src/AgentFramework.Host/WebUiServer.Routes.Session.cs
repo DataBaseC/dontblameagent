@@ -260,6 +260,58 @@ public sealed partial class WebUiServer
             }
         }));
 
+        // ── 子 Agent 名单（v3.23）：谁在跑、跑了多少轮、结果是什么 ──
+        Map(new DelegateRoute("GET", "/api/subagents", (request, _) =>
+        {
+            var parent = request.Query["sessionId"];
+            var agents = _host.SubAgents.List(string.IsNullOrWhiteSpace(parent) ? null : parent);
+            request.Json(new
+            {
+                ok = true,
+                agents = agents.Select(a => new
+                {
+                    id = a.Id,
+                    parentSessionId = a.ParentSessionId,
+                    state = a.State,
+                    rounds = a.Rounds,
+                    background = a.Background,
+                    startedAt = a.StartedAt,
+                    task = a.Task,
+                    summary = a.Summary,
+                }),
+            });
+            return ValueTask.CompletedTask;
+        }));
+
+        // ── 重建：用 checkpoint 当种子开新窗口（只带状态不带史）──
+        Map(new DelegateRoute("POST", "/api/sessions/rebuild", async (request, _) =>
+        {
+            var body = await request.ReadBodyAsync().ConfigureAwait(false);
+            var id = body is null ? null : ReadString(body.Value, "id");
+            long? checkpointSeq = null;
+            if (body is not null && body.Value.TryGetProperty("checkpointSeq", out var seqNode)
+                && seqNode.ValueKind == System.Text.Json.JsonValueKind.Number)
+            {
+                checkpointSeq = seqNode.GetInt64();
+            }
+
+            if (string.IsNullOrWhiteSpace(id) || !IsValidSessionId(id))
+            {
+                request.Json(new { ok = false, error = "缺少 id 或会话 id 非法" }, 400);
+                return;
+            }
+
+            try
+            {
+                var newId = _host.RebuildSession(id, checkpointSeq);
+                request.Json(new { ok = true, sessionId = newId });
+            }
+            catch (Exception ex)
+            {
+                request.Json(new { ok = false, error = ex.Message }, 400);
+            }
+        }));
+
         // HCI：创建会话时选定工作模式（模式属会话，创建后钉住 —— 顶栏不再有全局切换器）。
         // 插件注册的自定义档位（酒馆/宠物/…）经同一入口进来，对前端零特殊。
         Map(new DelegateRoute("POST", "/api/sessions/new", async (request, _) =>

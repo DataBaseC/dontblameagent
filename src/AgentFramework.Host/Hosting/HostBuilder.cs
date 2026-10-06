@@ -391,6 +391,16 @@ public sealed class ModelModule : IHostModule
                 ? null
                 : new LlmGoalVerifier(summarizerClient, new LlmGoalVerifierOptions()));
 
+        // checkpoint writer（状态锚点提取者，v3.22）：与摘要器共用同一套旁路小模型。
+        // 默认关（CheckpointOptions.Enabled=false）—— 装了也只在显式开启时才被调用，零回归。
+        var checkpointWriter = options.CheckpointWriterOverride
+            ?? (summarizerClient is null
+                ? null
+                : new LlmCheckpointWriter(summarizerClient, new LlmCheckpointWriterOptions
+                {
+                    MaxChars = options.Checkpoint.MaxChars,
+                }));
+
         state.ModelStore = modelStore;
         state.ModelSettings = modelSettings;
         state.Llm = llm;
@@ -400,6 +410,7 @@ public sealed class ModelModule : IHostModule
         state.Rephraser = rephraser;
         state.ContextSummarizer = contextSummarizer;
         state.GoalVerifier = goalVerifier;
+        state.CheckpointWriter = checkpointWriter;
 
         // 包一层可替换的壳：之后换模型只换它的内层，主循环不用重建
         state.Switchable = new SwitchableLlmClient(llm);
@@ -448,7 +459,10 @@ public sealed class ModelModule : IHostModule
             return (options.LlmOverride, false, localClient, cloudClient);
         }
 
-        var router = new RouterLlmClient(DefaultRouting.Rule(options.LongContextChars));
+        // 长上下文判据用**真实 token 估算**（中英分别计权），不再用字符数近似。
+        var router = new RouterLlmClient(DefaultRouting.Rule(
+            options.LongContextTokens,
+            request => request.Messages.Sum(m => TokenEstimator.Estimate(m.Content))));
         var configured = 0;
 
         if (cloudClient is not null)
@@ -670,9 +684,24 @@ public sealed class ToolModule : IHostModule
         };
         state.Toolkit = toolkit;
 
-        // 命令沙箱：内置三档（off / process / job），插件可注册新后端 ——
+        // 命令沙箱：内置档（off / process / job / bwrap / container），插件可注册新后端 ——
         // 于是「换一种沙箱」是加一个插件，而不是改宿主里任何 switch。
-        var sandbox = new SandboxRegistry();
+        // 容器档的镜像 / 网络 / 运行时来自配置；网络名认不出来时提示一声并按 none 处理。
+        var (sandboxNetwork, networkNote) = ContainerSandboxOptions.ParseNetwork(options.SandboxNetwork);
+        if (networkNote is not null)
+        {
+            Console.WriteLine($"[警告] {networkNote}");
+        }
+
+        var sandbox = new SandboxRegistry(
+            new ContainerSandboxOptions
+            {
+                Image = options.SandboxImage,
+                Runtime = options.SandboxRuntime,
+                Network = sandboxNetwork,
+            },
+            // 网络档是**统一语义**：设为 none 时 bwrap 也一并禁网（否则「禁网」只在容器档成立）。
+            isolateNetwork: sandboxNetwork == ContainerNetwork.None);
         state.Sandbox = sandbox;
 
         // 摘要器接到「本地」端点上：网页正文先在本机压缩，只有摘要会进入云端上下文。
@@ -708,6 +737,23 @@ public sealed class ToolModule : IHostModule
         foreach (var t in AgentFramework.Tools.FileOps.CoreFileOps.CreateAll(new WorkspaceService(toolkit)))
             tools.Add(t);
         tools.Add(new RunCommandTool(toolkit, sandbox));
+
+        // 后台作业池（对齐 dsh 的 jobs）：长命令扔后台，回合不干等。
+        // shell 的 run_in_background 与 job 工具共用这一份 —— 两个入口、一张作业表，
+        // 于是「shell 起的后台」也能被 job(list/output) 看见并收结果。
+        var jobs = new JobManager();
+
+        // 常驻 shell（对齐 dsh 的 persistent shell · Claude Code 的 Bash 工具）：
+        // cd / export / venv 激活跨调用保留；另支持 description / timeout / run_in_background。
+        // 生命周期挂在官方工具作用域上 —— 宿主关闭时一起杀掉（见下方 scope.Effect）。
+        var shellSession = new ShellSessionTool(toolkit, jobs);
+        tools.Add(shellSession);
+
+        var jobTool = new JobTool(toolkit, jobs);
+        tools.Add(jobTool);
+
+        // 技能按需加载：让模型自己拨「用哪套领域能力」（与 use_toolset 互补）。
+        tools.Add(new UseSkillTool(() => state.Skills, state.EnabledSkills));
         tools.Add(new WebSearchTool(toolkit, BuildSearchProvider(toolkit)));
         tools.Add(new WebFetchTool(toolkit, http: null, summarizer: summarizer));
 
@@ -760,15 +806,16 @@ public sealed class ToolModule : IHostModule
             () => state.ToolsetViewProvider?.Invoke() ?? [],
             (id, enabled) => state.ToolsetToggle?.Invoke(id, enabled) ?? false));
 
-        // G1 子 Agent：主模型自己决定派工。runner 由宿主回填（需要 AgentHost 的 OpenSession/SendAsync，
+        // G1 子 Agent：主模型自己决定派工。管控面由宿主回填（需要 AgentHost 的 OpenSession/SendAsync，
         // 装配期还没有宿主 —— 与 InteractionProvider 同一手法：留委托，运行期解引用）。
-        // v3.4 原接线多传了一个 LastSeqOf（签名里没有这个位置）—— 子会话 id 由 runner 自造，分叉点参数已无用，删。
         tools.Add(new SpawnSubAgentTool(
             () => state.CurrentSessionIdProvider?.Invoke() ?? options.SessionId,
-            async (parentSessionId, task, ct) =>
-            {
-                return await state.SubAgentRunner!(parentSessionId, task, ct).ConfigureAwait(false);
-            }));
+            () => state.SubAgents));
+
+        // 子 Agent 管控（v3.23）：名单 / 状态 / 取结果 / 追加指令 / 打断 / 等待。
+        tools.Add(new SubAgentControlTool(
+            () => state.CurrentSessionIdProvider?.Invoke() ?? options.SessionId,
+            () => state.SubAgents));
 
         // G3 计划：事件投影式计划，落盘走当前会话的 Sink。
         // 委托形参直接收 SessionEvent（工厂已在工具内调用），不再需要 PlanMutation 包装类型。
@@ -800,6 +847,16 @@ public sealed class ToolModule : IHostModule
             () => state.ToolsetViewProvider?.Invoke() ?? [],
             state.OfficialTools));
 
+        // 工具检索（Tool Search，v3.26）：把延迟工具（Eager=false 的包，如 mcp:<server>）
+        // 按需拉进本会话 —— tool_catalog 看包、use_toolset 整包开，本工具按**单件**拉起。
+        tools.Add(new ToolSearchTool(
+            () => state.Kernel.GetTools(),
+            () => state.VisibleTools(),
+            () => state.ToolsetViewProvider?.Invoke() ?? [],
+            (name, on) => state.SetToolActivatedForTurn(name, on),
+            () => state.ActivatedToolsForTurn,
+            name => state.Kernel.ToolsetOf(name)));
+
         // 结构化输出工具样例（lab 包）：扩展「工具类型」注册面。
         tools.Add(new CsvToJsonTool());
 
@@ -807,6 +864,10 @@ public sealed class ToolModule : IHostModule
         // 主循环、InvokeToolAsync、诊断面看到的都是同一份名单，
         // 而且运行期挂上来的工具下一轮就可见（技能 / 子 agent / 模型自写插件都靠这条）。
         var scope = state.Kernel.CreateKernelScope("official-tools");
+
+        // 常驻 shell / 后台作业池随宿主一起收：关闭时杀掉这些后台进程，不留孤儿。
+        scope.Effect(() => shellSession);
+        scope.Effect(() => jobs);
 
         // ── 官方工具的包归属 ─────────────────────────────────────
         // 集中在这里而不是让每个工具自报：包是**装配决策**（跟可见性同层），
@@ -848,6 +909,27 @@ public sealed class ToolModule : IHostModule
         // 就 ctx.Effect(() => registry.Register(backend))，卸载时自动摘掉。
         scope.Provide<ISandboxRegistry>(sandbox);
 
+        // ── 脚本借调工具的审批关口（安全审查 P0）─────────────────────
+        // 内核 InvokeToolAsync 从前只发事件、不过宿主策略链 —— 于是档位 / 审批规则 /
+        // 越界写硬闸在「脚本 ctx.callTool」这条路上全部静默失效。这里把它接回
+        // HostEventSink.RequestApprovalAsync，与主循环共用同一裁决。
+        // 延迟解引用（lambda 运行期才读）：装配期 state.Sink / ApprovalSinkFor 还没填。
+        state.Kernel.ToolApprovalGate = async (preEvent, ct) =>
+        {
+            IAgentEventSink? sink =
+                state.ApprovalSinkFor?.Invoke(state.TurnSessionIdValue) ?? state.Sink;
+
+            if (sink is null)
+            {
+                // 找不到审批出口 = 没人能裁决 → 保守拒绝（与「无界面即拒绝」同一纪律）。
+                preEvent.Cancelled = true;
+                preEvent.RejectReason = "脚本借调工具时无可用的审批出口，默认拒绝";
+                return;
+            }
+
+            await sink.RequestApprovalAsync(preEvent, ct).ConfigureAwait(false);
+        };
+
         return ValueTask.CompletedTask;
     }
 
@@ -880,9 +962,12 @@ public sealed class ToolModule : IHostModule
         ["update_plan"] = BuiltinToolsets.Core,
         ["update_notes"] = BuiltinToolsets.Core,
         ["spawn_subagent"] = BuiltinToolsets.Core,
+        ["subagent"] = BuiltinToolsets.Core,
 
         // exec（可关）：跑命令单独成包 ——「这次不许它跑命令」得有出口
         ["run_command"] = BuiltinToolsets.Exec,
+        ["shell"] = BuiltinToolsets.Exec,
+        ["job"] = BuiltinToolsets.Exec,
 
         ["web_search"] = BuiltinToolsets.Web,
         ["web_fetch"] = BuiltinToolsets.Web,
@@ -899,11 +984,13 @@ public sealed class ToolModule : IHostModule
         ["skill_validate"] = BuiltinToolsets.Self,
         ["skill_extract"] = BuiltinToolsets.Self,
         ["skill_from_toolset"] = BuiltinToolsets.Self,
+        ["use_skill"] = BuiltinToolsets.Self,
 
         // meta（不可关）：看/开关工具包本身 —— 关了就再也开不回来
         ["toolsets"] = BuiltinToolsets.Meta,
         ["use_toolset"] = BuiltinToolsets.Meta,
         ["tool_catalog"] = BuiltinToolsets.Meta,
+        ["tool_search"] = BuiltinToolsets.Meta,
     };
 
     /// <summary>内置包的显示名与说明（界面开关与诊断面都读它）。</summary>

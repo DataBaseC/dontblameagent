@@ -17,25 +17,31 @@ namespace AgentFramework.Sandbox;
 /// </para>
 ///
 /// <para>
-/// <b>边界（如实说明）</b>：
-/// <list type="bullet">
-///   <item>不隔离<b>网络</b>（故意）：<c>--unshare-net</c> 会让 <c>npm install</c> 之类直接失效，
-///     需要隔绝网络时可在配置里换成自建后端。</item>
-///   <item>在部分受限容器里没有 user namespace 权限，bwrap 会启动失败 —— 所以在那种环境下
-///     不要选它（本档仅在探测到 <c>bwrap</c> 可执行文件时才注册）。</item>
-/// </list>
+/// <b>网络</b>：默认放开（<c>--unshare-net</c> 会让 <c>npm install</c> 之类直接失效）。
+/// 需要彻底禁网时把沙箱网络档设为 <c>none</c>（<c>--sandbox-network none</c>）——
+/// 宿主会以 <c>isolateNetwork: true</c> 构造本后端，与容器后端同一套语义。
+/// </para>
+///
+/// <para>
+/// <b>边界（如实说明）</b>：在部分受限容器里没有 user namespace 权限，bwrap 会启动失败 ——
+/// 那种环境下不要选它。当前只在探测到 <c>bwrap</c> 可执行文件时注册（不做「跑一次试跑」的深探测：
+/// 那会在安装期引入额外进程与延迟，而失败会如实以 sandbox-start-fail 回报，不会静默成功）。
 /// </para>
 /// </summary>
-public sealed class BwrapSandboxBackend : ISandboxBackend
+public sealed class BwrapSandboxBackend(bool isolateNetwork = false) : ISandboxBackend
 {
-    private static readonly string? BwrapPath = FindOnPath("bwrap");
+    private static readonly string? BwrapPath = PathLookup.Find("bwrap");
 
     public string Name => "bwrap";
 
     public bool IsAvailable => OperatingSystem.IsLinux() && BwrapPath is not null;
 
+    /// <summary>是否对命令禁网（<c>--unshare-net</c>）。</summary>
+    public bool IsolateNetwork => isolateNetwork;
+
     public string Describe() =>
-        "bwrap 隔离：根文件系统只读、工作区可写、/tmp 独立、PID/UTS/IPC/用户命名空间隔离（不隔离网络）。";
+        "bwrap 隔离：根文件系统只读、工作区可写、/tmp 独立、PID/UTS/IPC/用户命名空间隔离"
+        + (isolateNetwork ? "、网络隔离（--unshare-net）。" : "（不隔离网络）。");
 
     public Task<SandboxOutcome> RunAsync(SandboxRequest request, CancellationToken ct)
     {
@@ -43,21 +49,6 @@ public sealed class BwrapSandboxBackend : ISandboxBackend
         // 环境清洗 / 输出封顶 / 超时连子孙终结等收尾完全复用 ProcessRunner —— 与另两档同源。
         var shell = request.Shell ?? ShellResolver.Resolve();
         var workdir = request.WorkingDirectory;
-
-        var wrapper = new List<string>
-        {
-            BwrapPath!,
-            "--die-with-parent",
-            "--unshare-user", "--unshare-pid", "--unshare-uts", "--unshare-ipc",
-            "--ro-bind", "/", "/",
-            "--dev", "/dev",
-            "--proc", "/proc",
-            "--tmpfs", "/tmp",
-            "--bind", workdir, workdir,
-            "--chdir", workdir,
-            "--",
-            shell.FileName,
-        };
 
         return ProcessRunner.RunAsync(
             new ProcessRunner.RunOptions(
@@ -69,35 +60,43 @@ public sealed class BwrapSandboxBackend : ISandboxBackend
                 OnStarted: null,
                 OnTerminate: null,
                 Shell: shell,
-                Wrapper: wrapper),
+                Wrapper: BuildWrapper(BwrapPath!, shell, workdir, isolateNetwork)),
             ct);
     }
 
-    /// <summary>在 PATH 里找一个可执行文件；找不到返回 null（= 本档不可用）。</summary>
-    private static string? FindOnPath(string exe)
+    /// <summary>
+    /// 拼隔离参数（纯函数，便于验收直接断言安全属性：禁网 / 只读根 / 只挂工作区）。
+    /// </summary>
+    internal static IReadOnlyList<string> BuildWrapper(
+        string bwrapPath,
+        ShellSpec shell,
+        string workdir,
+        bool isolateNetwork)
     {
-        var path = Environment.GetEnvironmentVariable("PATH");
-        if (string.IsNullOrEmpty(path))
+        var wrapper = new List<string>
         {
-            return null;
+            bwrapPath,
+            "--die-with-parent",
+            "--unshare-user", "--unshare-pid", "--unshare-uts", "--unshare-ipc",
+        };
+
+        if (isolateNetwork)
+        {
+            wrapper.Add("--unshare-net");
         }
 
-        foreach (var dir in path.Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries))
-        {
-            try
-            {
-                var full = Path.Combine(dir, exe);
-                if (File.Exists(full))
-                {
-                    return full;
-                }
-            }
-            catch
-            {
-                // 非法 PATH 项跳过
-            }
-        }
+        wrapper.AddRange(
+        [
+            "--ro-bind", "/", "/",
+            "--dev", "/dev",
+            "--proc", "/proc",
+            "--tmpfs", "/tmp",
+            "--bind", workdir, workdir,
+            "--chdir", workdir,
+            "--",
+            shell.FileName,
+        ]);
 
-        return null;
+        return wrapper;
     }
 }

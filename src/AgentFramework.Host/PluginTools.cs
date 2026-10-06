@@ -20,9 +20,11 @@ namespace AgentFramework.Host;
 /// 热更新必须能退回去，否则它是一次性的赌。
 /// </para>
 /// </summary>
-public sealed class PluginWriteTool(PluginStore store) : ITool, IToolWithSchema
+public sealed class PluginWriteTool(PluginStore store) : IToolWithRisk, ITool, IToolWithSchema
 {
     public string Name => "plugin_write";
+
+    public ToolRisk Risk => ToolRisk.Write;
 
     public string Description =>
         "把你的脚本插件写进统一插件仓库（<workspace>/plugins/<id>/）。" +
@@ -111,9 +113,11 @@ public sealed class PluginWriteTool(PluginStore store) : ITool, IToolWithSchema
 }
 
 /// <summary>重新装载（热更新）：换版本 + 装载自测 + 失败回滚。</summary>
-public sealed class PluginReloadTool(PluginStore store, PluginHost kernel) : ITool, IToolWithSchema
+public sealed class PluginReloadTool(PluginStore store, PluginHost kernel) : IToolWithRisk, ITool, IToolWithSchema
 {
     public string Name => "plugin_reload";
+
+    public ToolRisk Risk => ToolRisk.Execute;
 
     public string Description =>
         "重新装载插件（热更新）：先卸掉旧版，再装仓库里的当前版本，并跑脚本的 selftest() 冒烟。" +
@@ -206,9 +210,11 @@ public sealed class PluginReloadTool(PluginStore store, PluginHost kernel) : ITo
 }
 
 /// <summary>卸掉并删掉一个插件。</summary>
-public sealed class PluginUninstallTool(PluginStore store, PluginHost kernel) : ITool, IToolWithSchema
+public sealed class PluginUninstallTool(PluginStore store, PluginHost kernel) : IToolWithRisk, ITool, IToolWithSchema
 {
     public string Name => "plugin_uninstall";
+
+    public ToolRisk Risk => ToolRisk.Destructive;
 
     public string Description =>
         "卸载并删除一个插件：撤销它注册的工具/钩子，并从插件仓库删掉它的目录。";
@@ -254,9 +260,11 @@ public sealed class PluginUninstallTool(PluginStore store, PluginHost kernel) : 
 }
 
 /// <summary>看清现在装了什么。</summary>
-public sealed class PluginListTool(PluginStore store, PluginHost kernel) : ITool, IToolWithSchema
+public sealed class PluginListTool(PluginStore store, PluginHost kernel) : IToolWithRisk, ITool, IToolWithSchema
 {
     public string Name => "plugin_list";
+
+    public ToolRisk Risk => ToolRisk.ReadOnly;
 
     public string Description =>
         "列出当前装着的插件：id、版本、类型（脚本/程序集）、注册的工具、是否在跑、装载自测结果。";

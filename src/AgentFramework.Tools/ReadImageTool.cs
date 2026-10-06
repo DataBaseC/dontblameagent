@@ -12,12 +12,14 @@ namespace AgentFramework.Tools;
 /// 以 user 多模态消息注入（OpenAI 系 tool 角色不收图）。
 /// </para>
 /// </summary>
-public sealed class ReadImageTool(IWorkspaceService workspace) : ITool, IToolWithSchema
+public sealed class ReadImageTool(IWorkspaceService workspace) : IToolWithRisk, ITool, IToolWithSchema
 {
     private static readonly HashSet<string> AllowedExt = new(StringComparer.OrdinalIgnoreCase)
     { ".png", ".jpg", ".jpeg", ".webp", ".gif" };
 
     public string Name => "read_image";
+
+    public ToolRisk Risk => ToolRisk.ReadOnly;
 
     public string Description =>
         "读取工作区中的图片并注入本轮上下文（视觉模型可直接看图）。支持 png/jpg/webp/gif。";

@@ -16,10 +16,14 @@ using AgentFramework.Host;
 //  两者都没有则进入离线演示模式（能跑通，但端点不报用量）
 //
 //  命令沙箱强度（--sandbox）：
-//    · Windows  → job 档：Job Object 资源限制（内存 / CPU / 进程数上限）
-//    · Linux/macOS → process 档：仅进程级护栏（工作目录钉死 / TMP 重定向 /
-//      超时连子孙终结 / 输出封顶 / 环境变量白名单）—— **不是隔离**：
-//      命令以本用户权限运行，能读写本用户可访问的任何文件。
+//    · auto（默认）→ Linux 上有 bwrap 用 bwrap、Windows 用 job、其余用 process
+//    · process 档：仅进程级护栏（工作目录钉死 / TMP 重定向 / 超时连子孙终结 /
+//      输出封顶 / 环境变量白名单）—— **不是隔离**：命令以本用户权限运行。
+//    · bwrap 档（Linux）：命名空间隔离（根只读 / 工作区可写 / PID 等隔离），默认不禁网。
+//    · job 档（Windows）：Job Object 资源限制（内存 / CPU / 进程数上限）。
+//    · container 档（Docker / Podman）：独立 rootfs + 网络可隔绝 + 根只读 + 内存上限。
+//      需显式配镜像：--sandbox container --sandbox-image <镜像>；网络默认 none（禁网），
+//      装依赖时加 --sandbox-network bridge。
 // ═══════════════════════════════════════════════════════════
 
 try
@@ -77,6 +81,10 @@ var options = new HostOptions
     // 命令沙箱档位：auto（默认）/ off / process / job，或插件注册的后端名
     // 强度因平台而异：Windows 的 job 档有内核配额；Linux/macOS 的 process 档只是进程级护栏（非隔离）。
     Sandbox = Pick(GetArg("--sandbox"), "AGENT_SANDBOX", config?.Sandbox),
+    // 容器沙箱（--sandbox container）的镜像 / 网络 / 运行时。镜像必配；网络默认 none（禁网）。
+    SandboxImage = Pick(GetArg("--sandbox-image"), "AGENT_SANDBOX_IMAGE", config?.SandboxImage),
+    SandboxNetwork = Pick(GetArg("--sandbox-network"), "AGENT_SANDBOX_NETWORK", config?.SandboxNetwork),
+    SandboxRuntime = Pick(GetArg("--sandbox-runtime"), "AGENT_SANDBOX_RUNTIME", config?.SandboxRuntime),
     // shell：会话级一次决定，优先 POSIX。auto / bash / sh / cmd / powershell / pwsh / 路径
     Shell = Pick(GetArg("--shell"), "AGENT_SHELL", config?.Shell),
     // 启动时就收起的工具包（逗号分隔）。留空 = 全部开启；保留包写了不生效。
@@ -163,6 +171,35 @@ if (config?.Context is { } contextConfig)
     if (contextConfig.InjectTaskCard is { } taskCard)
     {
         options.Context.InjectTaskCard = taskCard;
+    }
+}
+
+// checkpoint（状态锚点）：与 context 分开的两个触发点，写法也分开
+if (config?.Checkpoint is { } checkpointConfig)
+{
+    if (checkpointConfig.Enabled is { } enabled)
+    {
+        options.Checkpoint.Enabled = enabled;
+    }
+
+    if (checkpointConfig.TriggerRatio is { } triggerRatio)
+    {
+        options.Checkpoint.TriggerRatio = triggerRatio;
+    }
+
+    if (checkpointConfig.MaxChars is { } maxChars)
+    {
+        options.Checkpoint.MaxChars = maxChars;
+    }
+
+    if (checkpointConfig.MinNewEvents is { } minNewEvents)
+    {
+        options.Checkpoint.MinNewEvents = minNewEvents;
+    }
+
+    if (checkpointConfig.PromoteMemory is { } promoteMemory)
+    {
+        options.Checkpoint.PromoteMemory = promoteMemory;
     }
 }
 

@@ -12,4 +12,8 @@
     <ProjectReference Include="../../src/AgentFramework.Contracts/AgentFramework.Contracts.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <ProjectReference Include="../AgentFramework.Harness/AgentFramework.Harness.csproj" />
+  </ItemGroup>
+
 </Project>

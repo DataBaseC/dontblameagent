@@ -1,0 +1,27 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>AgentFramework.Plugins.ComputerUse</RootNamespace>
+    <AssemblyName>AgentFramework.Plugins.ComputerUse</AssemblyName>
+    <!-- 插件私有依赖要落进插件目录（与 writing-kit 同款说明）。 -->
+    <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../AgentFramework.Contracts/AgentFramework.Contracts.csproj">
+      <Private>false</Private>
+      <ExcludeAssets>runtime</ExcludeAssets>
+    </ProjectReference>
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- 截屏编码 PNG 用 System.Drawing.Common：它只在 Windows 运行时可用（其它平台会 PlatformNotSupported），
+         所以只在 Windows 驱动里调用；macOS / Linux 走系统命令（screencapture / import 等）。 -->
+    <PackageReference Include="System.Drawing.Common" Version="9.0.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Update="plugin.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+</Project>

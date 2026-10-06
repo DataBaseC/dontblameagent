@@ -72,7 +72,7 @@ if errorlevel 1 (
     )
 )
 
-echo [3/6] Publish base plugins (writing-kit / console-kit) ...
+echo [3/6] Publish base plugins (writing-kit / console-kit / computer-use) ...
 if exist "%HOST_OUT%\plugins" rmdir /s /q "%HOST_OUT%\plugins"
 "%DOTNET%" publish src\AgentFramework.Plugins.WritingKit\AgentFramework.Plugins.WritingKit.csproj -c Release -m:1 -o "%HOST_OUT%\plugins\writing-kit" --nologo -v quiet
 if errorlevel 1 (
@@ -83,6 +83,12 @@ if errorlevel 1 (
 "%DOTNET%" publish src\AgentFramework.Plugins.ConsoleKit\AgentFramework.Plugins.ConsoleKit.csproj -c Release -m:1 -o "%HOST_OUT%\plugins\console-kit" --nologo -v quiet
 if errorlevel 1 (
     echo   console-kit publish failed.
+    call :maybe_pause
+    exit /b 1
+)
+"%DOTNET%" publish src\AgentFramework.Plugins.ComputerUse\AgentFramework.Plugins.ComputerUse.csproj -c Release -m:1 -o "%HOST_OUT%\plugins\computer-use" --nologo -v quiet
+if errorlevel 1 (
+    echo   computer-use publish failed.
     call :maybe_pause
     exit /b 1
 )

@@ -95,6 +95,43 @@ public interface ITool
 }
 
 /// <summary>
+/// 工具自报的<b>副作用等级</b>（对齐 MCP 的 tool annotations：<c>readOnlyHint</c> / <c>destructiveHint</c>）。
+///
+/// <para>
+/// 为什么是工具自己的属性：审批要回答的唯一问题是「这个动作会不会改变什么」——
+/// 而这只有工具自己知道。把它写成宿主里的一张工具名清单，加一个工具就要改几处，
+/// 且漏一处就是「新工具默认落进询问」或「同一动作在两个档位被判成不同性质」。
+/// </para>
+/// </summary>
+public enum ToolRisk
+{
+    /// <summary>只读：不改变任何持久状态（读文件 / 列目录 / 搜索 / 提问 / 查历史）。放行不打断。</summary>
+    ReadOnly = 0,
+
+    /// <summary>写：改变工作区状态，但落点可判（写文件 / 建目录 / 搬移 / 记笔记 / 改记忆）。</summary>
+    Write = 1,
+
+    /// <summary>破坏性：删东西（删文件 / 卸载插件）。即使「常规放行」档也要问。</summary>
+    Destructive = 2,
+
+    /// <summary>
+    /// 执行：起进程或操作外部世界（跑命令 / 后台作业 / 持久 shell / 子 agent / GUI 操作）。
+    /// <b>兜底值</b> —— 没声明风险的工具一律按这个算，于是「新工具默认要问」是安全的默认。
+    /// </summary>
+    Execute = 3,
+}
+
+/// <summary>
+/// 会声明风险等级的工具（「可加不可改」的第四次实践，前三次：<c>IToolWithSchema</c>、
+/// <c>IApprovalPrompt.AskDetailedAsync</c>、<c>ISessionIndex.RemoveSessionAsync</c>）：
+/// 不实现它的老工具 / 插件工具照样工作，只是被当作 <see cref="ToolRisk.Execute"/>（最保守）。
+/// </summary>
+public interface IToolWithRisk : ITool
+{
+    ToolRisk Risk { get; }
+}
+
+/// <summary>
 /// 会声明参数的“可描述工具”。单独成一个接口而不是往 ITool 上塞成员 ——
 /// 契约「可加不可改」：老工具不实现它也照样工作。
 /// </summary>

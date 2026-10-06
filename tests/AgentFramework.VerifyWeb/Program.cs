@@ -7,29 +7,13 @@ using System.Text.Json;
 using AgentFramework.Contracts;
 using AgentFramework.Data;
 using AgentFramework.Host;
+using static AgentFramework.Harness.Suite;
 
 // ═══════════════════════════════════════════════════════════
 //  Web 对话界面垂直切片验证
 //  页面 / 状态 / 历史 / 发送 / SSE 流式 / 工具卡片 / 审批 / 多会话
 // ═══════════════════════════════════════════════════════════
 
-var passes = 0;
-var failures = 0;
-
-void Check(string name, bool ok, string? detail = null)
-{
-    var suffix = detail is null ? "" : $"  ({detail})";
-    if (ok)
-    {
-        passes++;
-        Console.WriteLine($"  [PASS] {name}{suffix}");
-    }
-    else
-    {
-        failures++;
-        Console.WriteLine($"  [FAIL] {name}{suffix}");
-    }
-}
 
 var root = Path.Combine(Path.GetTempPath(), "af-web-verify", Guid.NewGuid().ToString("N")[..8]);
 var workspace = Path.Combine(root, "workspace");
@@ -1263,6 +1247,26 @@ using (var doc = JsonDocument.Parse(usageStatusJson))
         usage.ToString());
 }
 
+// ── 子 Agent：会话列表可见性 + 名单接口（v3.24 的 bug 守门）──
+Console.WriteLine("\n── 子 Agent 与会话列表 ──");
+
+var child = await host.SubAgents.SpawnAsync(host.SessionId, "web 可见性检查", background: true);
+await Task.Delay(300);
+
+var sessionsBody = await http.GetStringAsync($"{server.Url}api/sessions");
+Check("★ 子 Agent 会话不进人的会话列表（派一次工不该多一条空会话）",
+    !sessionsBody.Contains(child.Id), child.Id);
+
+var subsBody = await http.GetStringAsync($"{server.Url}api/subagents");
+Check("子 Agent 名单接口列得出它", subsBody.Contains(child.Id));
+
+var pageBody = await http.GetStringAsync(server.Url);
+Check("页面带子 Agent 面板（此刻谁在跑）",
+    pageBody.Contains("subagent-panel") && pageBody.Contains("refreshSubagents"));
+
+host.SubAgents.Stop(child.Id);
+await Task.Delay(300);
+
 stableCts.Cancel();
 stableServer.Stop();
 
@@ -1271,7 +1275,6 @@ cts.Cancel();
 server.Stop();
 
 Console.WriteLine($"\n═══ 结果：{passes} 通过 / {failures} 失败 ═══");
-
 static async Task<JsonDocument> GetJson(HttpClient client, string url)
     => JsonDocument.Parse(await client.GetStringAsync(url));
 

@@ -11,6 +11,25 @@
 
 ---
 
+## 实施状态（2026-10 对账）
+
+> 八项**均已落地**；下表给落点与证据。本轮补做的两处标 **本轮补**。
+
+| # | 任务 | 状态 | 证据 |
+|---|---|---|---|
+| 7 | ask_user 卡片修复 | ✅ | 后端外层帧 `type:"ask-user"` + `POST /api/ask-user`（`WebUiServer.cs` / `Routes.Chat.cs`）+ 前端 `stream.onmessage` **同层**分支与 `addAskUserCard`（`Web/index.html`）。当年失败根因已修：审批/提问帧从前只在 `renderEvent` 里认，外层帧永远走不到那一支。**本轮补**：`tools/ask-user-e2e.js` —— jsdom 端到端 11 项（弹卡 / 选项提交 / 自由输入 / 失败文案可诊断 / 不串会话 / 老帧兼容），补上 C# 测试看不见的那一环 |
+| 8 | 缓存命中率 | ✅ | `ModelUsage.CacheHitRate` + `/api/status.usage` + 时间线「命中 N / 写入 M」；冻结段稳定断言（`VerifyMemory` §7、`VerifyWeb`）。**本轮补**：`HostOptions.CacheDiagnostics` —— 冻结段**字节哈希诊断**（默认关，同会话哈希变了记数并打日志）+ `/api/context.cache` 暴露 |
+| 1 | 上下文/压缩设置 | ✅ | `GET/POST /api/context`（含范围校验、「恢复默认」对照源码初值）+ `#context-panel` UI；两个水位分开 |
+| 2 | 技能工具扩展 | ✅ | `skill_scaffold` / `skill_validate` / `skill_extract` / `skill_from_toolset` / `tool_catalog` + `csv_to_json`（结构化输出样例），归 `self` / `meta` / `core` |
+| 3 | UI 布局与流畅度 | ✅ | `footer{max-height:76vh;overflow-y:auto}` + `.composer{position:sticky}` + `@media(max-height:700px)` —— 面板开再多，发送键/保存键恒可达 |
+| 4 | 模式体系 | ✅ | `ModeProfile.Code / Write / Plan`（`CustomId` 注册面）+ `AgentModes.TryResolve` + 插件可注册新模式；会话以字符串 id 钉模式 |
+| 5 | 审批档位 | ✅ | `ApprovalTier`（ask / plan / build / yolo）+ `ApprovalTiers`；v3.23 起按**工具自报风险**判定，不再维护硬编码名单 |
+| 6 | 思考能力判定 | ✅ | `ModelProfile.SupportsReasoning`（三态 `?`）+ `ReasoningStyle` / `ReasoningEffort`；界面据此决定给不给强度选项 |
+
+**八项之外仍留白**：MCP prompts / sampling · 长尾集成（定时调度 / Webhook）· Tool Search 的检索升级（BM25 / 向量）· 子 Agent 会话日志清理。
+
+---
+
 ## 0. 所有任务共同约束（必读，粘贴时带上）
 
 1. **语言与汇报**：代码注释/文档/提交信息用中文；问题说明带 `文件:行号`。

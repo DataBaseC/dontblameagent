@@ -10,9 +10,11 @@ namespace AgentFramework.Tools;
 /// 刻意保持参数极简：<b>模型只给 query</b>，条数/超时都在配置里（学 dsh）。
 /// 返回也只给"标题 + URL + 摘要"，正文留给 web_fetch —— 这样上下文不会被网页撑爆。
 /// </summary>
-public sealed class WebSearchTool(ToolkitOptions options, ISearchProvider provider) : ITool, IToolWithSchema
+public sealed class WebSearchTool(ToolkitOptions options, ISearchProvider provider) : IToolWithRisk, ITool, IToolWithSchema
 {
     public string Name => "web_search";
+
+    public ToolRisk Risk => ToolRisk.ReadOnly;
 
     public string Description =>
         "在互联网上搜索。只返回标题、URL 和摘要；若需要网页正文，请再用 web_fetch 抓取该 URL。";
@@ -107,7 +109,7 @@ public sealed class WebSearchTool(ToolkitOptions options, ISearchProvider provid
 /// 窗口从结构上被关掉。
 /// </para>
 /// </summary>
-public sealed class WebFetchTool : ITool, IToolWithSchema
+public sealed class WebFetchTool : IToolWithRisk, ITool, IToolWithSchema
 {
     private readonly ToolkitOptions _options;
     private readonly HttpClient _http;
@@ -132,6 +134,8 @@ public sealed class WebFetchTool : ITool, IToolWithSchema
     }
 
     public string Name => "web_fetch";
+
+    public ToolRisk Risk => ToolRisk.ReadOnly;
 
     public string Description => "抓取一个 http/https 网页，返回其正文文本（HTML 会被转成纯文本）。";
 

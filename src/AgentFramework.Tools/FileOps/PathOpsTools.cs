@@ -6,9 +6,11 @@ namespace AgentFramework.Tools.FileOps;
 /// 建目录。<c>write_file</c> 虽然会自动建父目录，但「只想要一个空目录」这件事
 /// 之前得靠 run_command —— 而 mkdir 在各平台上的写法恰好也不一样。
 /// </summary>
-internal sealed class MakeDirTool(IWorkspaceService ws) : ITool, IToolWithSchema
+internal sealed class MakeDirTool(IWorkspaceService ws) : IToolWithRisk, ITool, IToolWithSchema
 {
     public string Name => "make_dir";
+
+    public ToolRisk Risk => ToolRisk.Write;
 
     public string Description => "在工作区内创建一个目录（含所有中间层级）。目录已存在时不算失败。";
 
@@ -23,7 +25,7 @@ internal sealed class MakeDirTool(IWorkspaceService ws) : ITool, IToolWithSchema
         var path = invocation.Arguments.Str("path");
         if (string.IsNullOrWhiteSpace(path))
         {
-            return ValueTask.FromResult(ToolResult.Fail("缺少参数 path"));
+            return ValueTask.FromResult(ToolResult.Fail($"缺少参数 path{FileHints.PathShape}"));
         }
 
         if (!ws.TryResolve(path, forWrite: true, out var fullPath, out var error))
@@ -38,7 +40,7 @@ internal sealed class MakeDirTool(IWorkspaceService ws) : ITool, IToolWithSchema
 
         if (File.Exists(fullPath))
         {
-            return ValueTask.FromResult(ToolResult.Fail($"该路径上已经有一个文件：{path}"));
+            return ValueTask.FromResult(ToolResult.Fail($"该路径上已经有一个文件：{path}；换个目录名，或先 move_path 把它移走（delete_path 亦可）"));
         }
 
         try
@@ -58,9 +60,11 @@ internal sealed class MakeDirTool(IWorkspaceService ws) : ITool, IToolWithSchema
 /// 移动 / 重命名。文件与目录都走这里 —— 「重命名一个文件」以前只能
 /// <c>run_command</c>，而且跨盘移动还得自己想兜底。
 /// </summary>
-internal sealed class MovePathTool(IWorkspaceService ws) : ITool, IToolWithSchema
+internal sealed class MovePathTool(IWorkspaceService ws) : IToolWithRisk, ITool, IToolWithSchema
 {
     public string Name => "move_path";
+
+    public ToolRisk Risk => ToolRisk.Write;
 
     public string Description =>
         "移动或重命名工作区内的文件/目录。from 与 to 都可以是文件或目录；" +
@@ -82,7 +86,7 @@ internal sealed class MovePathTool(IWorkspaceService ws) : ITool, IToolWithSchem
 
         if (string.IsNullOrWhiteSpace(from) || string.IsNullOrWhiteSpace(to))
         {
-            return ValueTask.FromResult(ToolResult.Fail("缺少参数 from 或 to"));
+            return ValueTask.FromResult(ToolResult.Fail("缺少参数 from 或 to（都是相对工作区根的路径，如 old/name.cs 与 new/name.cs）"));
         }
 
         // 两端都按写边界检查：移动的**起点也会被改**，它同样必须在工作区内
@@ -99,7 +103,7 @@ internal sealed class MovePathTool(IWorkspaceService ws) : ITool, IToolWithSchem
         var sourceIsDir = Directory.Exists(sourcePath);
         if (!sourceIsDir && !File.Exists(sourcePath))
         {
-            return ValueTask.FromResult(ToolResult.Fail($"源路径不存在：{from}"));
+            return ValueTask.FromResult(ToolResult.Fail($"源路径不存在：{FileHints.SourceMissing(from)}"));
         }
 
         var overwrite = args.Bool("overwrite");
@@ -181,9 +185,11 @@ internal sealed class MovePathTool(IWorkspaceService ws) : ITool, IToolWithSchem
 /// 删目录必须显式 <c>recursive=true</c>，删空的才可以省。
 /// 默认值选「更保守的那一侧」—— 猜错一次就是用户的文件没了。
 /// </summary>
-internal sealed class DeletePathTool(IWorkspaceService ws) : ITool, IToolWithSchema
+internal sealed class DeletePathTool(IWorkspaceService ws) : IToolWithRisk, ITool, IToolWithSchema
 {
     public string Name => "delete_path";
+
+    public ToolRisk Risk => ToolRisk.Destructive;
 
     public string Description =>
         "删除工作区内的文件或目录。删除非空目录必须显式传 recursive=true。" +
@@ -231,7 +237,7 @@ internal sealed class DeletePathTool(IWorkspaceService ws) : ITool, IToolWithSch
 
             if (!Directory.Exists(fullPath))
             {
-                return ValueTask.FromResult(ToolResult.Fail($"路径不存在：{path}"));
+                return ValueTask.FromResult(ToolResult.Fail($"路径不存在：{FileHints.SourceMissing(path)}"));
             }
 
             var entries = Directory.EnumerateFileSystemEntries(fullPath).Take(1).ToList();

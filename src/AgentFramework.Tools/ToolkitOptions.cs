@@ -81,6 +81,22 @@ public sealed class ToolkitOptions
     /// </summary>
     public string? Shell { get; set; }
 
+    /// <summary>
+    /// 模型可在 <c>run_command</c> 的 <c>shell</c> 参数里指定的 shell <b>白名单</b>
+    /// （对齐 dsh 的 bash / pwsh 双工具，但用「一个工具 + 参数」表达）。
+    /// 默认只含<b>关键字</b>：<c>auto</c>/<c>posix</c>/<c>bash</c>/<c>sh</c>/<c>cmd</c>/<c>powershell</c>/<c>pwsh</c>。
+    /// <para>
+    /// 刻意<b>不含任意路径</b>：<see cref="Contracts.ShellResolver.Resolve"/> 会把认不出的字符串
+    /// 当显式路径直接执行，那等于给模型一个「任意程序执行」入口。运维侧配置（见 <see cref="Shell"/>）
+    /// 才允许写路径（可信输入）；模型参数只允许在白名单里挑。
+    /// </para>
+    /// </summary>
+    public IReadOnlySet<string> AllowedCommandShells { get; set; } =
+        new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "auto", "posix", "bash", "sh", "cmd", "powershell", "pwsh",
+        };
+
     private Contracts.ShellSpec? _effectiveShell;
 
     /// <summary>
@@ -91,6 +107,12 @@ public sealed class ToolkitOptions
         => _effectiveShell ??= Contracts.ShellResolver.Resolve(Shell);
 
     public int CommandTimeoutSeconds { get; set; } = 30;
+
+    /// <summary>
+    /// 单条命令超时的<b>硬上限</b>（秒）。模型可在 <c>shell</c> 工具参数里传 <c>timeout</c> 覆盖默认值，
+    /// 但永远越不过它 —— 上限是运维的事，不进模型的自由发挥范围（对齐 Claude Code Bash 的 10 分钟上限）。
+    /// </summary>
+    public int CommandMaxTimeoutSeconds { get; set; } = 600;
 
     public int MaxCommandOutputChars { get; set; } = 50_000;
 

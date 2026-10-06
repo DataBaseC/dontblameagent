@@ -17,4 +17,8 @@
     <ProjectReference Include="../../src/AgentFramework.Sandbox/AgentFramework.Sandbox.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <ProjectReference Include="../AgentFramework.Harness/AgentFramework.Harness.csproj" />
+  </ItemGroup>
+
 </Project>

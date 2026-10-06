@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <RootNamespace>AgentFramework.VerifyComputerUse</RootNamespace>
+    <AssemblyName>AgentFramework.VerifyComputerUse</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../../src/AgentFramework.Contracts/AgentFramework.Contracts.csproj" />
+    <ProjectReference Include="../../src/AgentFramework.Plugins.ComputerUse/AgentFramework.Plugins.ComputerUse.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../AgentFramework.Harness/AgentFramework.Harness.csproj" />
+  </ItemGroup>
+
+</Project>

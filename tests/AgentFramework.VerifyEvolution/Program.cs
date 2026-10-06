@@ -3,6 +3,7 @@ using AgentFramework.Contracts;
 using AgentFramework.Data;
 using AgentFramework.Host;
 using AgentFramework.Llm;
+using static AgentFramework.Harness.Suite;
 
 // ═══════════════════════════════════════════════════════════════
 //  记忆与技能的进化验证（PLAN-memory-evolution 支柱四）
@@ -10,22 +11,6 @@ using AgentFramework.Llm;
 //    Distill —— 技能固化：从历史挖反复模式 → skills/ 纯声明式技能草稿
 // ═══════════════════════════════════════════════════════════════
 
-var passes = 0;
-var failures = 0;
-
-void Check(string name, bool ok, string? detail = null)
-{
-    if (ok)
-    {
-        passes++;
-        Console.WriteLine($"  [PASS] {name}{(detail is null ? "" : $"  ({detail})")}");
-    }
-    else
-    {
-        failures++;
-        Console.WriteLine($"  [FAIL] {name}{(detail is null ? "" : $"  ({detail})")}");
-    }
-}
 
 void Section(string name) => Console.WriteLine($"\n── {name} ──");
 

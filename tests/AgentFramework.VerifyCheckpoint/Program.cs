@@ -1,6 +1,10 @@
+using System.Runtime.CompilerServices;
 using System.Text.Json;
 using AgentFramework.Contracts;
 using AgentFramework.Data;
+using AgentFramework.Host;
+using AgentFramework.Llm;
+using static AgentFramework.Harness.Suite;
 
 // ═══════════════════════════════════════════════════════════
 //  checkpoint（记忆与进化 · v3.11）契约层验证
@@ -13,23 +17,6 @@ using AgentFramework.Data;
 //  不需要 API key / 联网 / 真实模型。
 // ═══════════════════════════════════════════════════════════
 
-var passes = 0;
-var failures = 0;
-
-void Check(string name, bool ok, string? detail = null)
-{
-    var suffix = detail is null ? "" : $"  ({detail})";
-    if (ok)
-    {
-        passes++;
-        Console.WriteLine($"  [PASS] {name}{suffix}");
-    }
-    else
-    {
-        failures++;
-        Console.WriteLine($"  [FAIL] {name}{suffix}");
-    }
-}
 
 Console.WriteLine("═══ checkpoint 契约验证 ═══");
 
@@ -171,11 +158,149 @@ var promoted = TaskCardBuilder.Build(chain);
 Check("加入 checkpoint 后任务卡照常产出（不含 checkpoint 正文）",
     promoted.Contains("【任务卡】") && !promoted.Contains("改主意了"), promoted.Split('\n')[0]);
 
+// ═══ 6. writer 解析与裁剪（B 批）═══
+Console.WriteLine("\n── 6. writer 解析与裁剪 ──");
+
+var parsed = LlmCheckpointWriter.Parse("""
+    好的，这是结果：
+    ```json
+    {"intent":"接 checkpoint","next_action":"跑测试","current_work":"写 writer",
+     "constraints":["零回归"],"files_touched":["Host/AgentHost.Context.cs"],
+     "discoveries":["投影器忽略未知事件"],"errors_and_fixes":"CS1513：补回收尾","decisions":["写入早裁剪晚"],"notes":"顺手修文档"}
+    ```
+    """);
+Check("能从围栏/前后废话里解析出结构化状态", parsed is not null && parsed.Intent == "接 checkpoint");
+Check("列表字段就位", parsed!.Constraints.Count == 1 && parsed.FilesTouched[0] == "Host/AgentHost.Context.cs");
+Check("错误与修复保真", parsed.ErrorsAndFixes == "CS1513：补回收尾");
+Check("无法解析时返回 null（不写空事件）", LlmCheckpointWriter.Parse("我想了想，没什么可说的") is null);
+Check("全空对象也返回 null", LlmCheckpointWriter.Parse("""{"intent":null,"notes":"无","constraints":[]}""") is null);
+Check("裸 JSON（无围栏）也能解析", LlmCheckpointWriter.Parse("""{"next_action":"跑测试"}""")?.NextAction == "跑测试");
+
+var longCheckpoint = new CheckpointEvent
+{
+    SessionId = "s",
+    Seq = 1,
+    Intent = "关键意图不能丢",
+    NextAction = "下一步",
+    CurrentWork = "当前工作",
+    Notes = new string('z', 500),
+    Constraints = [.. Enumerable.Range(0, 40).Select(i => $"约束{i}-{new string('x', 40)}")],
+    Discoveries = [.. Enumerable.Range(0, 40).Select(i => $"发现{i}-{new string('y', 40)}")],
+};
+LlmCheckpointWriter.TrimToLimit(longCheckpoint, 400);
+Check("超长被裁到上限内（恒定大小锚点）", longCheckpoint.RenderBlock().Length <= 400, longCheckpoint.RenderBlock().Length.ToString());
+Check("★ 意图留到最后（锚点的锚点）", longCheckpoint.Intent == "关键意图不能丢");
+Check("杂项最先被裁掉", longCheckpoint.Notes is null);
+
+// ═══ 7. 宿主接入：手动锚点 → 事件 → 记忆升级；默认关不自动写 ═══
+Console.WriteLine("\n── 7. 宿主接入 ──");
+
+var hostRoot = Path.Combine(Path.GetTempPath(), "af-cp-verify", Guid.NewGuid().ToString("N")[..8]);
+Directory.CreateDirectory(hostRoot);
+
+var countingWriter = new CountingCheckpointWriter();
+var hostOptions = new HostOptions
+{
+    WorkspaceRoot = Path.Combine(hostRoot, "workspace"),
+    SessionsDir = Path.Combine(hostRoot, "sessions"),
+    SessionId = "cp",
+    LlmOverride = new StaticReplyLlmClient("好的。"),
+    CheckpointWriterOverride = countingWriter,
+    Checkpoint = new CheckpointOptions { Enabled = false },
+};
+
+await using (var host = await AgentHost.CreateAsync(hostOptions))
+{
+    await host.SendAsync("你好");
+    await host.SendAsync("继续");
+    await Task.Delay(200);
+
+    Check("默认关时不自动写锚点（零回归）", host.Events().All(e => e is not CheckpointEvent));
+    Check("默认关时也不调用 writer", countingWriter.Calls == 0);
+
+    var (ok, message) = await host.ManualCheckpointAsync();
+    Check("手动写锚点成功", ok, message);
+
+    var anchor = host.Events().OfType<CheckpointEvent>().LastOrDefault();
+    Check("锚点事件已追加进日志", anchor is not null);
+    Check("触发来源是 manual", anchor?.Trigger == CheckpointTrigger.Manual);
+    Check("增量窗口被记录（FromSeq/ToSeq）", anchor is { ToSeq: > 0 } && anchor.FromSeq >= 1);
+    Check("writer 收到了任务卡与消息投影", countingWriter.LastRequest is { Messages.Count: > 0 });
+    Check("★ 升级记忆的 id 写进事件（可审计）",
+        anchor?.PromotedMemoryIds.Count == 1,
+        string.Join(",", anchor?.PromotedMemoryIds ?? []));
+    Check("人可读锚点文件已落盘（追加语义）",
+        File.Exists(Path.Combine(hostOptions.SessionsDir, "checkpoints", "cp.anchor.md")));
+
+    // ── 重建：用 checkpoint 当种子开新窗口（只带状态不带史）──
+    var rebuiltId = host.RebuildSession("cp");
+    Check("重建出新会话（新 id、与原会话不同）", rebuiltId.StartsWith("rebuild-") && rebuiltId != "cp", rebuiltId);
+
+    var rebuiltEvents = AgentFramework.Data.JsonlEventLog.Read(
+        Path.Combine(hostOptions.SessionsDir, rebuiltId + ".jsonl")).ToList();
+    Check("★ 新窗口只带 header + 一条种子 —— 不带历史",
+        rebuiltEvents.Count == 2
+        && rebuiltEvents[0] is SessionCreatedEvent
+        && rebuiltEvents[1] is AssistantMessageEvent,
+        $"{rebuiltEvents.Count} 条事件");
+    Check("header 记了血缘（父会话 + 从哪份 checkpoint 重建）",
+        rebuiltEvents.OfType<SessionCreatedEvent>().Single().ParentSessionId == "cp");
+
+    var seedEvent = rebuiltEvents.OfType<AssistantMessageEvent>().Single();
+    Check("★ 种子就是 checkpoint 的渲染块（意图/下一步都在里面）",
+        seedEvent.Text?.Contains("验证 checkpoint 接入") == true && seedEvent.Text.Contains("当前意图"),
+        seedEvent.Text?[..Math.Min(40, seedEvent.Text.Length)]);
+
+    var rebuiltProjection = AgentFramework.Data.SessionContextBuilder.Project(rebuiltEvents);
+    Check("★ 种子进了新会话的模型可见上下文（一开场就带着状态）",
+        rebuiltProjection.Messages.Any(m => m.Content?.Contains("验证 checkpoint 接入") == true),
+        $"{rebuiltProjection.Messages.Count} 条消息");
+}
+
 // ═══ 结果 ═══
 Console.WriteLine("\n═══════════════════════════════════════");
 Console.WriteLine($"结果：{passes} 通过 / {failures} 失败");
 if (failures > 0)
 {
-    Console.WriteLine("（实现 writer 后需补 B 批断言：水位触发 / 增量窗口 / 记忆升级 / rebuild 种子）");
     Environment.ExitCode = 1;
+}
+
+/// <summary>记录调用次数与最近一次请求的假 writer —— 验证宿主有没有把请求组装对（B 批确定性的关键）。</summary>
+internal sealed class CountingCheckpointWriter : ICheckpointWriter
+{
+    public int Calls { get; private set; }
+
+    public CheckpointRequest? LastRequest { get; private set; }
+
+    public ValueTask<CheckpointEvent?> WriteAsync(CheckpointRequest request, CancellationToken ct = default)
+    {
+        Calls++;
+        LastRequest = request;
+
+        return ValueTask.FromResult<CheckpointEvent?>(new CheckpointEvent
+        {
+            Trigger = request.Trigger,
+            WaterLevelPermille = request.WaterLevelPermille,
+            FromSeq = request.FromSeq,
+            ToSeq = request.ToSeq,
+            Intent = "验证 checkpoint 接入",
+            NextAction = "跑全量回归",
+            Discoveries = ["投影器忽略未知事件类型"],
+        });
+    }
+}
+
+/// <summary>固定回一句的假模型：宿主自身跑得起来就行（writer 是覆盖注入的）。</summary>
+internal sealed class StaticReplyLlmClient(string reply) : ILlmClient
+{
+    public string Name => "static";
+
+    public async IAsyncEnumerable<LlmStreamChunk> StreamAsync(
+        LlmRequest request,
+        [EnumeratorCancellation] CancellationToken ct = default)
+    {
+        await Task.Yield();
+        yield return new LlmStreamChunk.TextDelta(reply);
+        yield return new LlmStreamChunk.Completed("stop");
+    }
 }

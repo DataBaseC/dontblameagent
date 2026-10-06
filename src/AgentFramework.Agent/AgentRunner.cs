@@ -533,6 +533,10 @@ public sealed class AgentRunner
                 {
                     ToolName = call.ToolName,
                     Arguments = arguments,
+                    // 风险等级由**工具自报**（IToolWithRisk）。未声明的一律按最保守的执行档 ——
+                    // 于是「新工具默认要问」是安全的默认，而审批不必再维护一张工具名清单。
+                    Risk = tools.FirstOrDefault(t => string.Equals(t.Name, call.ToolName, StringComparison.Ordinal))
+                        is IToolWithRisk risky ? risky.Risk : ToolRisk.Execute,
                 };
 
                 ToolResult result;

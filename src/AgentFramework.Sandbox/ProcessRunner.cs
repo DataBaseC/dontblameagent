@@ -29,9 +29,15 @@ internal static class ProcessRunner
         /// 可选包装器（安全审查 T10）：非空时以 <c>Wrapper[0]</c> 作为外层可执行文件，
         /// <c>Wrapper[1..]</c> 原样作为它的前置参数（通常以真正的 shell 可执行文件结尾），
         /// 之后再追加 shell 自己的参数（<c>-c &lt;command&gt;</c> 等）。
-        /// 用于把命令塞进 bwrap 这类隔离器；null = 直接跑 shell。
+        /// 用于把命令塞进 bwrap / docker 这类隔离器；null = 直接跑 shell。
         /// </summary>
-        IReadOnlyList<string>? Wrapper = null);
+        IReadOnlyList<string>? Wrapper = null,
+        /// <summary>
+        /// 在白名单之外<b>补</b>进子进程的环境变量。白名单是「不含密钥」的窄名单，
+        /// 但某些后端本身需要额外变量才能干活（如容器运行时靠 <c>DOCKER_HOST</c> 找 socket）。
+        /// 补进来的键由后端负责保证不含密钥。
+        /// </summary>
+        IReadOnlyDictionary<string, string>? ExtraEnvironment = null);
 
     public static async Task<SandboxOutcome> RunAsync(RunOptions run, CancellationToken ct)
     {

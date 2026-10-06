@@ -2,6 +2,8 @@ using System.Diagnostics;
 using AgentFramework.Contracts;
 using AgentFramework.Host;
 using AgentFramework.Sandbox;
+using AgentFramework.Tools;
+using static AgentFramework.Harness.Suite;
 
 // ═══════════════════════════════════════════════════════════
 //  命令沙箱 垂直切片验证
@@ -10,30 +12,6 @@ using AgentFramework.Sandbox;
 //  不需要 API key / 联网 / 真实模型。
 // ═══════════════════════════════════════════════════════════
 
-var passes = 0;
-var failures = 0;
-var skips = 0;
-
-void Check(string name, bool ok, string? detail = null)
-{
-    var suffix = detail is null ? "" : $"  ({detail})";
-    if (ok)
-    {
-        passes++;
-        Console.WriteLine($"  [PASS] {name}{suffix}");
-    }
-    else
-    {
-        failures++;
-        Console.WriteLine($"  [FAIL] {name}{suffix}");
-    }
-}
-
-void Skip(string name, string why)
-{
-    skips++;
-    Console.WriteLine($"  [SKIP] {name}  ({why})");
-}
 
 var isWindows = OperatingSystem.IsWindows();
 var platform = isWindows ? "Windows" : "非 Windows";
@@ -70,21 +48,24 @@ Check(isWindows ? "Windows 上额外提供 job 档（内核限额）" : "非 Win
     registry.Names.Contains("job") == isWindows,
     string.Join(",", registry.Names));
 
+// auto 默认档：装了 bwrap 优先 bwrap，其次 Windows job，最后 process（与 SandboxRegistry.Auto 一致）。
+var expectedAuto = registry.Names.Contains("bwrap") ? "bwrap" : (isWindows ? "job" : "process");
+
 var autoName = registry.Resolve(null).Name;
-Check($"★ auto 档在 {platform} 上解析为 {(isWindows ? "job" : "process")}",
-    autoName == (isWindows ? "job" : "process"),
+Check($"★ auto 档在 {platform} 上解析为 {expectedAuto}",
+    autoName == expectedAuto,
     autoName);
 
 var unknown = registry.Resolve("no-such-backend");
 Check("★ 档位名不认识时回落到可用档，且回落原因可读",
-    unknown.Name == (isWindows ? "job" : "process") && registry.ResolveNote is not null,
+    unknown.Name == expectedAuto && registry.ResolveNote is not null,
     registry.ResolveNote);
 
 if (!isWindows)
 {
     var job = registry.Resolve("job");
     Check("★ 非 Windows 上请求 job 会回落，并说明原因",
-        job.Name == "process" && registry.ResolveNote!.Contains("job"),
+        job.Name == expectedAuto && registry.ResolveNote!.Contains("job"),
         registry.ResolveNote);
 }
 else
@@ -204,6 +185,95 @@ Check("★ 撤销注册后名字立刻消失（插件卸载即撤）",
     registry.Resolve("fake-sandbox").Name != "fake-sandbox",
     registry.Resolve("fake-sandbox").Name);
 
+// ═══ 4b. 容器后端（Docker / Podman）═══
+Console.WriteLine("\n── 4b. 容器后端（Docker / Podman）──");
+
+// 参数拼装就是安全属性所在（禁网 / 只读根 / 只挂工作区 / 配额）——
+// 抽成纯函数正是为了在这里断言，而不必依赖本机装没装 docker。
+var containerArgs = ContainerSandboxBackend.BuildWrapper(
+    new ContainerSandboxOptions { Image = "example/img:1", Network = ContainerNetwork.None, ReadOnlyRoot = true },
+    runtime: "docker",
+    containerName: "af-sbx-test",
+    workDir: workspace,
+    limits: new SandboxLimits { MaxMemoryBytes = 512L * 1024 * 1024 });
+
+Check("★ 容器命令默认禁网（--network none）", ArgValue(containerArgs, "--network") == "none");
+Check("★ 容器根文件系统只读、/tmp 留可写临时区",
+    containerArgs.Contains("--read-only") && ArgValue(containerArgs, "--tmpfs") == "/tmp");
+Check("★ 只有工作区被挂载（同一路径进出，配合只读根）",
+    ArgValue(containerArgs, "-v") == $"{workspace}:{workspace}");
+Check("容器以工作目录启动（-w）", ArgValue(containerArgs, "-w") == workspace);
+Check("★ 内存上限传给容器", ArgValue(containerArgs, "--memory") == (512L * 1024 * 1024).ToString());
+Check("容器记名（超时/取消时可按名强制清理）", ArgValue(containerArgs, "--name") == "af-sbx-test");
+Check("镜像与容器内 shell 排在末尾（先镜像、后命令）",
+    containerArgs[^2] == "example/img:1" && containerArgs[^1] == "/bin/sh");
+
+var bridgeArgs = ContainerSandboxBackend.BuildWrapper(
+    new ContainerSandboxOptions { Image = "i", Network = ContainerNetwork.Bridge },
+    "docker", "n", workspace, new SandboxLimits());
+Check("网络策略可切到 bridge（装依赖的出网诉求有出口）", ArgValue(bridgeArgs, "--network") == "bridge");
+
+// 没配镜像 = 档不可用（回落，而不是静默跑一条进不了容器的命令）。
+var runtimeFound = new ContainerSandboxBackend(new ContainerSandboxOptions()).RuntimeFound;
+var noImageBackend = new ContainerSandboxBackend(new ContainerSandboxOptions());
+// 无运行时 → 原因说「运行时」；有运行时 → 原因说「镜像」；都不该是「不可用」这种含糊话。
+Check("★ 档不可用时说清原因（缺运行时 / 缺镜像，不含糊）",
+    !noImageBackend.IsAvailable
+    && (noImageBackend.UnavailableReason?.Contains(runtimeFound ? "镜像" : "运行时") ?? false),
+    noImageBackend.UnavailableReason);
+
+// 注册表：只在装了运行时（docker / podman）时才把 container 放进名单。
+Check("★ container 只在装了 docker / podman 时进名单",
+    registry.Names.Contains("container") == runtimeFound,
+    $"names={string.Join(",", registry.Names)}");
+
+if (runtimeFound)
+{
+    var containerFallback = registry.Resolve("container");
+    Check("★ 有运行时但没配镜像时请求 container 会回落，且原因可读",
+        containerFallback.Name == expectedAuto && (registry.ResolveNote?.Contains("镜像") ?? false),
+        registry.ResolveNote);
+}
+else
+{
+    var containerFallback = registry.Resolve("container");
+    Check("★ 没装容器运行时时请求 container 回落，说明「没有这个后端」",
+        containerFallback.Name == expectedAuto && (registry.ResolveNote?.Contains("container") ?? false),
+        registry.ResolveNote);
+}
+
+// 真跑：需本机有运行时 + 显式给镜像（不自动拉镜像，避免测试偷偷下载几个 G）。
+var containerImage = Environment.GetEnvironmentVariable("AF_TEST_CONTAINER_IMAGE");
+if (runtimeFound && !string.IsNullOrWhiteSpace(containerImage))
+{
+    var containerBackend = new ContainerSandboxBackend(
+        new ContainerSandboxOptions { Image = containerImage, Network = ContainerNetwork.None });
+    var containerOutcome = await containerBackend.RunAsync(
+        new SandboxRequest("echo hi-from-container", workspace, null, new SandboxLimits { TimeoutSeconds = 120 }),
+        CancellationToken.None);
+    Check("★ 容器档真跑：命令在容器里执行并收回输出",
+        containerOutcome.ExitCode == 0 && containerOutcome.StdOut.Contains("hi-from-container"),
+        $"exit={containerOutcome.ExitCode}");
+}
+else
+{
+    Skip("容器档真跑（需 docker/podman + AF_TEST_CONTAINER_IMAGE）",
+        runtimeFound ? "未设 AF_TEST_CONTAINER_IMAGE（避免自动拉镜像）" : "本机没有容器运行时");
+}
+
+static string? ArgValue(IReadOnlyList<string> args, string flag)
+{
+    for (var i = 0; i + 1 < args.Count; i++)
+    {
+        if (args[i] == flag)
+        {
+            return args[i + 1];
+        }
+    }
+
+    return null;
+}
+
 // ═══ 5. 真跑：run_command 走沙箱 ═══
 Console.WriteLine("\n── 5. run_command 真的走沙箱 ──");
 var options = new HostOptions
@@ -272,8 +342,6 @@ else
     Skip("job 档实跑（Job Object 是 Windows 专有）", "本平台不可用，已由回落逻辑覆盖");
 }
 
-Console.WriteLine($"\n结果：{passes} 通过 / {failures} 失败" + (skips > 0 ? $" / {skips} 跳过" : string.Empty));
-
 try
 {
     Directory.Delete(root, recursive: true);
@@ -282,6 +350,73 @@ catch (Exception)
 {
     // 临时目录偶尔删不掉（子进程刚退出还占着句柄），不影响结论
 }
+
+// ── 9. 持久 shell（常驻会话：cwd / env 跨调用保留）──
+Console.WriteLine("\n── 9. 持久 shell（常驻会话）──");
+
+var posixShell = ShellResolver.Resolve();
+if (!posixShell.IsPosix)
+{
+    Skip("持久 shell 实跑（需 POSIX shell）", $"本平台解析到 {posixShell.Id}（非 POSIX）");
+}
+else
+{
+    using var persistent = PersistentShell.Create(posixShell, workspace, tempDir);
+    Check("★ POSIX 下能建持久 shell", persistent is not null);
+
+    if (persistent is not null)
+    {
+        await persistent.RunAsync("cd /tmp && pwd", 15, CancellationToken.None);
+        var second = await persistent.RunAsync("pwd", 15, CancellationToken.None);
+        Check("★ cd 跨调用保留（第二次 pwd 仍在新目录）",
+            second.ExitCode == 0 && second.Output.Trim().EndsWith("/tmp", StringComparison.Ordinal),
+            second.Output.Trim());
+
+        await persistent.RunAsync("export AF_PERSIST=xyz", 15, CancellationToken.None);
+        var echoOut = await persistent.RunAsync("echo $AF_PERSIST", 15, CancellationToken.None);
+        Check("★ export 跨调用保留（环境变量没丢）",
+            echoOut.Output.Trim() == "xyz", echoOut.Output.Trim());
+
+        var failExit = await persistent.RunAsync("false", 15, CancellationToken.None);
+        Check("退出码如实传递", failExit.ExitCode == 1, failExit.ExitCode.ToString());
+
+        var genBefore = persistent.Generation;
+        var timeoutOut = await persistent.RunAsync("sleep 30", 2, CancellationToken.None);
+        Check("★ 命令超时被终结（不把回合挂死）", timeoutOut.TimedOut, $"timedOut={timeoutOut.TimedOut}");
+
+        var revived = await persistent.RunAsync("echo alive", 15, CancellationToken.None);
+        Check("★ 超时后会话自动重建（下一条命令仍可用）",
+            revived.ExitCode == 0 && revived.Output.Contains("alive", StringComparison.Ordinal),
+            revived.Output.Trim());
+        Check("重建后会话代号递增", persistent.Generation > genBefore, $"{genBefore} → {persistent.Generation}");
+    }
+}
+
+// ── bwrap 隔离参数（纯函数断言：只读根 / 只挂工作区 / 可切换禁网）──
+Console.WriteLine("\n── bwrap 隔离参数 ──");
+{
+    var bashShell = ShellResolver.Resolve("bash");
+    var plain = BwrapSandboxBackend.BuildWrapper("/usr/bin/bwrap", bashShell, "/work", isolateNetwork: false).ToList();
+    var netted = BwrapSandboxBackend.BuildWrapper("/usr/bin/bwrap", bashShell, "/work", isolateNetwork: true).ToList();
+
+    Check("根文件系统只读挂载（--ro-bind / /）",
+        plain.Contains("--ro-bind") && plain[plain.IndexOf("--ro-bind") + 1] == "/" && plain[plain.IndexOf("--ro-bind") + 2] == "/");
+    Check("命名空间隔离齐全（user/pid/uts/ipc）",
+        new[] { "--unshare-user", "--unshare-pid", "--unshare-uts", "--unshare-ipc" }.All(plain.Contains));
+    Check("默认不隔离网络（不打断 npm install 之类）", !plain.Contains("--unshare-net"));
+    Check("★ 显式禁网时才加 --unshare-net", netted.Contains("--unshare-net"));
+    Check("工作区可写（--bind workdir workdir）",
+        plain.Contains("--bind") && plain[plain.IndexOf("--bind") + 1] == "/work" && plain[plain.IndexOf("--bind") + 2] == "/work");
+    Check("工作区挂载先于 chdir（进去之前先存在）", plain.IndexOf("--bind") < plain.IndexOf("--chdir"));
+    Check("用 -- 与真正的 shell 分隔（参数不会被 bwrap 吞掉）",
+        plain[^2] == "--" && plain[^1] == bashShell.FileName);
+
+    var bwrap = new BwrapSandboxBackend(isolateNetwork: true);
+    Check("Describe 如实说明网络是否隔离", bwrap.Describe().Contains("网络隔离") && bwrap.IsolateNetwork);
+    Check("默认档 Describe 说明不隔离网络", !new BwrapSandboxBackend().Describe().Contains("网络隔离"));
+}
+
+Console.WriteLine($"\n结果：{passes} 通过 / {failures} 失败" + (skips > 0 ? $" / {skips} 跳过" : string.Empty));
 
 return failures == 0 ? 0 : 1;
 

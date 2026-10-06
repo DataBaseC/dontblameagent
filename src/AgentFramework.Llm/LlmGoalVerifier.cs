@@ -46,18 +46,33 @@ public sealed class LlmGoalVerifier : IGoalVerifier
         string finalText,
         CancellationToken ct = default)
     {
+        var prompt = BuildPrompt(goal, userRequest, TruncateContext(context), finalText);
+        var first = await AskAsync(prompt, ct).ConfigureAwait(false);
+
+        if (HasVerdictLine(first))
+        {
+            return Parse(first);
+        }
+
+        // 第一次没读出裁决 —— 这正是原先 fail-open 生效的地方。改法：先给模型**一次纠正机会**
+        // （格式歪掉多半是被自由表述带跑），带上强约束再问一次。
+        var retryPrompt = prompt
+            + "\n\n（上一次输出无法解析。请严格只输出三行，不要任何其它文字：\n"
+            + "VERDICT: MET 或 NOT_MET 或 IMPOSSIBLE\nEVIDENCE: …\nGAP: … 或 -）";
+        var second = await AskAsync(retryPrompt, ct).ConfigureAwait(false);
+
+        // 两次都读不出裁决 → 放行。验证器不许卡死收尾（fail-open 保持不变，只是多给一次机会）。
+        return HasVerdictLine(second) ? Parse(second) : GoalVerification.Met();
+    }
+
+    /// <summary>旁路提问一次并收集输出（截断到 2000 字符，防止跑飞）。</summary>
+    private async Task<string> AskAsync(string prompt, CancellationToken ct)
+    {
         var request = new LlmRequest
         {
             Model = _options.Model,
             SystemPrompt = _options.SystemPrompt,
-            Messages =
-            [
-                new LlmMessage
-                {
-                    Role = LlmRole.User,
-                    Content = BuildPrompt(goal, userRequest, TruncateContext(context), finalText),
-                },
-            ],
+            Messages = [new LlmMessage { Role = LlmRole.User, Content = prompt }],
             Temperature = _options.Temperature,
         };
 
@@ -75,8 +90,16 @@ public sealed class LlmGoalVerifier : IGoalVerifier
             }
         }
 
-        return Parse(builder.ToString());
+        return builder.ToString();
     }
+
+    /// <summary>
+    /// 输出里是否存在一行合法裁决 —— 用来区分「解析失败（该重试一次）」与「模型真的判了 MET」。
+    /// 没有这个判别，fail-open 就会把「格式歪掉」静默当成「通过」。
+    /// </summary>
+    private static bool HasVerdictLine(string output) =>
+        output.Split('\n', StringSplitOptions.RemoveEmptyEntries)
+            .Any(line => line.Trim().StartsWith("VERDICT:", StringComparison.OrdinalIgnoreCase));
 
     /// <summary>
     /// 解析验证者的输出。严格找三行格式；认不出 → Met（fail-open）。

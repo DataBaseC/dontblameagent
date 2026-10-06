@@ -6,29 +6,13 @@ using System.Runtime.CompilerServices;
 using AgentFramework.Contracts;
 using AgentFramework.Host;
 using AgentFramework.Launcher;
+using static AgentFramework.Harness.Suite;
 
 // ═══════════════════════════════════════════════════════════
 //  启动器垂直切片验证
 //  扫描 → 勾选 → 档案 → Host 按勾选装配 → 启动器 HTTP 服务
 // ═══════════════════════════════════════════════════════════
 
-var passes = 0;
-var failures = 0;
-
-void Check(string name, bool ok, string? detail = null)
-{
-    var suffix = detail is null ? "" : $"  ({detail})";
-    if (ok)
-    {
-        passes++;
-        Console.WriteLine($"  [PASS] {name}{suffix}");
-    }
-    else
-    {
-        failures++;
-        Console.WriteLine($"  [FAIL] {name}{suffix}");
-    }
-}
 
 var root = Path.Combine(Path.GetTempPath(), "af-launcher-verify", Guid.NewGuid().ToString("N")[..8]);
 var pluginsDir = Path.Combine(root, "plugins");

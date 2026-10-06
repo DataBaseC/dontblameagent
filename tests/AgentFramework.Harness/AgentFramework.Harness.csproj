@@ -1,0 +1,8 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>AgentFramework.Harness</RootNamespace>
+    <AssemblyName>AgentFramework.Harness</AssemblyName>
+  </PropertyGroup>
+
+</Project>

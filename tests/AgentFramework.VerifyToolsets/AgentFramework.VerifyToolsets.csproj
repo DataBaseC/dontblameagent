@@ -18,4 +18,8 @@
     <None Include="../../src/AgentFramework.Plugins.ConsoleKit/plugin.json" Link="baseplugins/console-kit/plugin.json" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
+  <ItemGroup>
+    <ProjectReference Include="../AgentFramework.Harness/AgentFramework.Harness.csproj" />
+  </ItemGroup>
+
 </Project>

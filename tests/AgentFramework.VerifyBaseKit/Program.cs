@@ -3,6 +3,7 @@ using System.Net.Sockets;
 using System.Text.Json;
 using AgentFramework.Contracts;
 using AgentFramework.Host;
+using static AgentFramework.Harness.Suite;
 
 // ═══════════════════════════════════════════════════════════
 //  基石插件垂直切片验证
@@ -10,23 +11,6 @@ using AgentFramework.Host;
 //  全程不需要 API key / 联网 / 真实模型：只碰插件、工具与 HTTP 端点。
 // ═══════════════════════════════════════════════════════════
 
-var passes = 0;
-var failures = 0;
-
-void Check(string name, bool ok, string? detail = null)
-{
-    var suffix = detail is null ? "" : $"  ({detail})";
-    if (ok)
-    {
-        passes++;
-        Console.WriteLine($"  [PASS] {name}{suffix}");
-    }
-    else
-    {
-        failures++;
-        Console.WriteLine($"  [FAIL] {name}{suffix}");
-    }
-}
 
 var root = Path.Combine(Path.GetTempPath(), "af-basekit-verify", Guid.NewGuid().ToString("N")[..8]);
 var workspace = Path.Combine(root, "workspace");
@@ -71,6 +55,10 @@ var options = new HostOptions
 };
 
 await using var host = await AgentHost.CreateAsync(options);
+// 内核 / 脚本路径的工具调用现在会过宿主审批链（安全审查 P0）。
+// 本测试考的是「插件工具自身的边界检查」，所以给一个「总是允许」的交互 ——
+// 让越界写走到工具层被拒（消息「越出工作区」），而不是被审批层先拦下。
+host.UserInteraction = new AllowAllInteraction();
 var kernel = host.Plugins;
 
 static Dictionary<string, string?> Args(params (string Key, string Value)[] pairs)
@@ -348,4 +336,23 @@ static int PickFreePort()
     var port = ((IPEndPoint)probe.LocalEndpoint).Port;
     probe.Stop();
     return port;
+}
+
+/// <summary>
+/// 测试用交互：总是允许审批。
+/// 内核 / 脚本路径的工具调用现在会过审批链（安全审查 P0）——
+/// 本测试要考「工具自身的边界检查」，所以要让它走到工具层，而不是被审批层先拦下。
+/// </summary>
+sealed class AllowAllInteraction : IUserInteraction
+{
+    public bool CanInteract => true;
+
+    public ValueTask<bool> ConfirmAsync(ToolPreExecuteEvent toolCall, CancellationToken ct = default)
+        => ValueTask.FromResult(true);
+
+    public ValueTask<AskUserAnswer> AskAsync(AskUserRequest request, CancellationToken ct = default)
+        => ValueTask.FromResult(AskUserAnswer.None);
+
+    public ValueTask NotifyAsync(string text, CancellationToken ct = default)
+        => ValueTask.CompletedTask;
 }

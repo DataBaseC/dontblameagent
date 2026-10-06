@@ -1,28 +1,12 @@
 using AgentFramework.Contracts;
 using AgentFramework.Data;
+using static AgentFramework.Harness.Suite;
 
 // ═══════════════════════════════════════════════════════════
 //  数据平面垂直切片验证
 //  追加 → 读取 → 投影 → 重启恢复 → 分叉 → 崩溃自修复
 // ═══════════════════════════════════════════════════════════
 
-var passes = 0;
-var failures = 0;
-
-void Check(string name, bool ok, string? detail = null)
-{
-    var suffix = detail is null ? "" : $"  ({detail})";
-    if (ok)
-    {
-        passes++;
-        Console.WriteLine($"  [PASS] {name}{suffix}");
-    }
-    else
-    {
-        failures++;
-        Console.WriteLine($"  [FAIL] {name}{suffix}");
-    }
-}
 
 var root = Path.Combine(Path.GetTempPath(), "af-data-verify", Guid.NewGuid().ToString("N")[..8]);
 Directory.CreateDirectory(root);

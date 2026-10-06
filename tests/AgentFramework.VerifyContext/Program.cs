@@ -8,6 +8,7 @@ using AgentFramework.Data;
 using AgentFramework.Host;
 using AgentFramework.Index;
 using AgentFramework.Tools;
+using static AgentFramework.Harness.Suite;
 
 // ═══════════════════════════════════════════════════════════
 //  长任务上下文治理 垂直切片验证
@@ -21,23 +22,6 @@ using AgentFramework.Tools;
 //    4. 任何一层失败都只降级、不阻断
 // ═══════════════════════════════════════════════════════════
 
-var passes = 0;
-var failures = 0;
-
-void Check(string name, bool ok, string? detail = null)
-{
-    var suffix = detail is null ? "" : $"  ({detail})";
-    if (ok)
-    {
-        passes++;
-        Console.WriteLine($"  [PASS] {name}{suffix}");
-    }
-    else
-    {
-        failures++;
-        Console.WriteLine($"  [FAIL] {name}{suffix}");
-    }
-}
 
 void Section(string title) => Console.WriteLine($"\n── {title} ──");
 
@@ -671,6 +655,7 @@ var cwOptions = new HostOptions
         EarlySummarizeRatio = 0.3,
         RecentTurnsKeptVerbatim = 2,
         InlineResultLimit = 2_000,
+        SummarizeOlderHistory = true,   // L5 摘要默认关（本版修正）；本节要考 checkpoint 早提取，显式打开
     },
 };
 
@@ -824,6 +809,7 @@ var invOptions = new HostOptions
         CompressionTriggerRatio = 0.5,
         RecentTurnsKeptVerbatim = 6,
         EarlySummarizeRatio = 0,   // 关掉提前摘要：本节只考压缩链路，摘要调用必须可预期
+        SummarizeOlderHistory = true,   // L5 摘要默认关（契约/README 口径）；本节要考摘要链路，显式打开
     },
 };
 

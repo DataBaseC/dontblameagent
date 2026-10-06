@@ -138,16 +138,16 @@ public static class ExternalDirectoryGuard
     /// <summary>带路径参数的键。</summary>
     private static readonly string[] PathArgKeys = ["path", "from", "to", "dir", "directory"];
 
-    /// <summary>有副作用的工具才有「越界写」一说。</summary>
-    private static readonly HashSet<string> StateChangingTools = new(StringComparer.Ordinal)
-    {
-        "write_file", "edit_file", "make_dir", "copy_path", "move_path", "delete_path",
-    };
-
     /// <summary>这次调用是否要把路径写到工作区之外（含 <c>..</c> 逃逸；判不出来按越界算）。</summary>
+    ///
+    /// <para>
+    /// 判据是工具**自报的风险等级**：只读工具没有「越界写」一说，其余只要有路径参数就检查。
+    /// 从前这里另有一张 6 个工具名的清单（还含一枚从未注册过的幽灵 <c>copy_path</c>），
+    /// 与审批档位里的两份名单三处不同步 —— 现在三处合成「工具自己说的那一个来源」。
+    /// </para>
     public static bool EscapesWorkspace(ToolPreExecuteEvent e, string? workspaceRoot)
     {
-        if (!StateChangingTools.Contains(e.ToolName))
+        if (e.Risk == ToolRisk.ReadOnly)
         {
             return false;
         }

@@ -103,13 +103,17 @@ public sealed class ApprovalPromptInteraction(
 /// </summary>
 public static class DefaultApprovalPolicy
 {
-    public static ApprovalDecision Decide(Contracts.ToolPreExecuteEvent request) => request.ToolName switch
-    {
-        // ask_user 也放行：提问本身没有副作用，而「能不能问」还要先审批就很荒谬。
-        "read_file" or "list_dir" or "web_search" or "web_fetch" or "ask_user" => ApprovalDecision.Allow,
-        "write_file" or "run_command" => ApprovalDecision.Ask,
-        _ => ApprovalDecision.Ask,
-    };
+    /// <summary>
+    /// Ask 档的判定：**只读就放行，其余都问**。
+    ///
+    /// <para>
+    /// 判据是工具自报的 <see cref="Contracts.ToolRisk"/>，不再是一张工具名清单 ——
+    /// 从前这里只放行 5 个名字，于是 <c>read_lines</c> / <c>grep_files</c> / <c>find_files</c> /
+    /// <c>read_image</c> 在 Ask 档会弹卡、在 Build 档却被当只读放行：同一动作两档被判成两种性质。
+    /// </para>
+    /// </summary>
+    public static ApprovalDecision Decide(Contracts.ToolPreExecuteEvent request)
+        => request.Risk == Contracts.ToolRisk.ReadOnly ? ApprovalDecision.Allow : ApprovalDecision.Ask;
 }
 
 /// <summary>
@@ -173,45 +177,59 @@ public static class ApprovalTiers
             _ => DefaultApprovalPolicy.Decide(e),
         };
 
-    /// <summary>Build：常规读/写（区内）/ 执行自动放行，仅高危再问。</summary>
+    /// <summary>
+    /// Build：常规读 / 区内写 / 常规执行自动放行，仅高危再问。
+    /// 判据是工具自报的 <see cref="Contracts.ToolRisk"/> —— 加一个工具不必再改这里。
+    /// </summary>
     private static ApprovalDecision BuildDecide(Contracts.ToolPreExecuteEvent e, string? workspaceRoot)
-    {
-        switch (e.ToolName)
+        => e.Risk switch
         {
-            case "read_file" or "list_dir" or "web_search" or "web_fetch" or "ask_user"
-                or "remember" or "forget" or "recall_memory" or "search_history"
-                or "update_plan" or "update_notes" or "spawn_subagent"
-                or "toolsets" or "use_toolset" or "tool_catalog"
-                or "skill_validate" or "skill_extract" or "skill_scaffold" or "csv_to_json"
-                or "grep_files" or "find_files" or "read_lines":
-                return ApprovalDecision.Allow;
+            Contracts.ToolRisk.ReadOnly => ApprovalDecision.Allow,
 
-            case "write_file" or "edit_file" or "make_dir" or "copy_path" or "move_path":
-                // 工程内的写自动放行；落到工作区之外仍然问。
-                return InWorkspace(e, workspaceRoot) ? ApprovalDecision.Allow : ApprovalDecision.Ask;
+            // 工程内的写自动放行；落到工作区之外仍然问（无路径参数 = 落点由工具自己定，算内部）。
+            Contracts.ToolRisk.Write => EscapesWorkspace(e, workspaceRoot)
+                ? ApprovalDecision.Ask
+                : ApprovalDecision.Allow,
 
-            case "delete_path":
-                // 删除风险高，Build 档也问（避免「批量删」被静默放行）。
-                return ApprovalDecision.Ask;
+            // 删除风险高，Build 档也问（避免「批量删」被静默放行）。
+            Contracts.ToolRisk.Destructive => ApprovalDecision.Ask,
 
-            case "run_command":
-                return IsRiskyCommand(e) ? ApprovalDecision.Ask : ApprovalDecision.Allow;
+            // 执行类：能看命令内容的（run_command）按内容判危险；判不了内容的
+            // （shell / job / 子 agent / GUI 操作）保持询问 —— 「判不了就问」比「猜它安全」稳。
+            _ => HasCommandArgument(e) && !IsRiskyCommand(e)
+                ? ApprovalDecision.Allow
+                : ApprovalDecision.Ask,
+        };
 
-            default:
-                // 未知工具保持谨慎 —— 白名单天然会漏，宁可多问一句。
-                return ApprovalDecision.Ask;
+    /// <summary>带路径参数的键（与 <c>ExternalDirectoryGuard</c> 同一口径）。</summary>
+    private static readonly string[] PathArgumentKeys = ["path", "from", "to", "dir", "directory"];
+
+    /// <summary>
+    /// 这次调用是否把路径落到工作区之外。
+    /// <b>没有路径参数不算越界</b> —— 那是工具自己决定落点（计划 / 笔记 / 记忆都在内部）。
+    /// </summary>
+    private static bool EscapesWorkspace(Contracts.ToolPreExecuteEvent e, string? workspaceRoot)
+    {
+        if (string.IsNullOrWhiteSpace(workspaceRoot))
+        {
+            return false;   // 没有工作区概念就判不了 —— 不瞎拦
         }
+
+        foreach (var key in PathArgumentKeys)
+        {
+            if (e.Arguments.TryGetValue(key, out var path)
+                && !string.IsNullOrWhiteSpace(path)
+                && !IsInside(path!, workspaceRoot))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
-    private static bool InWorkspace(Contracts.ToolPreExecuteEvent e, string? workspaceRoot)
+    private static bool IsInside(string path, string workspaceRoot)
     {
-        if (string.IsNullOrWhiteSpace(workspaceRoot)
-            || !e.Arguments.TryGetValue("path", out var path)
-            || string.IsNullOrWhiteSpace(path))
-        {
-            return false;
-        }
-
         try
         {
             var root = Path.GetFullPath(workspaceRoot);
@@ -226,6 +244,10 @@ public static class ApprovalTiers
             return false;
         }
     }
+
+    /// <summary>执行类工具里「能看到命令内容」的那些（目前只有 run_command）。</summary>
+    private static bool HasCommandArgument(Contracts.ToolPreExecuteEvent e)
+        => e.Arguments.TryGetValue("command", out var command) && !string.IsNullOrWhiteSpace(command);
 
     private static bool IsRiskyCommand(Contracts.ToolPreExecuteEvent e)
     {

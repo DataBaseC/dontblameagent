@@ -1,4 +1,5 @@
 using System.Text.RegularExpressions;
+using static AgentFramework.Harness.Suite;
 
 // ═══════════════════════════════════════════════════════════
 //  密钥泄露回归扫描（安全审查 P0-1）
@@ -8,23 +9,6 @@ using System.Text.RegularExpressions;
 //  提交前跑一次，CI 里跑一次。
 // ═══════════════════════════════════════════════════════════
 
-var passes = 0;
-var failures = 0;
-
-void Check(string name, bool ok, string? detail = null)
-{
-    var suffix = detail is null ? "" : $"  ({detail})";
-    if (ok)
-    {
-        passes++;
-        Console.WriteLine($"  [PASS] {name}{suffix}");
-    }
-    else
-    {
-        failures++;
-        Console.WriteLine($"  [FAIL] {name}{suffix}");
-    }
-}
 
 Console.WriteLine("═══ 密钥泄露回归扫描 ═══");
 

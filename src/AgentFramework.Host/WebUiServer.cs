@@ -20,8 +20,32 @@ public sealed partial class WebUiServer : IDisposable, IApprovalPrompt
     private readonly HttpListener _listener = new();
     private readonly HostOptions _baseOptions;
     private readonly List<SseClient> _clients = [];
-    private readonly Dictionary<string, TaskCompletionSource<ApprovalAnswer>> _pendingApprovals = [];
-    private readonly Dictionary<string, TaskCompletionSource<AskUserAnswer>> _pendingAsks = [];
+    private readonly Dictionary<string, PendingApproval> _pendingApprovals = [];
+    private readonly Dictionary<string, PendingAsk> _pendingAsks = [];
+
+    /// <summary>
+    /// 一张待决审批卡的完整描述（安全审查 P0-2）。
+    /// 光有 TCS 不够 —— 切回会话时要能**重建**这张卡，所以连「属于哪个会话 / 长什么样」一起记。
+    /// </summary>
+    private sealed record PendingApproval(
+        string SessionId,
+        string ToolName,
+        IReadOnlyDictionary<string, string?>? Arguments,
+        bool CanRemember,
+        TaskCompletionSource<ApprovalAnswer> Completion);
+
+    private sealed record PendingAsk(
+        string SessionId,
+        string Question,
+        IReadOnlyList<string>? Options,
+        string? Context,
+        TaskCompletionSource<AskUserAnswer> Completion);
+
+    /// <summary>
+    /// 待决项的**回合归属**会话：优先回合所属会话（AsyncLocal），
+    /// 非回合上下文回退当前会话。审批/提问发生在回合执行流内，所以通常拿到前者。
+    /// </summary>
+    private string OwnerSessionId() => _host.CurrentTurnSessionId ?? _host.SessionId;
     private readonly object _gate = new();
     private readonly SemaphoreSlim _switchGate = new(1, 1);
 
@@ -192,14 +216,19 @@ public sealed partial class WebUiServer : IDisposable, IApprovalPrompt
         var id = Guid.NewGuid().ToString("N")[..8];
         var completion = new TaskCompletionSource<ApprovalAnswer>(TaskCreationOptions.RunContinuationsAsynchronously);
 
+        var owner = OwnerSessionId();
+
         lock (_gate)
         {
-            _pendingApprovals[id] = completion;
+            _pendingApprovals[id] = new PendingApproval(owner, request.ToolName, request.Arguments, true, completion);
         }
 
         Broadcast(JsonSerializer.SerializeToElement(new
         {
             type = "approval",
+            // 带归属会话（安全审查 P0-2）：窗口没开 / 切走时，卡片不再被当「后台」永久丢弃 ——
+            // 切回会话时前端靠 /api/pending 重建它，工具不再静默空转到超时。
+            sessionId = owner,
             id,
             toolName = request.ToolName,
             arguments = request.Arguments,
@@ -283,17 +312,19 @@ public sealed partial class WebUiServer : IDisposable, IApprovalPrompt
         var id = "ask-" + Guid.NewGuid().ToString("N")[..8];
         var completion = new TaskCompletionSource<AskUserAnswer>(TaskCreationOptions.RunContinuationsAsynchronously);
 
+        var owner = OwnerSessionId();
+
         lock (_gate)
         {
-            _pendingAsks[id] = completion;
+            _pendingAsks[id] = new PendingAsk(owner, request.Question, request.Options, request.Context, completion);
         }
 
         Broadcast(JsonSerializer.SerializeToElement(new
         {
             type = "ask-user",
-            // 带归属会话：前端据此分流 —— 多标签页 / 切到别的会话时，
-            // 提问卡只弹在「提问所属会话」那一页，不串会话（与 approval 帧对齐）。
-            sessionId = _host.SessionId,
+            // 带**回合归属**会话（不再用全局「当前会话」，安全审查 P0-2）——
+            // 否则后台会话的提问会弹到用户当前在看的会话里，答非所问。
+            sessionId = owner,
             id,
             question = request.Question,
             options = request.Options,
@@ -420,6 +451,13 @@ public sealed partial class WebUiServer : IDisposable, IApprovalPrompt
         foreach (var file in Directory.EnumerateFiles(dir, "*.jsonl"))
         {
             var id = Path.GetFileNameWithoutExtension(file);
+
+            // 子 Agent 的会话不进人的会话列表：它们是被派出去干活的，不是「你的任务」。
+            // 每次派工都往列表里塞一条空会话，列表很快就不堪用了。
+            if (SubAgentRegistry.IsChildSession(id))
+            {
+                continue;
+            }
             try
             {
                 var info = new FileInfo(file);

@@ -60,15 +60,28 @@ public sealed class McpModule : IHostModule
                 {
                     var exposed = $"mcp__{Sanitize(config.Id)}__{Sanitize(tool.Name)}";
                     scope.RegisterTool(
-                        new McpTool(client, exposed, tool.Name, toolsetId, tool.Description, tool.InputSchemaJson ?? ""),
+                        new McpTool(client, exposed, tool.Name, toolsetId, tool.Description, tool.InputSchemaJson ?? "", tool.Risk),
                         toolsetId);
+                }
+
+                // 资源面（对齐 dsh-mcp-resources）：只对**声明了 resources 能力**的 server
+                // 注册两个只读工具 —— 没声明的就不假装支持（调用即 method not found 的假门面更糟）。
+                var resourceToolCount = 0;
+                if (client.SupportsResources)
+                {
+                    var prefix = $"mcp__{Sanitize(config.Id)}__";
+                    scope.RegisterTool(new McpResourceListTool(client, prefix + "resource_list", toolsetId), toolsetId);
+                    scope.RegisterTool(new McpResourceReadTool(client, prefix + "resource_read", toolsetId), toolsetId);
+                    resourceToolCount = 2;
                 }
 
                 state.Kernel.DescribeToolset(new ToolsetDescriptor
                 {
                     Id = toolsetId,
                     Name = client.ServerName ?? config.Id,
-                    Description = $"MCP server「{config.Id}」：{tools.Count} 个外部工具（默认收起，用到再开）",
+                    Description = resourceToolCount > 0
+                        ? $"MCP server「{config.Id}」：{tools.Count} 个外部工具 + 2 个资源工具（默认收起，用到再开）"
+                        : $"MCP server「{config.Id}」：{tools.Count} 个外部工具（默认收起，用到再开）",
                     Eager = false,
                     Protected = false,
                     Source = toolsetId,

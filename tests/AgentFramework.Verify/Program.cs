@@ -4,29 +4,13 @@ using AgentFramework.Contracts;
 using AgentFramework.Kernel;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
+using static AgentFramework.Harness.Suite;
 
 // ═══════════════════════════════════════════════════════════
 //  插件内核垂直切片验证
 //  跑通：加载 → 注册 → 调用 → 审批拦截 → 卸载 → 真回收
 // ═══════════════════════════════════════════════════════════
 
-var passes = 0;
-var failures = 0;
-
-void Check(string name, bool ok, string? detail = null)
-{
-    var suffix = detail is null ? "" : $"  ({detail})";
-    if (ok)
-    {
-        passes++;
-        Console.WriteLine($"  [PASS] {name}{suffix}");
-    }
-    else
-    {
-        failures++;
-        Console.WriteLine($"  [FAIL] {name}{suffix}");
-    }
-}
 
 var pluginDir = Path.Combine(AppContext.BaseDirectory, "plugins", "hello");
 var dataRoot = Path.Combine(Path.GetTempPath(), "af-plugin-data");

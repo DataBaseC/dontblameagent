@@ -158,6 +158,14 @@ public sealed partial class WebUiServer
                 error = result.error,
             });
         }));
+
+        // 手动写一次状态锚点（checkpoint）—— 与「立即压缩」并列，但语义相反：
+        // 压缩改的是模型能看到什么，checkpoint 只往盘上追加一份结构化状态，上下文一字节不动。
+        Map(new DelegateRoute("POST", "/api/context/checkpoint", async (request, _) =>
+        {
+            var result = await _host.ManualCheckpointAsync().ConfigureAwait(false);
+            request.Json(new { ok = result.ok, message = result.message });
+        }));
     }
 
     /// <summary>当前设置 + 水位 + 最近一次 compaction / checkpoint 摘要。</summary>
@@ -198,6 +206,14 @@ public sealed partial class WebUiServer
                 maskedNoteMaxChars = 240,
                 minMaskSavingChars = 200,
                 maskOldToolResults = true,
+            },
+            // 任务 8：冻结段哈希诊断（默认关；开了才有数字）——
+            // 「为什么 cached_tokens 偏低」要能从「猜」变成「看」。
+            cache = new
+            {
+                diagnosticsEnabled = _host.Options.CacheDiagnostics,
+                frozenBlockChanges = _host.FrozenBlockChanges,
+                frozenBlockHash = _host.FrozenBlockHashOf(_host.SessionId),
             },
             waterLevel = ContextStatus(),
             lastCompaction = lastCompaction is null

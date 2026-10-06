@@ -63,6 +63,12 @@ public sealed class McpClient : IAsyncDisposable
     /// <summary>server 自报的名字（没有就退回配置里的 id）。</summary>
     public string? ServerName { get; private set; }
 
+    /// <summary>
+    /// server 是否在 <c>initialize</c> 里声明了 <c>resources</c> 能力。
+    /// 只有为真才注册资源工具 —— 不假装支持没声明的能力（对齐 dsh-mcp-resources 的做法）。
+    /// </summary>
+    public bool SupportsResources { get; private set; }
+
     public bool IsRunning => !_process.HasExited;
 
     public static async Task<McpClient> StartAsync(McpServerConfig config, string workingDirectory, CancellationToken ct)
@@ -162,6 +168,15 @@ public sealed class McpClient : IAsyncDisposable
             ServerName = name.GetString();
         }
 
+        // capabilities 是 server 的「我能干什么」自述。只认它声明过的 ——
+        // 未声明的能力一律不注册工具（避免「看着有、调用即报 method not found」的假门面）。
+        if (result.TryGetProperty("capabilities", out var capabilities)
+            && capabilities.ValueKind == JsonValueKind.Object
+            && capabilities.TryGetProperty("resources", out _))
+        {
+            SupportsResources = true;
+        }
+
         await NotifyAsync("notifications/initialized", new JsonObject(), ct).ConfigureAwait(false);
     }
 
@@ -189,7 +204,24 @@ public sealed class McpClient : IAsyncDisposable
                 ? s.GetRawText()
                 : null;
 
-            list.Add(new McpToolDescriptor(name, description ?? "", schema));
+            // annotations（MCP 规约的 hint）：readOnlyHint / destructiveHint → 我们的风险等级。
+            // server 没标就按最保守的执行档 —— 外部工具宁多问一句。
+            var risk = ToolRisk.Execute;
+            if (tool.TryGetProperty("annotations", out var annotations) && annotations.ValueKind == JsonValueKind.Object)
+            {
+                if (annotations.TryGetProperty("destructiveHint", out var destructive)
+                    && destructive.ValueKind == JsonValueKind.True)
+                {
+                    risk = ToolRisk.Destructive;
+                }
+                else if (annotations.TryGetProperty("readOnlyHint", out var readOnly)
+                    && readOnly.ValueKind == JsonValueKind.True)
+                {
+                    risk = ToolRisk.ReadOnly;
+                }
+            }
+
+            list.Add(new McpToolDescriptor(name, description ?? "", schema, risk));
         }
 
         return list;
@@ -207,6 +239,50 @@ public sealed class McpClient : IAsyncDisposable
         var text = McpContent.Flatten(result);
         var isError = result.TryGetProperty("isError", out var error) && error.ValueKind == JsonValueKind.True;
         return isError ? "ERROR: " + text : text;
+    }
+
+    /// <summary>
+    /// 取 server 暴露的资源清单（<c>resources/list</c>）。
+    /// 只对**声明了 resources 能力**的 server 调用；未声明时返回空表（不抛）。
+    /// </summary>
+    public async Task<IReadOnlyList<McpResourceDescriptor>> ListResourcesAsync(CancellationToken ct)
+    {
+        if (!SupportsResources)
+        {
+            return [];
+        }
+
+        var result = await RequestAsync("resources/list", new JsonObject(), ct).ConfigureAwait(false);
+
+        var list = new List<McpResourceDescriptor>();
+        if (!result.TryGetProperty("resources", out var resources) || resources.ValueKind != JsonValueKind.Array)
+        {
+            return list;
+        }
+
+        foreach (var resource in resources.EnumerateArray())
+        {
+            var uri = resource.TryGetProperty("uri", out var u) ? u.GetString() : null;
+            if (string.IsNullOrWhiteSpace(uri))
+            {
+                continue;
+            }
+
+            var name = resource.TryGetProperty("name", out var n) ? n.GetString() : null;
+            var description = resource.TryGetProperty("description", out var d) ? d.GetString() : null;
+            var mimeType = resource.TryGetProperty("mimeType", out var m) ? m.GetString() : null;
+
+            list.Add(new McpResourceDescriptor(uri, name ?? uri, description, mimeType));
+        }
+
+        return list;
+    }
+
+    /// <summary>按 uri 读一个资源（<c>resources/read</c>），把 <c>contents[]</c> 展平成文本。</summary>
+    public async Task<string> ReadResourceAsync(string uri, CancellationToken ct)
+    {
+        var result = await RequestAsync("resources/read", new JsonObject { ["uri"] = uri }, ct).ConfigureAwait(false);
+        return McpContent.FlattenResource(result);
     }
 
     private async Task<JsonElement> RequestAsync(string method, JsonNode? parameters, CancellationToken ct)
@@ -407,7 +483,14 @@ public sealed class McpClient : IAsyncDisposable
 }
 
 /// <summary>MCP 工具的元信息（来自 tools/list）。</summary>
-public sealed record McpToolDescriptor(string Name, string Description, string? InputSchemaJson);
+/// <param name="Risk">
+/// 由 MCP 的 <c>annotations</c> 映射而来（<c>readOnlyHint</c> → ReadOnly、<c>destructiveHint</c> → Destructive）；
+/// 没标就是 <see cref="ToolRisk.Execute"/>（保守默认）。
+/// </param>
+public sealed record McpToolDescriptor(string Name, string Description, string? InputSchemaJson, ToolRisk Risk);
+
+/// <summary>MCP 资源的元信息（来自 resources/list）。</summary>
+public sealed record McpResourceDescriptor(string Uri, string Name, string? Description, string? MimeType);
 
 /// <summary>把 MCP 的 content[] 结果展平成模型可读文本。</summary>
 public static class McpContent
@@ -436,6 +519,52 @@ public static class McpContent
             sb.Append(type == "text" && block.TryGetProperty("text", out var text)
                 ? text.GetString()
                 : block.GetRawText());
+        }
+
+        return sb.ToString();
+    }
+
+    /// <summary>
+    /// 把 <c>resources/read</c> 的 <c>contents[]</c> 展平成模型可读文本。
+    /// 文本内容原样带出；二进制（<c>blob</c>）只报「有多少、已省略」—— 不往上下文里灌 base64。
+    /// </summary>
+    public static string FlattenResource(JsonElement result)
+    {
+        if (result.ValueKind == JsonValueKind.Undefined)
+        {
+            return string.Empty;
+        }
+
+        if (!result.TryGetProperty("contents", out var contents) || contents.ValueKind != JsonValueKind.Array)
+        {
+            return result.GetRawText();
+        }
+
+        var sb = new StringBuilder();
+        foreach (var item in contents.EnumerateArray())
+        {
+            if (sb.Length > 0)
+            {
+                sb.Append('\n');
+            }
+
+            if (item.TryGetProperty("uri", out var uri) && uri.ValueKind == JsonValueKind.String)
+            {
+                sb.Append('[').Append(uri.GetString()).Append("] ");
+            }
+
+            if (item.TryGetProperty("text", out var text) && text.ValueKind == JsonValueKind.String)
+            {
+                sb.Append(text.GetString());
+            }
+            else if (item.TryGetProperty("blob", out var blob) && blob.ValueKind == JsonValueKind.String)
+            {
+                sb.Append($"（二进制内容，base64 {blob.GetString()?.Length ?? 0} 字符，已省略）");
+            }
+            else
+            {
+                sb.Append(item.GetRawText());
+            }
         }
 
         return sb.ToString();

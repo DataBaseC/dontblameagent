@@ -82,9 +82,11 @@ internal static class SkillToolArgs
 /// （工具白名单 + 提示词后缀，不含可执行内容），所以骨架器不需要沙箱就能安全地长出技能。
 /// </para>
 /// </summary>
-public sealed class SkillScaffoldTool(ToolkitOptions toolkit, Action? skillsChanged = null) : ITool, IToolWithSchema
+public sealed class SkillScaffoldTool(ToolkitOptions toolkit, Action? skillsChanged = null) : IToolWithRisk, ITool, IToolWithSchema
 {
     public string Name => "skill_scaffold";
+
+    public ToolRisk Risk => ToolRisk.Write;
 
     public string Description =>
         "生成一个技能（skill）骨架：给 id / description（可选 name、prompt、tools），" +
@@ -210,9 +212,11 @@ public sealed class SkillScaffoldTool(ToolkitOptions toolkit, Action? skillsChan
 public sealed class SkillValidateTool(
     ToolkitOptions toolkit,
     Func<IReadOnlyCollection<string>> registeredTools,
-    Func<IReadOnlyList<SkillDefinition>> existingSkills) : ITool, IToolWithSchema
+    Func<IReadOnlyList<SkillDefinition>> existingSkills) : IToolWithRisk, ITool, IToolWithSchema
 {
     public string Name => "skill_validate";
+
+    public ToolRisk Risk => ToolRisk.ReadOnly;
 
     public string Description =>
         "校验一个技能包是否可用：技能名合法性、工具白名单是否引用了未注册工具、是否与内置/工坊技能重名。" +
@@ -307,9 +311,11 @@ public sealed class SkillValidateTool(
 /// 工具白名单取自「材料里**显式提到**的已注册工具名」，其余交给用户/模型在草稿上补。
 /// </para>
 /// </summary>
-public sealed class SkillExtractTool(Func<IReadOnlyCollection<string>> registeredTools) : ITool, IToolWithSchema
+public sealed class SkillExtractTool(Func<IReadOnlyCollection<string>> registeredTools) : IToolWithRisk, ITool, IToolWithSchema
 {
     public string Name => "skill_extract";
+
+    public ToolRisk Risk => ToolRisk.Write;
 
     public string Description =>
         "从一段材料（对话片段 / 文档要点 / 步骤清单）提炼一个技能草稿：" +
@@ -406,9 +412,11 @@ public sealed class SkillExtractTool(Func<IReadOnlyCollection<string>> registere
 /// </summary>
 public sealed class ToolCatalogTool(
     Func<IReadOnlyList<ToolsetView>> views,
-    IReadOnlyList<ITool> officialTools) : ITool, IToolWithSchema
+    IReadOnlyList<ITool> officialTools) : IToolWithRisk, ITool, IToolWithSchema
 {
     public string Name => "tool_catalog";
+
+    public ToolRisk Risk => ToolRisk.ReadOnly;
 
     public string Description =>
         "按工具包或关键词列出已注册工具及其参数摘要（含延迟包索引）。" +
@@ -513,9 +521,11 @@ public sealed class ToolCatalogTool(
 /// 把 CSV 文本解析成 JSON 数组，并声明输出结构（<see cref="IToolWithStructuredOutput"/>）——
 /// 与 <see cref="IToolWithSchema"/> 对称：那个描述输入，这个描述输出。
 /// </summary>
-public sealed class CsvToJsonTool : ITool, IToolWithSchema, IToolWithStructuredOutput
+public sealed class CsvToJsonTool : IToolWithRisk, ITool, IToolWithSchema, IToolWithStructuredOutput
 {
     public string Name => "csv_to_json";
+
+    public ToolRisk Risk => ToolRisk.ReadOnly;
 
     public string Description =>
         "把 CSV 文本解析成 JSON 数组（结构化输出工具类型的官方样例）。" +
@@ -650,9 +660,11 @@ public sealed class CsvToJsonTool : ITool, IToolWithSchema, IToolWithStructuredO
 public sealed class SkillFromToolsetTool(
     ToolkitOptions toolkit,
     Func<IReadOnlyList<ToolsetView>> toolsets,
-    Action? skillsChanged = null) : ITool, IToolWithSchema
+    Action? skillsChanged = null) : IToolWithRisk, ITool, IToolWithSchema
 {
     public string Name => "skill_from_toolset";
+
+    public ToolRisk Risk => ToolRisk.Write;
 
     public string Description =>
         "把某个工具包（toolset）里的全部工具一键转成一个技能草稿，写出 <workspace>/skills/<id>/skill.json。" +

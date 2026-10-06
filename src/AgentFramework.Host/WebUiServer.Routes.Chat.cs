@@ -147,9 +147,9 @@ public sealed partial class WebUiServer
             TaskCompletionSource<ApprovalAnswer>? completion = null;
             lock (_gate)
             {
-                if (!string.IsNullOrEmpty(id))
+                if (!string.IsNullOrEmpty(id) && _pendingApprovals.Remove(id, out var pending))
                 {
-                    _pendingApprovals.Remove(id, out completion);
+                    completion = pending.Completion;
                 }
             }
 
@@ -179,9 +179,9 @@ public sealed partial class WebUiServer
             TaskCompletionSource<AskUserAnswer>? completion = null;
             lock (_gate)
             {
-                if (!string.IsNullOrEmpty(id))
+                if (!string.IsNullOrEmpty(id) && _pendingAsks.Remove(id, out var pending))
                 {
-                    _pendingAsks.Remove(id, out completion);
+                    completion = pending.Completion;
                 }
             }
 

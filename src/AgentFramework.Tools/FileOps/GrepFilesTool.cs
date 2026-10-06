@@ -18,12 +18,14 @@ namespace AgentFramework.Tools.FileOps;
 /// 里面带 <c>(</c> <c>[</c> 时正则要转义，默认正则只会制造无谓的失败。
 /// </para>
 /// </summary>
-internal sealed class GrepFilesTool(IWorkspaceService ws) : ITool, IToolWithSchema
+internal sealed class GrepFilesTool(IWorkspaceService ws) : IToolWithRisk, ITool, IToolWithSchema
 {
     private const int HardMaxResults = 200;
     private const int HardMaxContext = 5;
 
     public string Name => "grep_files";
+
+    public ToolRisk Risk => ToolRisk.ReadOnly;
 
     public string Description =>
         "在工作区的文件内容里检索。返回「文件:行号: 内容」列表。" +
@@ -48,7 +50,7 @@ internal sealed class GrepFilesTool(IWorkspaceService ws) : ITool, IToolWithSche
         var pattern = args.Str("pattern");
         if (string.IsNullOrEmpty(pattern))
         {
-            return ValueTask.FromResult(ToolResult.Fail("缺少参数 pattern"));
+            return ValueTask.FromResult(ToolResult.Fail("缺少参数 pattern（要检索的字面量或正则，如 \"TODO\"）"));
         }
 
         var start = args.StrOr("path", ".");
@@ -76,14 +78,14 @@ internal sealed class GrepFilesTool(IWorkspaceService ws) : ITool, IToolWithSche
             }
             catch (Exception ex)
             {
-                return ValueTask.FromResult(ToolResult.Fail($"正则表达式无效：{ex.Message}"));
+                return ValueTask.FromResult(ToolResult.Fail($"正则表达式无效：{ex.Message}{FileHints.RegexHint}"));
             }
         }
 
         var files = ResolveFiles(fullPath, include);
         if (files.Count == 0)
         {
-            return ValueTask.FromResult(ToolResult.Ok($"没有可扫描的文件（起点：{start}）"));
+            return ValueTask.FromResult(ToolResult.Ok($"没有可扫描的文件（起点：{start}）；确认 path 是目录，且 include 没写得过窄"));
         }
 
         var report = new StringBuilder();

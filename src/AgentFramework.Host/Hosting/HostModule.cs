@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using AgentFramework.Agent;
 using AgentFramework.Contracts;
 using AgentFramework.Data;
@@ -77,6 +78,12 @@ public sealed class HostState
 
     public IContextSummarizer? ContextSummarizer { get; set; }
 
+    /// <summary>
+    /// checkpoint writer（状态锚点提取者；v3.22 接入）。旁路模型调用，产 <see cref="Contracts.CheckpointEvent"/>。
+    /// 未装配（无可用模型端点）时为 null —— 此时水位触发静默不生效，不假装写了。
+    /// </summary>
+    public Contracts.ICheckpointWriter? CheckpointWriter { get; set; }
+
     /// <summary>Goal 终止验证器（旁路小模型裁决「目标真的达成了吗」，防提前收工）。</summary>
     public Contracts.IGoalVerifier? GoalVerifier { get; set; }
 
@@ -137,7 +144,11 @@ public sealed class HostState
     public List<string> McpFailures { get; set; } = [];
 
     /// <summary>子 Agent 编排入口（G1）。AgentHost 回填（需要 OpenSession/SendAsync，装配期还没有）。</summary>
-    public Func<string, string, CancellationToken, Task<(string ChildId, bool Success, string Summary)>>? SubAgentRunner { get; set; }
+    /// <summary>
+    /// 子 Agent 管控面（v3.23）：派发 / 名单 / 状态 / 取结果 / 追加消息 / 打断。
+    /// 由宿主在装配完成后回填 —— 它需要宿主自己的 OpenSession / SendAsync / 会话表。
+    /// </summary>
+    public ISubAgentControl? SubAgents { get; set; }
 
     /// <summary>向指定会话落事件（G3 计划事件用）。AgentHost 回填。</summary>
     public Func<string, SessionEvent, CancellationToken, ValueTask>? EmitToSession { get; set; }
@@ -204,6 +215,17 @@ public sealed class HostState
     /// </summary>
     public Func<IUserInteraction>? InteractionProvider { get; set; }
 
+    /// <summary>
+    /// 按会话 id 取审批出口（脚本借调工具的审批关口用）。AgentHost 回填。
+    ///
+    /// <para>
+    /// 脚本插件是**全局**加载的，不属某个会话；它 <c>ctx.callTool</c> 借调工具时，
+    /// 要靠「回合所属会话」（<see cref="TurnSessionIdValue"/>）找回该会话的审批出口。
+    /// 找不到就保守拒绝 —— 与「无界面即拒绝」同一条纪律，绝不静默放行。
+    /// </para>
+    /// </summary>
+    public Func<string?, IAgentEventSink?>? ApprovalSinkFor { get; set; }
+
     public Action<SessionEvent>? EventRelay { get; set; }
 
     /// <summary>
@@ -239,6 +261,27 @@ public sealed class HostState
     /// </summary>
     private readonly AsyncLocal<string?> TurnSessionId = new();
 
+    /// <summary>
+    /// 本回合所属会话**已检索拉起**的工具名（Tool Search）。
+    ///
+    /// <para>
+    /// 与 <see cref="DisabledToolsets"/> 同一性质（会话级运行期状态、每轮现取），
+    /// 区别只在于它是<b>加</b>而不是<b>减</b>：延迟包里的工具被 <c>tool_search</c> 命中就补进来。
+    /// 非回合上下文（UI 直接调用）读到 null —— 与 <see cref="TurnSessionId"/> 同一纪律。
+    /// </para>
+    /// </summary>
+    private readonly AsyncLocal<HashSet<string>?> TurnActivatedTools = new();
+
+    /// <summary>
+    /// 会话 → 已激活工具名集合（Tool Search 的运行期状态，<b>不进事件流</b>，与 JobManager 同一取舍）。
+    ///
+    /// <para>
+    /// 值只在**该会话自己的回合内**写（回合闸保证同会话单飞），故每个 <see cref="HashSet{T}"/> 无并发写者；
+    /// 多会话并发访问的是不同的 value，键表用 <see cref="ConcurrentDictionary{TKey,TValue}"/> 兜住。
+    /// </para>
+    /// </summary>
+    public ConcurrentDictionary<string, HashSet<string>> ActivatedToolsBySession { get; } = new(StringComparer.Ordinal);
+
     public string? TurnModeId => TurnMode.Value;
 
     /// <summary>本回合所属会话的项目目录（null = 宿主工作区）。文件沙箱与项目记忆作用域都读它。</summary>
@@ -247,11 +290,55 @@ public sealed class HostState
     /// <summary>本回合所属会话的 id（null = 不在回合中，调用方回落到宿主当前会话）。</summary>
     public string? TurnSessionIdValue => TurnSessionId.Value;
 
+    /// <summary>
+    /// 把工具<b>拉进 / 卸下</b>本回合所属会话（Tool Search 的落点）。返回 true = 可见性真被改了。
+    ///
+    /// <para>
+    /// 只动「可见性」这一件事 —— 不改注册表、不落任何盘上产物，
+    /// 于是它与「开关工具包」是同一层语义：每轮现取，下一轮立刻生效。
+    /// </para>
+    /// </summary>
+    public bool SetToolActivatedForTurn(string toolName, bool active)
+    {
+        if (string.IsNullOrWhiteSpace(toolName) || TurnActivatedTools.Value is not { } set)
+        {
+            return false;
+        }
+
+        lock (set)
+        {
+            return active ? set.Add(toolName) : set.Remove(toolName);
+        }
+    }
+
+    /// <summary>本回合所属会话已拉起的工具名快照（诊断与 <c>tool_search</c> 自身用）。</summary>
+    public IReadOnlyCollection<string> ActivatedToolsForTurn
+    {
+        get
+        {
+            if (TurnActivatedTools.Value is not { Count: > 0 } set)
+            {
+                return [];
+            }
+
+            lock (set)
+            {
+                return [.. set];
+            }
+        }
+    }
+
     public void BeginTurn(string? modeId, string? projectDir = null, string? sessionId = null)
     {
         TurnMode.Value = modeId;
         TurnWorkspace.Value = projectDir;
         TurnSessionId.Value = sessionId;
+
+        // Tool Search：把「本会话已拉起的工具」绑进本回合的作用域。
+        // 不绑的话，另一会话（含子 Agent）拉起的工具会串到这一轮来 —— 它们读的是同一份宿主状态。
+        TurnActivatedTools.Value = sessionId is null
+            ? null
+            : ActivatedToolsBySession.GetOrAdd(sessionId, _ => new HashSet<string>(StringComparer.Ordinal));
     }
 
     /// <summary>回合所属会话的项目记忆作用域 id（多项目隔离的落点）。</summary>
@@ -338,6 +425,41 @@ public sealed class HostState
         if (enabledSkillTools is not null)
         {
             filtered = filtered.Where(t => enabledSkillTools.Contains(t.Name));
+        }
+
+        // ── 工具级按需激活（Tool Search）─────────────────────────────
+        // 它只豁免**包**这一道闸门：延迟包（Eager=false，如 mcp:<server>）正是靠
+        // DisabledToolsets 实现的，所以这一路必须放在包闸门之后。
+        // 但模式声明的包集、模式精确白名单、技能白名单**原样照旧** ——
+        // 「补一个工具」不该把闲聊模式变成全功能模式。
+        if (TurnActivatedTools.Value is { Count: > 0 } activated)
+        {
+            var extra = all.Where(t => activated.Contains(t.Name)).ToList();
+
+            if (profile.AllowedToolsets is not null)
+            {
+                extra = profile.AllowedToolsets.Count == 0
+                    ? []
+                    : [.. extra.Where(t => profile.AllowedToolsets.Contains(Kernel.ToolsetOf(t.Name) ?? string.Empty, StringComparer.Ordinal))];
+            }
+
+            if (profile.AllowedTools is not null)
+            {
+                extra = profile.AllowedTools.Count == 0
+                    ? []
+                    : [.. extra.Where(t => profile.AllowedTools.Contains(t.Name, StringComparer.Ordinal))];
+            }
+
+            if (enabledSkillTools is not null)
+            {
+                extra = [.. extra.Where(t => enabledSkillTools.Contains(t.Name))];
+            }
+
+            // 按名排序：工具表是请求前缀的一部分，顺序抖动会打掉端点的前缀缓存。
+            filtered = filtered
+                .Concat(extra)
+                .DistinctBy(t => t.Name, StringComparer.Ordinal)
+                .OrderBy(t => t.Name, StringComparer.Ordinal);
         }
 
         return [.. filtered];

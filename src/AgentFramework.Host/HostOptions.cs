@@ -25,10 +25,22 @@ public sealed class HostOptions
     public string? PluginsDir { get; set; }
 
     /// <summary>
-    /// 命令沙箱档位：<c>auto</c>（默认）/ <c>off</c> / <c>process</c> / <c>job</c>，
-    /// 或插件注册的后端名。名字不认识或平台不可用时回落到可用档。
+    /// 命令沙箱档位：<c>auto</c>（默认）/ <c>off</c> / <c>process</c> / <c>job</c> /
+    /// <c>bwrap</c> / <c>container</c>，或插件注册的后端名。名字不认识或平台不可用时回落到可用档。
     /// </summary>
     public string? Sandbox { get; set; }
+
+    /// <summary>
+    /// <c>container</c> 档用的镜像（如 <c>node:22</c> / <c>mcr.microsoft.com/dotnet/sdk:10.0</c>）。
+    /// <b>选容器档就必须配它</b> —— 独立 rootfs 没有普适默认，所以容器档不进 auto。
+    /// </summary>
+    public string? SandboxImage { get; set; }
+
+    /// <summary>容器网络策略：<c>none</c>（默认，禁网）/ <c>bridge</c>（可出网）/ <c>host</c>。</summary>
+    public string? SandboxNetwork { get; set; }
+
+    /// <summary>容器运行时：<c>docker</c> / <c>podman</c> / 可执行文件路径。空 = 自动探测（docker 优先）。</summary>
+    public string? SandboxRuntime { get; set; }
 
     /// <summary>
     /// shell 偏好（会话级一次决定）：<c>bash</c>/<c>sh</c>/<c>cmd</c>/<c>powershell</c>/<c>pwsh</c> /
@@ -71,8 +83,21 @@ public sealed class HostOptions
     /// <summary>本地端点（LM Studio，负责量大但简单的任务）。</summary>
     public LlmEndpointOptions? Local { get; set; }
 
-    /// <summary>路由规则的长上下文阈值（超过且不需要工具 → 走本地）。</summary>
-    public int LongContextChars { get; set; } = 6000;
+    /// <summary>
+    /// 路由规则的长上下文阈值（**估算 token**，超过且不需要工具 → 走本地）。
+    ///
+    /// <para>
+    /// 从前这里按**字符数**判（默认 6000），中英混排 / 代码场景下偏差很大；
+    /// v3.23 起改用真实 token 估算（中英分别计权），默认 2000 tokens。
+    /// </para>
+    /// </summary>
+    public int LongContextTokens { get; set; } = 2000;
+
+    /// <summary>
+    /// 子 Agent 的**派生深度上限**（默认 2：顶层派一级、子 Agent 再派一级）。
+    /// 没有闸的话，子 Agent 可以无限往下派 —— 那是一条悄悄烧钱的路径。
+    /// </summary>
+    public int SubAgentMaxDepth { get; set; } = 2;
 
     public string SystemPrompt { get; set; } =
         "你是[咪咪]，dba桌面助手。可以调用工具读写文件、执行命令、搜索网络。"
@@ -147,6 +172,18 @@ public sealed class HostOptions
     public Contracts.CheckpointOptions Checkpoint { get; set; } = new();
 
     /// <summary>
+    /// 冻结段字节哈希诊断（任务 8 可选增强，<b>默认关</b>）。
+    ///
+    /// <para>
+    /// 打开后：每次装配上下文都算一次冻结段（缓存前缀那一段）的哈希，
+    /// 与同会话上一次不一致时记一笔计数并打一行日志 ——
+    /// 「前缀被打掉」从一句猜测变成一个可证的数字。默认关是刻意的：
+    /// 诊断只为查缓存命中率服务，不该给所有会话都白加一次 SHA256。
+    /// </para>
+    /// </summary>
+    public bool CacheDiagnostics { get; set; }
+
+    /// <summary>
     /// 审批档位（任务 5）：ask / plan / build / yolo。**活配置** —— 切档下一轮立即生效。
     ///
     /// <para>
@@ -162,6 +199,13 @@ public sealed class HostOptions
     /// 若不注入，宿主会在配了本地端点时自动用本地小模型做摘要。
     /// </summary>
     public Contracts.IContextSummarizer? ContextSummarizerOverride { get; set; }
+
+    /// <summary>
+    /// 注入自定义 checkpoint writer（验收测试 / 自定义提取者用）。
+    /// 若不注入，宿主会在配了模型端点时自动用旁路小模型做状态提取（<c>LlmCheckpointWriter</c>）。
+    /// 只有在 <see cref="Checkpoint"/> 的 <c>Enabled</c> 打开时才会被调用。
+    /// </summary>
+    public Contracts.ICheckpointWriter? CheckpointWriterOverride { get; set; }
 
     /// <summary>
     /// Goal 停止条件（自然语言，如「所有测试通过且代码已提交」）。空 = 不启用目标核验。
@@ -255,6 +299,10 @@ public sealed class HostOptions
         PluginsDir = PluginsDir,
         // 沙箱档位是「这台机器的安全边界」，切会话不该把它悄悄换回默认。
         Sandbox = Sandbox,
+        // 容器档的镜像 / 网络 / 运行时同属「这台机器怎么跑命令」，一并跟着走。
+        SandboxImage = SandboxImage,
+        SandboxNetwork = SandboxNetwork,
+        SandboxRuntime = SandboxRuntime,
         // shell 同理会话级钉死：换会话不该每条命令重新猜。
         Shell = Shell,
         // 关掉的工具包同理：它是「这次干活要背着多少东西」，不该随会话漂移。
@@ -262,7 +310,8 @@ public sealed class HostOptions
         SessionId = sessionId,
         Cloud = Cloud,
         Local = Local,
-        LongContextChars = LongContextChars,
+        LongContextTokens = LongContextTokens,
+        SubAgentMaxDepth = SubAgentMaxDepth,
         SystemPrompt = SystemPrompt,
         Temperature = Temperature,
         MaxSteps = MaxSteps,
@@ -271,6 +320,7 @@ public sealed class HostOptions
         SearxngBaseUrl = SearxngBaseUrl,
         ApprovalPolicy = ApprovalPolicy,
         ApprovalTier = ApprovalTier,
+        CacheDiagnostics = CacheDiagnostics,
         // 权限规则与越界防护同理：「这台机器的安全边界」，不随会话漂移。
         ApprovalRules = ApprovalRules,
         AllowExternalDirectory = AllowExternalDirectory,

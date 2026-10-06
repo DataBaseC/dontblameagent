@@ -4,6 +4,7 @@ using System.Text.Json;
 using AgentFramework.Contracts;
 using AgentFramework.Llm;
 using AgentFramework.Tools;
+using static AgentFramework.Harness.Suite;
 
 // ═══════════════════════════════════════════════════════════
 //  模型接入与搜索后端 垂直切片验证
@@ -11,23 +12,6 @@ using AgentFramework.Tools;
 //  全部离线可跑：HTTP 用本地监听器，HTML 解析用固定样本。
 // ═══════════════════════════════════════════════════════════
 
-var passes = 0;
-var failures = 0;
-
-void Check(string name, bool ok, string? detail = null)
-{
-    var suffix = detail is null ? "" : $"  ({detail})";
-    if (ok)
-    {
-        passes++;
-        Console.WriteLine($"  [PASS] {name}{suffix}");
-    }
-    else
-    {
-        failures++;
-        Console.WriteLine($"  [FAIL] {name}{suffix}");
-    }
-}
 
 var root = Path.Combine(Path.GetTempPath(), "af-llm-verify", Guid.NewGuid().ToString("N")[..8]);
 Directory.CreateDirectory(root);

@@ -97,7 +97,28 @@ public sealed class SessionRuntime : IAsyncDisposable
     {
         lock (_eventsGate)
         {
-            _events.Add(sessionEvent);
+            // 事件表必须**按 Seq 有序**。
+            //
+            // 为什么不能直接 Add：落盘（JsonlEventLog.Append 自己的锁分配 Seq）与入表
+            // （这里）是**两把锁、两步**。多个子 Agent 同时向同一个父会话留痕时，
+            // 完全可能出现「T1 先拿到 seq 5、T2 后拿到 seq 6，但 T2 先入表」——
+            // 表一乱序，投影就会把 completed 排到它对应的 requested 前面。
+            // 顺序追加是常态（O(1)）；只有真出现交错才退化成插入。
+            if (_events.Count == 0 || _events[^1].Seq < sessionEvent.Seq)
+            {
+                _events.Add(sessionEvent);
+            }
+            else
+            {
+                var index = _events.Count;
+                while (index > 0 && _events[index - 1].Seq > sessionEvent.Seq)
+                {
+                    index--;
+                }
+
+                _events.Insert(index, sessionEvent);
+            }
+
             _snapshot = null;
         }
     }
@@ -114,6 +135,17 @@ public sealed class SessionRuntime : IAsyncDisposable
 
     /// <summary>是否有 writer 在跑（1 = 是）。同一会话同一时刻至多一个 —— 防堆积。</summary>
     internal int CheckpointInFlight;
+
+    /// <summary>
+    /// 后台 checkpoint writer 产出的**状态锚点稿**（<see cref="CheckpointEvent"/>，尚未落盘）。
+    /// 与 <see cref="PendingCheckpoint"/> 分属两条通道：那个是「摘要」（给压缩用），
+    /// 这个是「结构化状态」（写盘用，不进模型上下文）。
+    /// 同样 single-writer：只有 writer 写、只有回合边界取走，日志追加保持单线程。
+    /// </summary>
+    internal CheckpointEvent? PendingCheckpointAnchor;
+
+    /// <summary>是否有锚点 writer 在跑（1 = 是）—— 与摘要 writer 各自防堆积。</summary>
+    internal int CheckpointAnchorInFlight;
 
     /// <summary>本会话的日志路径（诊断与 UI 用）。</summary>
     public string LogPath => Log.Path;

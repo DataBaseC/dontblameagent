@@ -16,6 +16,13 @@ public sealed class ToolPreExecuteEvent : IPluginEvent
 
     public required IReadOnlyDictionary<string, string?> Arguments { get; init; }
 
+    /// <summary>
+    /// 本次调用的副作用等级（工具自报，见 <see cref="ToolRisk"/>）。
+    /// 未声明 / 老插件构造的事件一律是 <see cref="ToolRisk.Execute"/>（最保守）——
+    /// 审批据此判定放行与否，不再靠宿主里的一张工具名清单。
+    /// </summary>
+    public ToolRisk Risk { get; init; } = ToolRisk.Execute;
+
     public bool Cancelled { get; set; }
 
     public string? RejectReason { get; set; }

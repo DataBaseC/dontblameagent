@@ -17,9 +17,11 @@ namespace AgentFramework.Tools;
 public sealed class SearchHistoryTool(
     ToolkitOptions options,
     ISessionIndex index,
-    Func<string?> currentSessionId) : ITool, IToolWithSchema
+    Func<string?> currentSessionId) : IToolWithRisk, ITool, IToolWithSchema
 {
     public string Name => "search_history";
+
+    public ToolRisk Risk => ToolRisk.ReadOnly;
 
     public string Description =>
         "在自己的会话历史里做全文检索 —— 包括那些因为上下文压缩而**已经不在你眼前**的旧消息与工具结果。"

@@ -17,11 +17,13 @@ namespace AgentFramework.Tools.FileOps;
 /// <c>*.cs</c> 这种不带 '/' 的写法按「任意目录下」处理 —— 那是绝大多数的真实意图。
 /// </para>
 /// </summary>
-internal sealed class FindFilesTool(IWorkspaceService ws) : ITool, IToolWithSchema
+internal sealed class FindFilesTool(IWorkspaceService ws) : IToolWithRisk, ITool, IToolWithSchema
 {
     private const int HardMaxResults = 500;
 
     public string Name => "find_files";
+
+    public ToolRisk Risk => ToolRisk.ReadOnly;
 
     public string Description =>
         "按文件名模式（glob）查找文件，返回相对路径列表。" +
@@ -42,7 +44,7 @@ internal sealed class FindFilesTool(IWorkspaceService ws) : ITool, IToolWithSche
         var pattern = args.Str("pattern");
         if (string.IsNullOrWhiteSpace(pattern))
         {
-            return ValueTask.FromResult(ToolResult.Fail("缺少参数 pattern"));
+            return ValueTask.FromResult(ToolResult.Fail("缺少参数 pattern（文件名 glob，如 *.cs、**/*.json）"));
         }
 
         var start = args.StrOr("path", ".");
@@ -56,8 +58,8 @@ internal sealed class FindFilesTool(IWorkspaceService ws) : ITool, IToolWithSche
         if (!Directory.Exists(fullPath))
         {
             return ValueTask.FromResult(ToolResult.Fail(File.Exists(fullPath)
-                ? $"起点是文件，find_files 需要目录：{start}"
-                : $"目录不存在：{start}"));
+                ? $"起点是文件，find_files 需要目录：{start}；要查这个文件本身，请用 grep_files 或直接 read_file"
+                : $"目录不存在：{FileHints.DirMissing(start)}"));
         }
 
         var matches = new List<(string Relative, long Size)>();
@@ -97,7 +99,8 @@ internal sealed class FindFilesTool(IWorkspaceService ws) : ITool, IToolWithSche
         if (matches.Count == 0)
         {
             return ValueTask.FromResult(ToolResult.Ok(
-                $"没有匹配「{pattern}」的文件（起点：{start}）。注意模式是相对起点的 glob，不要带盘符。"));
+                $"没有匹配「{pattern}」的文件（起点：{start}）。注意模式是相对起点的 glob、不要带盘符；" +
+                "** 跨目录，如 **/*.json；只写 *.cs 也等价于「任意目录下的 .cs」。"));
         }
 
         var report = new StringBuilder();

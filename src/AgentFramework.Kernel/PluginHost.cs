@@ -160,6 +160,26 @@ public sealed class PluginHost
         }
     }
 
+    // ── 脚本借调工具的审批关口（安全：脚本路径不许绕过策略链）──────
+
+    /// <summary>
+    /// 脚本借调工具（<c>ctx.callTool</c>）的审批关口。宿主装配后回填 ——
+    /// 与主循环（<see cref="AgentFramework.Agent.AgentRunner"/>）走**同一套策略链**
+    /// （内核/插件订阅者 → 分级审批档位 → 输入级规则 → 越界写硬闸 → 界面）。
+    ///
+    /// <para>
+    /// 为什么必须存在：主循环自己调 <c>IAgentEventSink.RequestApprovalAsync</c>，
+    /// 而脚本走 <see cref="InvokeToolAsync"/> —— 后者从前**只发事件、从不触碰策略链**，
+    /// 于是档位 / 规则 / 越界硬闸在脚本路径上全部失效，且失效是静默的。
+    /// 装了这个关口，「脚本借来的调用也要过审批」才在代码上成立，而不只是在注释里。
+    /// </para>
+    ///
+    /// <para>
+    /// 为 null 表示「无宿主」（独立内核 / 单元测试）：退回只发事件的旧行为。
+    /// </para>
+    /// </summary>
+    public Func<ToolPreExecuteEvent, CancellationToken, ValueTask>? ToolApprovalGate { get; set; }
+
     // ── 工具调用（含审批事件）─────────────────────────────────────
 
     /// <summary>
@@ -173,8 +193,26 @@ public sealed class PluginHost
     {
         var args = arguments ?? new Dictionary<string, string?>();
 
-        var preEvent = new ToolPreExecuteEvent { ToolName = toolName, Arguments = args };
-        await _events.EmitAsync(preEvent, ct).ConfigureAwait(false);
+        // 风险等级由工具自报（与主循环同一口径）：从前这里构造事件时不带风险，
+        // 于是插件**借调**的工具在审批链里只能落到最保守的默认档 ——
+        // 与「同一动作在两条路上判定不同」是同一类问题的两个面。
+        var risk = _tools.TryGet(toolName, out var riskTool) && riskTool is IToolWithRisk withRisk
+            ? withRisk.Risk
+            : ToolRisk.Execute;
+
+        var preEvent = new ToolPreExecuteEvent { ToolName = toolName, Arguments = args, Risk = risk };
+
+        if (ToolApprovalGate is { } gate)
+        {
+            // 宿主在：走完整审批链。gate 内部已含「订阅者表态」（RequestApprovalAsync 的第一层），
+            // 所以这里不再重复 EmitAsync —— 重复发事件会让插件订阅者被通知两遍。
+            await gate(preEvent, ct).ConfigureAwait(false);
+        }
+        else
+        {
+            // 无宿主（独立内核 / 测试）：保持旧行为，只发事件让订阅者表态。
+            await _events.EmitAsync(preEvent, ct).ConfigureAwait(false);
+        }
 
         if (preEvent.Cancelled)
         {
@@ -540,8 +578,9 @@ public sealed class PluginHost
 
     /// <summary>
     /// 脚本插件借调其他工具的通道（<c>ctx.callTool</c>）。
-    /// 能力声明由 <see cref="ScriptPlugin"/> 先卡一道，这里只负责真正调用 ——
-    /// 于是审批（<see cref="ToolPreExecuteEvent"/>）照常生效，脚本借来的调用也要过审批。
+    /// 能力声明由 <see cref="ScriptPlugin"/> 先卡一道，这里只负责真正调用。
+    /// 审批走 <see cref="ToolApprovalGate"/>（宿主回填）= 与主循环同一套策略链 ——
+    /// 不再是「只发事件」：档位 / 规则 / 越界硬闸在脚本路径上同样生效。
     /// </summary>
     private ValueTask<ToolResult> InvokeToolForScript(
         string toolName,

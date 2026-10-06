@@ -42,7 +42,7 @@ public sealed class ArtifactStore
             fileName = $"{DateTime.UtcNow:yyyyMMdd-HHmmss}-{Sanitize(toolName)}-{_counter}.txt";
         }
 
-        File.WriteAllText(Path.Combine(_root, fileName), content, Encoding.UTF8);
+        AtomicFile.WriteAllText(Path.Combine(_root, fileName), content, Encoding.UTF8);
 
         // 统一用正斜杠：模型在 Windows / Linux 上拿到的引用字符串是同一个样子
         return $"{DirectoryName}/{fileName}";

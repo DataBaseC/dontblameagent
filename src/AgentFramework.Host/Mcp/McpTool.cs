@@ -23,9 +23,13 @@ public sealed class McpTool(
     string remoteName,
     string toolset,
     string description,
-    string parametersJsonSchema) : ITool, IToolWithSchema, IToolWithToolset
+    string parametersJsonSchema,
+    ToolRisk risk = ToolRisk.Execute) : IToolWithRisk, ITool, IToolWithSchema, IToolWithToolset
 {
     public string Name => exposedName;
+
+    /// <summary>由 server 的 <c>annotations</c> 映射而来；没标就按执行档（保守）。</summary>
+    public ToolRisk Risk => risk;
 
     public string Description => description;
 

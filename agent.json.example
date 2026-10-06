@@ -46,16 +46,34 @@
   // "temperature": 0.7,
   // "context": { "tokenBudget": 24000, "compressionTriggerRatio": 0.8 }
 
+  // ── checkpoint（状态锚点，长任务建议打开）────────────────────
+  // 与「压缩」是两个触发点，别混：
+  //   checkpoint = 写盘：把「现在是什么状态」提取成一条结构化事件追加进日志，
+  //                模型上下文**一个字节都不动** → 可以早、可以频繁（水位 0.35）；
+  //   压缩       = 裁剪：换投影函数、必打断前缀缓存 → 宁晚不频（水位 0.8，不动）。
+  // checkpoint 默认**关**（每次触发要花一次旁路模型调用）。长了再开。
+  // "checkpoint": { "enabled": true, "triggerRatio": 0.35, "promoteMemory": true }
+
+
   // ── 命令沙箱（编程必备）──────────────────────────────────────
-  // auto（默认）：Windows 用 job（内核限额），其他平台用 process（进程护栏）
-  //   off     = 不设护栏（排查问题时用，能一键退回「没有沙箱的世界」）
-  //   process = 工作目录钉在工作区 + 临时目录重定向进工作区 +
-  //             超时/取消连子孙进程一起终结 + 输出过程中封顶
-  //   job     = 在 process 之上再加内存上限、CPU 时间上限、活动进程数上限，
-  //             且宿主退出时连同子孙一并终结（Windows 专有，Job Object）
+  // auto（默认）：Linux 上有 bwrap 用 bwrap、Windows 用 job、其余用 process
+  //   off       = 不设护栏（排查问题时用，能一键退回「没有沙箱的世界」）
+  //   process   = 工作目录钉在工作区 + 临时目录重定向进工作区 +
+  //               超时/取消连子孙进程一起终结 + 输出过程中封顶
+  //   job       = 在 process 之上再加内存上限、CPU 时间上限、活动进程数上限，
+  //               且宿主退出时连同子孙一并终结（Windows 专有，Job Object）
+  //   bwrap     = 命名空间隔离：根只读、工作区可写、/tmp 独立、PID 等隔离
+  //               （Linux 装了 bubblewrap 即用；网络默认放开，设 sandboxNetwork: none 时一并禁网）
+  //   container = 容器隔离：独立 rootfs + 网络可隔绝 + 根只读 + 内存上限
+  //               （装了 docker / podman 即用；**必须配镜像**，故不进 auto）
   // 名字不认识或平台不可用时会回落到可用档 —— 具体用了哪一档在界面状态里看得见。
-  // 插件也可以注册自己的沙箱后端（如容器），写它的名字就行。
+  // 插件也可以注册自己的沙箱后端（远程执行 / 带审计的包装），写它的名字就行。
   // "sandbox": "auto"
+
+  // 容器档（sandbox = "container"）专用：
+  // "sandboxImage": "mcr.microsoft.com/dotnet/sdk:10.0",  // 必配：用哪个镜像没有普适默认
+  // "sandboxNetwork": "none",   // none（默认，禁网）/ bridge（可出网，装依赖用）/ host
+  // "sandboxRuntime": "docker"  // 省略 = 自动探测（docker 优先，其次 podman）
 
   // ── 工具包（按需开合，降低 agent 负担）────────────────────────
   // 「装了什么」≠「这一轮给模型看什么」。把这段活用不上的包收起来：

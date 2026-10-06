@@ -1,7 +1,10 @@
 using System.Net;
 using System.Net.Sockets;
+using System.Runtime.CompilerServices;
 using AgentFramework.Contracts;
 using AgentFramework.Host;
+using AgentFramework.Host.Hosting;
+using static AgentFramework.Harness.Suite;
 
 // ═══════════════════════════════════════════════════════════
 //  工具包（Toolset）与暴露面 垂直切片验证
@@ -9,23 +12,6 @@ using AgentFramework.Host;
 //  不需要 API key / 联网 / 真实模型。
 // ═══════════════════════════════════════════════════════════
 
-var passes = 0;
-var failures = 0;
-
-void Check(string name, bool ok, string? detail = null)
-{
-    var suffix = detail is null ? "" : $"  ({detail})";
-    if (ok)
-    {
-        passes++;
-        Console.WriteLine($"  [PASS] {name}{suffix}");
-    }
-    else
-    {
-        failures++;
-        Console.WriteLine($"  [FAIL] {name}{suffix}");
-    }
-}
 
 var root = Path.Combine(Path.GetTempPath(), "af-toolsets-verify", Guid.NewGuid().ToString("N")[..8]);
 var workspace = Path.Combine(root, "workspace");
@@ -110,7 +96,16 @@ var wrongOwners = expectedOwners
 
 Check("★ 每个工具都落在正确的包里", wrongOwners.Count == 0, string.Join("；", wrongOwners));
 
-var writing = host.Toolsets.First(t => t.Id == "writing-kit");
+var writing = host.Toolsets.FirstOrDefault(t => t.Id == "writing-kit");
+if (writing is null)
+{
+    // 插件 DLL 加载失败（如杀软瞬时锁文件）时，writing-kit 工具包会缺席 ——
+    // 如实记 FAIL（含可见工具集清单供诊断），而不是让 First() 抛未处理异常炸掉整个套件。
+    Check("★ 领域插件包的显示名来自清单（界面上看得懂）",
+        false,
+        $"writing-kit 未加载；现有工具集：{string.Join(",", host.Toolsets.Select(t => t.Id))}");
+    return 1;
+}
 Check("★ 领域插件包的显示名来自清单（界面上看得懂）",
     writing.Name == "写作扩展工具包",
     writing.Name);
@@ -308,6 +303,63 @@ _ = http.PostAsync(
     baseUrl + "/api/toolsets/toggle",
     new StringContent("""{"id":"web","enabled":true}""", System.Text.Encoding.UTF8, "application/json")).Result;
 
+// ═══ 9. Tool Search：延迟工具按需拉起 ═══
+// 「延迟」不是新通路 —— 就是现成的 Eager=false 包（装配末自动进 DisabledToolsets）。
+// 本节验的是补上的那半条：模型用 tool_search 把**单件**工具拉进本会话。
+Console.WriteLine("\n── 9. Tool Search（工具级按需拉起）──");
+
+var scripted = new ScriptedSearchClient(
+    ("tool_search", """{"query":"deferred"}"""),
+    ("tool_search", """{"action":"list"}"""),
+    ("tool_search", """{"action":"reset"}"""));
+
+var searchOptions = new HostOptions
+{
+    WorkspaceRoot = Path.Combine(root, "search", "workspace"),
+    SessionsDir = Path.Combine(root, "search", "sessions"),
+    SessionId = "search",
+    LlmOverride = scripted,
+    Sandbox = "off",
+    ApprovalPolicy = static _ => ApprovalDecision.Allow,
+    PluginsDir = Path.Combine(root, "search", "plugins"),
+};
+
+await using var searchHost = await HostBuilder.BuildAsync(searchOptions, [new DeferredProbeModule()]);
+
+Check("★ 延迟包的工具注册着、但默认不进工具表",
+    searchHost.ToolNames.Contains("deferred_echo")
+    && !searchHost.ExposedToolNames.Contains("deferred_echo"),
+    $"注册 {searchHost.ToolNames.Count} / 可见 {searchHost.ExposedToolNames.Count}");
+Check("★ tool_search 自己常驻（发现入口不能被延迟）",
+    searchHost.ExposedToolNames.Contains("tool_search"));
+
+await searchHost.SendAsync("看看有没有能回显的工具");
+
+var rounds = scripted.Requests;
+var toolNamesAt = (int index) => rounds[index].Tools.Select(t => t.Name).ToHashSet(StringComparer.Ordinal);
+var toolMessage = rounds.Count > 1
+    ? rounds[1].Messages.LastOrDefault(m => m.Role == LlmRole.Tool)
+    : null;
+
+Check("第一轮：模型看不到延迟工具",
+    rounds.Count > 0 && !toolNamesAt(0).Contains("deferred_echo"),
+    rounds.Count > 0 ? $"{rounds[0].Tools.Count} 个工具" : "无请求");
+
+Check("★ 检索结果把完整定义交回模型（名称 + 描述 + 参数）",
+    toolMessage?.Content is { } content && content.Contains("deferred_echo") && content.Contains("参数"),
+    toolMessage?.Content is { } shown ? shown[..Math.Min(70, shown.Length)] : "没有 tool 消息");
+
+Check("★ 检索后下一轮就进了工具表（按需拉起生效）",
+    rounds.Count > 1 && toolNamesAt(1).Contains("deferred_echo"),
+    rounds.Count > 1 ? $"第 2 轮 {rounds[1].Tools.Count} 个工具" : "只有一轮");
+
+Check("★ reset 卸下后，再下一轮它又不在工具表里",
+    rounds.Count > 3 && !toolNamesAt(3).Contains("deferred_echo"),
+    rounds.Count > 3 ? $"共 {rounds.Count} 轮 / 第 4 轮 {rounds[3].Tools.Count} 个工具" : $"只有 {rounds.Count} 轮");
+
+Check("★ 拉起只活在会话回合内（回合外可见面不外溢）",
+    !searchHost.ExposedToolNames.Contains("deferred_echo"));
+
 Console.WriteLine($"\n结果：{passes} 通过 / {failures} 失败");
 
 try
@@ -328,4 +380,80 @@ static int PickFreePort()
     var port = ((IPEndPoint)probe.LocalEndpoint).Port;
     probe.Stop();
     return port;
+}
+
+/// <summary>只用于 Tool Search 验收的延迟包：工具注册着，但声明 Eager=false → 默认不进上下文。</summary>
+internal sealed class DeferredProbeModule : IHostModule
+{
+    public string Name => "deferred-probe";
+
+    public int Order => 900;
+
+    public ValueTask ConfigureAsync(HostState state, CancellationToken ct = default)
+    {
+        state.Kernel.CreateKernelScope("probe-deferred").RegisterTool(new DeferredEchoTool());
+
+        // 包名由内核按 scope 生成（kernel:probe-deferred）—— 注册后取真名再描述，
+        // 否则描述会落在另一个空包上，工具所在的那个仍是「常驻」（延迟了个寂寞）。
+        state.Kernel.DescribeToolset(new ToolsetDescriptor
+        {
+            Id = state.Kernel.ToolsetOf("deferred_echo") ?? "kernel:probe-deferred",
+            Name = "延迟探针",
+            Description = "只用于 Tool Search 验收的延迟包",
+            Eager = false,
+            Source = "probe",
+        });
+
+        return ValueTask.CompletedTask;
+    }
+}
+
+/// <summary>延迟包里的样例工具（自带 schema，好让检索结果里能带上参数）。</summary>
+internal sealed class DeferredEchoTool : ITool, IToolWithSchema
+{
+    public string Name => "deferred_echo";
+
+    public string Description => "把输入的文本原样回显（延迟包样例：默认不进上下文）。";
+
+    public string ParametersJsonSchema => """{"type":"object","properties":{"text":{"type":"string"}}}""";
+
+    public ValueTask<ToolResult> InvokeAsync(ToolInvocation invocation, CancellationToken ct = default)
+        => ValueTask.FromResult(ToolResult.Ok("echo: ok"));
+}
+
+/// <summary>按队列逐轮发工具调用的假模型（队列空则收尾）—— 每个请求都入档。</summary>
+internal sealed class ScriptedSearchClient(params (string Tool, string ArgsJson)[] turns) : ILlmClient
+{
+    private readonly Queue<(string Tool, string ArgsJson)> _turns = new(turns);
+
+    public string Name => "scripted-search";
+
+    public List<LlmRequest> Requests { get; } = [];
+
+    public async IAsyncEnumerable<LlmStreamChunk> StreamAsync(
+        LlmRequest request,
+        [EnumeratorCancellation] CancellationToken ct = default)
+    {
+        await Task.Yield();
+
+        int index;
+        lock (Requests)
+        {
+            Requests.Add(request);
+            index = Requests.Count;
+        }
+
+        if (_turns.TryDequeue(out var spec))
+        {
+            yield return new LlmStreamChunk.ToolCallsReady(
+            [
+                new ToolCallRequest($"ss-{index}", spec.Tool, spec.ArgsJson),
+            ]);
+            yield return new LlmStreamChunk.Completed("tool_calls");
+            yield break;
+        }
+
+        yield return new LlmStreamChunk.TextDelta("好，处理完了。");
+        yield return new LlmStreamChunk.Completed("stop");
+    }
 }

@@ -34,6 +34,41 @@ public sealed partial class WebUiServer
             _host.SetApprovalTier(ApprovalTiers.Parse(tierRaw));
             request.Json(ApprovalPayload());
         }));
+
+        // 待决审批 / 提问（安全审查 P0-2）：切回会话时前端靠它**重建**卡片 ——
+        // 审批/提问不落事件流，光靠 loadHistory 重建不出来。不带过滤参数，返回全部；
+        // 前端按当前会话 id 过滤（避免在服务端引入 query 解析依赖）。
+        Map(new DelegateRoute("GET", "/api/pending", (request, _) =>
+        {
+            object[] items;
+            lock (_gate)
+            {
+                var approvals = _pendingApprovals.Select(kv => (object)new
+                {
+                    kind = "approval",
+                    id = kv.Key,
+                    sessionId = kv.Value.SessionId,
+                    toolName = kv.Value.ToolName,
+                    arguments = kv.Value.Arguments,
+                    canRemember = kv.Value.CanRemember,
+                });
+
+                var asks = _pendingAsks.Select(kv => (object)new
+                {
+                    kind = "ask-user",
+                    id = kv.Key,
+                    sessionId = kv.Value.SessionId,
+                    question = kv.Value.Question,
+                    options = kv.Value.Options,
+                    context = kv.Value.Context,
+                });
+
+                items = [.. approvals, .. asks];
+            }
+
+            request.Json(new { ok = true, pending = items });
+            return ValueTask.CompletedTask;
+        }));
     }
 
     private object ApprovalPayload()

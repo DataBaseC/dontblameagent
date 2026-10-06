@@ -44,6 +44,17 @@
                       border-radius: 6px; background: var(--bg3); color: #aab3c2; border: 1px solid var(--border2);
                       transition: border-color var(--anim), color var(--anim), transform var(--anim); }
   .side-head button:hover { border-color: var(--accent); color: #dce3f0; }
+
+  /* 子 Agent 面板：只在真的有子 Agent 时出现 —— 它回答「此刻谁在跑」，不是常驻功能区 */
+  #subagent-panel { border-top: 1px solid var(--border); max-height: 42%; overflow-y: auto; }
+  #subagent-count { font-size: 11px; color: var(--dim); }
+  #subagent-list { padding: 4px 12px 12px; display: flex; flex-direction: column; gap: 8px; }
+  .subagent-item { font-size: 11.5px; line-height: 1.55; color: #aab3c2;
+                   border-left: 2px solid var(--border2); padding-left: 8px;
+                   overflow-wrap: anywhere; }
+  .subagent-item b { color: var(--dim); font-weight: 600; }
+  .subagent-item.running b { color: #7dd3a0; }
+  .subagent-item .dim { color: var(--dim); }
   .side-head button:active { transform: scale(.92); }
   #session-list { flex: 1; overflow-y: auto; padding: 8px; }
   .session { padding: 9px 11px; border-radius: var(--radius-s); cursor: pointer; margin-bottom: 4px;
@@ -458,6 +469,10 @@
       <button id="new-session" title="新建会话">＋</button>
     </div>
     <div id="session-list"></div>
+    <div id="subagent-panel" hidden>
+      <div class="side-head"><span>子 Agent</span><span id="subagent-count"></span></div>
+      <div id="subagent-list"></div>
+    </div>
   </aside>
 
   <main>
@@ -1028,6 +1043,7 @@ function openPhotoLightbox(src) {
 }
 
 function addApprovalCard(a) {
+  pendingShown.add(a.id);
   const card = document.createElement('div');
   card.className = 'approval';
 
@@ -1092,6 +1108,7 @@ function addApprovalCard(a) {
 
 // ask_user 提问卡片：模型在等你拍板。外层帧 type=ask-user（与 approval 同层）。
 function addAskUserCard(a) {
+  pendingShown.add(a.id);
   const card = document.createElement('div');
   card.className = 'approval';
 
@@ -1608,6 +1625,12 @@ function renderSessions(sessions, current) {
       forkBtn.title = '从当前会话最后一条事件分叉出新会话';
       forkBtn.onclick = (ev) => { ev.stopPropagation(); forkSession(s.id); };
       ops.appendChild(forkBtn);
+
+      const rebuildBtn = document.createElement('a');
+      rebuildBtn.textContent = '重建';
+      rebuildBtn.title = '用最新 checkpoint 当种子开一个新窗口（只带状态、不带历史）';
+      rebuildBtn.onclick = (ev) => { ev.stopPropagation(); rebuildSession(s.id); };
+      ops.appendChild(rebuildBtn);
     }
     const renBtn = document.createElement('a');
     renBtn.textContent = '重命名';
@@ -1816,6 +1839,20 @@ async function forkSession(id) {
   } catch (err) { hint.textContent = '分叉失败：' + err.message; }
 }
 
+async function rebuildSession(id) {
+  try {
+    const response = await fetch('/api/sessions/rebuild', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id })
+    });
+    const data = await response.json();
+    if (!data.ok) { hint.textContent = '重建失败：' + (data.error || response.status); return; }
+    hint.textContent = '已用 checkpoint 重建出新会话 ' + data.sessionId;
+    await switchSession(data.sessionId);
+  } catch (err) { hint.textContent = '重建失败：' + err.message; }
+}
+
 async function renameSession(id) {
   const title = prompt('新标题（留空取消）：');
   if (!title) return;
@@ -1882,11 +1919,30 @@ document.getElementById('cd-ok').onclick = async () => {
   }
 };
 
+// 待决审批/提问卡的「已渲染 id」登记表 —— 实时帧与 /api/pending 重建两条路共用它去重，
+// 避免同一张卡弹两遍（安全审查 P0-2）。
+const pendingShown = new Set();
+
+// 拉取未决审批/提问并在**当前会话**里重建卡片。审批/提问不落事件流，
+// 光靠 loadHistory 重建不出 —— 所以切回会话 / 刷新后必须显式补这一步。
+async function loadPending() {
+  try {
+    const data = await (await fetch('/api/pending')).json();
+    for (const p of data.pending || []) {
+      if (p.sessionId && p.sessionId !== currentSessionId) continue;   // 只重建当前会话的
+      if (pendingShown.has(p.id)) continue;
+      if (p.kind === 'approval') addApprovalCard(p);
+      else if (p.kind === 'ask-user') addAskUserCard(p);
+    }
+  } catch { /* 补卡是增强项，失败不阻断会话加载 */ }
+}
+
 async function afterSessionChange() {
   clearMessages();
   await loadSessions();
   await loadStatus();
   await loadHistory();
+  await loadPending();
   // 「窗口只为有内容的任务而开」：空会话（例如删光所有任务后的兜底会话）
   // 不值得单开一个窗口 —— 回开始屏；开工中的 startSend 不受这条影响。
   if (!startingSession && lastSeq === 0 && !turnRunning) {
@@ -1895,6 +1951,44 @@ async function afterSessionChange() {
   }
   openWindow();
 }
+// ── 子 Agent 面板：此刻谁在跑（有子 Agent 才显示）─────────────
+async function refreshSubagents() {
+  try {
+    const response = await fetch('/api/subagents');
+    const data = await response.json();
+    const panel = document.getElementById('subagent-panel');
+    const list = document.getElementById('subagent-list');
+    if (!panel || !list) return;
+
+    const agents = data.agents || [];
+    if (!agents.length) { panel.hidden = true; list.replaceChildren(); return; }
+
+    panel.hidden = false;
+    const running = agents.filter((a) => a.state === 'running').length;
+    document.getElementById('subagent-count').textContent = running + ' 运行中 / 共 ' + agents.length;
+
+    list.replaceChildren();
+    for (const a of agents) {
+      const item = document.createElement('div');
+      item.className = 'subagent-item' + (a.state === 'running' ? ' running' : '');
+
+      const head = document.createElement('b');
+      head.textContent = a.state;
+      item.appendChild(head);
+      item.appendChild(document.createTextNode(' · 回合 ' + a.rounds + (a.background ? ' · 后台' : '')));
+
+      const task = document.createElement('div');
+      task.className = 'dim';
+      task.textContent = (a.task || '').slice(0, 60);
+      item.appendChild(task);
+
+      list.appendChild(item);
+    }
+  } catch {
+    // 面板只是辅助信息：拉取失败静默（连接状态另有 pill-conn 在说）
+  }
+}
+
 async function loadStatus() {
   try {
     const status = await (await fetch('/api/status')).json();
@@ -3268,6 +3362,10 @@ stream.onerror = () => setConn(false);
 
   // 定期刷新状态栏（工具数/插件数/模式等），避免事件遗漏导致数字滞后
   setInterval(loadStatus, 30000);
+
+  // 子 Agent 面板：3 秒一轮（比状态栏勤 —— 子 Agent 生命周期短、变化快）
+  refreshSubagents();
+  setInterval(refreshSubagents, 3000);
 
   // ── 顶栏按钮「已打开」激活态（v3.16 打磨层）────────────────
   // 原有各 pill.onclick 一律保持不动（它负责切换 hidden 并拉数据）；

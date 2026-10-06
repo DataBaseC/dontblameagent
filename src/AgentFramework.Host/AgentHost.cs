@@ -32,6 +32,21 @@ public sealed partial class AgentHost : IAsyncDisposable
     private readonly SnapshotProjectionCache _projectionCache;
     private IUserInputRephraser? _rephraser;
     private IContextSummarizer? _contextSummarizer;
+    private ICheckpointWriter? _checkpointWriter;
+
+    /// <summary>子 Agent 名单与生命周期（v3.23 管控面）。</summary>
+    private readonly SubAgentRegistry _subAgents;
+
+    /// <summary>
+    /// 宿主生命周期取消源：<b>一切后台作业</b>（checkpoint 摘要 / 锚点、进化 Dream / Distill）
+    /// 都挂在它上面。关闭时一次性叫停 —— 否则「宿主已拆、后台还在往盘上写」
+    /// 是查起来最费劲的一类问题：写到一半的文件 + 没人观察的异常。
+    /// </summary>
+    private readonly CancellationTokenSource _lifetime = new();
+
+    /// <summary>后台作业登记簿（关闭时有界等待收尾用）。</summary>
+    private readonly List<Task> _background = new();
+    private readonly object _backgroundGate = new();
 
     /// <summary>
     /// **当前**会话的运行态：日志 + 事件出口 + 主循环 + 它自己的回合闸。
@@ -94,6 +109,8 @@ public sealed partial class AgentHost : IAsyncDisposable
         SummarizationEnabled = state.ContextSummarizer is not null;
         _rephraser = state.Rephraser;
         _contextSummarizer = state.ContextSummarizer;
+        _checkpointWriter = state.CheckpointWriter;
+        _subAgents = new SubAgentRegistry(this) { MaxDepth = options.SubAgentMaxDepth };
         _mode = options.Mode;
         _projectionCache = new SnapshotProjectionCache(Path.Combine(options.SessionsDir, ".cache"));
 
@@ -298,6 +315,12 @@ public sealed partial class AgentHost : IAsyncDisposable
 
     public IReadOnlyList<ApprovalRecord> Approvals => _sink.Approvals;
 
+    /// <summary>
+    /// 子 Agent 管控面（v3.23）：派发 / 名单 / 状态 / 取结果 / 追加消息 / 打断 / 等待。
+    /// 界面与工具看到的是同一份名单（同一实现，不双轨）。
+    /// </summary>
+    public ISubAgentControl SubAgents => _subAgents;
+
     // ── 装配 ───────────────────────────────────────────────
 
     public static Task<AgentHost> CreateAsync(HostOptions options, CancellationToken ct = default)
@@ -325,13 +348,9 @@ public sealed partial class AgentHost : IAsyncDisposable
             }
         };
         state.EmitToSession = (sessionId, evt, ct) => host.EmitToSessionAsync(sessionId, evt, ct);
-        // G1：委托以宿主为入口（编排逻辑在本文件下方 / SubAgentRunner.cs）。
-        // ContinueWith 里检查 t.Status：子 Agent 抛异常时返回失败摘要，而不是让异常穿透成 Unfaulted task。
-        state.SubAgentRunner = (parentSessionId, task, ct) =>
-            SubAgentRunner.RunSubAgentAsync(host, parentSessionId, task, null, ct)
-                .ContinueWith(t => t.Status == TaskStatus.RanToCompletion
-                    ? (t.Result.ChildSessionId, t.Result.Success, t.Result.Summary)
-                    : (string.Empty, false, $"子 Agent 执行失败：{t.Exception?.GetBaseException().Message ?? t.Status.ToString()}"), ct);
+        // G1 子 Agent：编排实体住在宿主的 SubAgentRegistry（名单 / 状态 / 追加消息 / 打断）。
+        // 工具经 ISubAgentControl 够到它 —— Tools 工程不必引用 Host，分层不倒挂。
+        state.SubAgents = host.SubAgents;
         state.InteractionProvider = () => host.EffectiveInteraction;
         state.ModeProvider = () => host.Mode;
         state.ModeIdProvider = () => host.ModeId;
@@ -346,6 +365,14 @@ public sealed partial class AgentHost : IAsyncDisposable
         //   · 非回合上下文（UI 直调 / 诊断）：回落到宿主当前会话，行为与旧版一致。
         // 少了这一行，这些工具会永远作用在装配期的 options.SessionId 上。
         state.CurrentSessionIdProvider = () => state.TurnSessionIdValue ?? host.Session.SessionId;
+
+        // 脚本借调工具的审批出口解析（安全审查 P0）：按「回合所属会话」找 sink；
+        // 无会话上下文则回退当前会话。与 CurrentSessionIdProvider 同一手法 ——
+        // 全局脚本的 ctx.callTool 也要能找到当前回合的审批链，不能绕过去。
+        state.ApprovalSinkFor = sessionId =>
+            sessionId is not null && host.GetSession(sessionId) is { } rt
+                ? rt.Sink
+                : host.Session.Sink;
 
         return host;
     }
@@ -363,6 +390,12 @@ public sealed partial class AgentHost : IAsyncDisposable
     /// UI 的 <c>/api/send</c> 靠它在 POST 那一刻把**回合归属**钉下来。
     /// </summary>
     public Hosting.SessionRuntime Session => _session;
+
+    /// <summary>
+    /// 正在跑的回合所属会话 id（非回合上下文为 null）。
+    /// 审批 / 提问帧靠它标明归属，前端据此分流（安全审查 P0-2）。
+    /// </summary>
+    public string? CurrentTurnSessionId => _state.TurnSessionIdValue;
 
     /// <summary>本宿主已经开着的会话 id（诊断 / UI 用）。</summary>
     public IReadOnlyList<string> OpenSessionIds
@@ -464,8 +497,70 @@ public sealed partial class AgentHost : IAsyncDisposable
         }
     }
 
+    /// <summary>后台作业用的 token —— 宿主关闭即取消（「宿主已拆、后台还在写」的收口）。</summary>
+    internal CancellationToken LifetimeToken => _lifetime.Token;
+
+    /// <summary>登记一个后台作业：关闭时会有界等待它收尾。</summary>
+    internal Task TrackBackground(Task task)
+    {
+        lock (_backgroundGate)
+        {
+            _background.RemoveAll(t => t.IsCompleted);
+            _background.Add(task);
+        }
+
+        return task;
+    }
+
+    /// <summary>
+    /// 叫停并等待后台作业收尾。等不到也<b>不硬等</b> —— 与「等回合闸」同一条纪律：
+    /// 关闭流程不能被一个卡住的后台作业无限拖住（它们的失败本就一律吞掉）。
+    /// </summary>
+    private async Task QuiesceBackgroundAsync(TimeSpan timeout)
+    {
+        _lifetime.Cancel();
+
+        Task[] pending;
+        lock (_backgroundGate)
+        {
+            pending = [.. _background];
+            _background.Clear();
+        }
+
+        if (pending.Length == 0)
+        {
+            return;
+        }
+
+        try
+        {
+            await Task.WhenAll(pending).WaitAsync(timeout).ConfigureAwait(false);
+        }
+        catch
+        {
+            // 超时 / 作业自身异常：都不该影响关停
+        }
+    }
+
     public async ValueTask DisposeAsync()
     {
+        // ① 先立退休牌 —— 此后 SendAsync 一律拒绝。
+        //    不立的话，「拆到一半又起一个回合」就是一条谁也说不清的竞态：
+        //    新回合会往即将关闭的日志里写事件、往即将 Dispose 的信号量上 Release。
+        //    这个原语一直存在，只是从前**没有任何生产调用点** ——
+        //    防线建好却不接线，比没有防线更危险（读代码的人以为关停是安全的）。
+        MarkRetired();
+
+        // ② 叫停还活着的子 Agent 并等它们收尾：它们各自在跑回合、握着自己会话的闸，
+        //    不先停就会撞上下面「回收会话」那段（对象已 Dispose）。
+        _subAgents.StopAll();
+        await _subAgents.DrainAsync(TimeSpan.FromSeconds(3)).ConfigureAwait(false);
+
+        // ②b 叫停后台作业（checkpoint 摘要 / 锚点、进化 Dream / Distill）并等它们收尾：
+        //     它们握着自己的写盘路径（检查点文件、记忆、技能草稿）——
+        //     不拦的话，宿主拆掉之后它们还在往盘上写：半截文件 + 无人观察的异常。
+        await QuiesceBackgroundAsync(TimeSpan.FromSeconds(3)).ConfigureAwait(false);
+
         // 实时取内核里的插件名单：运行期（agent 自己）装上的插件也要一起收掉，
         // 不能只收启动时那一批 —— 否则热装进来的插件在关闭时会被漏掉。
         foreach (var plugin in _plugins.Plugins)
@@ -487,6 +582,21 @@ public sealed partial class AgentHost : IAsyncDisposable
 
         foreach (var session in all)
         {
+            // ③ 等回合闸真正空闲再拆 —— 回合还在跑时直接 Dispose 日志与信号量，
+            //    那个回合的收尾会撞上 ObjectDisposedException。
+            //    等不到也**不硬等**：关闭流程不能被一个卡住的回合无限拖住（如实放弃这一次等待）。
+            try
+            {
+                if (await session.TurnGate.WaitAsync(TimeSpan.FromSeconds(5)).ConfigureAwait(false))
+                {
+                    session.TurnGate.Release();   // 只是借来确认「此刻没人在跑」，随即还回
+                }
+            }
+            catch (ObjectDisposedException)
+            {
+                // 已经拆过了
+            }
+
             await session.DisposeAsync().ConfigureAwait(false);
         }
 

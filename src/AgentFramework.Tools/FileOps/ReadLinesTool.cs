@@ -13,11 +13,13 @@ namespace AgentFramework.Tools.FileOps;
 /// 而不是把整个 3000 行文件再灌一遍上下文。
 /// </para>
 /// </summary>
-internal sealed class ReadLinesTool(IWorkspaceService ws) : ITool, IToolWithSchema
+internal sealed class ReadLinesTool(IWorkspaceService ws) : IToolWithRisk, ITool, IToolWithSchema
 {
     private const int HardMaxLines = 400;
 
     public string Name => "read_lines";
+
+    public ToolRisk Risk => ToolRisk.ReadOnly;
 
     public string Description =>
         "读取工作区内某个文件的一段连续行，输出带行号（从 1 开始）。" +
@@ -37,7 +39,7 @@ internal sealed class ReadLinesTool(IWorkspaceService ws) : ITool, IToolWithSche
         var path = args.Str("path");
         if (string.IsNullOrWhiteSpace(path))
         {
-            return ValueTask.FromResult(ToolResult.Fail("缺少参数 path"));
+            return ValueTask.FromResult(ToolResult.Fail($"缺少参数 path{FileHints.PathShape}"));
         }
 
         var start = Math.Max(1, args.Int("start", 1));
@@ -56,7 +58,7 @@ internal sealed class ReadLinesTool(IWorkspaceService ws) : ITool, IToolWithSche
 
         if (!File.Exists(fullPath))
         {
-            return ValueTask.FromResult(ToolResult.Fail($"文件不存在：{path}"));
+            return ValueTask.FromResult(ToolResult.Fail($"文件不存在：{FileHints.NotFound(path)}"));
         }
 
         string[] lines;

@@ -330,6 +330,89 @@ public sealed partial class AgentHost
         return newId;
     }
 
+    /// <summary>
+    /// **重建**：用 checkpoint 当种子开一个「新窗口」（v3.12 rebuild，v3.23 兑现）。
+    ///
+    /// <para>
+    /// 与 <see cref="ForkSession"/> 的分工很清楚：
+    /// 分叉复制**历史前缀**（「换个决定重试」）；重建**只带状态不带史** ——
+    /// 新会话只有 header + 一条种子（checkpoint 的渲染块），
+    /// 于是「上下文满了、但状态很清楚」的长任务可以轻装上阵继续跑。
+    /// </para>
+    /// <para>
+    /// 种子用 <see cref="ContextCompactedEvent"/> 承载（触发来源标 <c>rebuild</c>）——
+    /// 投影器本来就会把它的 Summary 注入成合成块，所以不必为 rebuild 新增事件类型、也不必改投影器。
+    /// </para>
+    /// </summary>
+    /// <param name="sourceSessionId">源会话。</param>
+    /// <param name="checkpointSeq">用哪一份 checkpoint；null = 用最新的一份。</param>
+    public string RebuildSession(string sourceSessionId, long? checkpointSeq = null)
+    {
+        var sourcePath = Path.Combine(Options.SessionsDir, sourceSessionId + ".jsonl");
+        if (!File.Exists(sourcePath))
+        {
+            throw new FileNotFoundException($"源会话不存在：{sourceSessionId}");
+        }
+
+        var events = JsonlEventLog.Read(sourcePath);
+        var header = events.OfType<SessionCreatedEvent>().FirstOrDefault();
+        var checkpoint = checkpointSeq is { } seq
+            ? events.OfType<CheckpointEvent>().LastOrDefault(c => c.Seq == seq)
+            : events.OfType<CheckpointEvent>().LastOrDefault();
+
+        if (checkpoint is null)
+        {
+            throw new InvalidOperationException(
+                "源会话没有可用的 checkpoint —— 先打开 checkpoint 开关（配置 / 界面）或手动写一次，再重建。");
+        }
+
+        var seed = checkpoint.RenderBlock();
+        if (string.IsNullOrWhiteSpace(seed))
+        {
+            throw new InvalidOperationException("该 checkpoint 字段全空，没有可注入的状态，不重建。");
+        }
+
+        var newId = $"rebuild-{DateTime.UtcNow:MMdd-HHmmss}-{Guid.NewGuid().ToString("N")[..4]}";
+        var targetPath = Path.Combine(Options.SessionsDir, newId + ".jsonl");
+
+        // 不借 SessionForker：它做的是「复制前缀」，而这里要的是**零历史** ——
+        // 从源日志里挑不出「空」这个前缀（且源会话未必有 header，会把第一条消息带过来）。
+        // 直接建一份全新日志：header（记血缘）+ 一条种子。
+        using (var log = JsonlEventLog.Open(targetPath))
+        {
+            log.Append(new SessionCreatedEvent
+            {
+                SessionId = newId,
+                ProjectId = header?.ProjectId,
+                Title = header is null ? "rebuild" : $"{header.Title} (rebuild)",
+                ParentSessionId = sourceSessionId,
+                ForkFromSeq = checkpoint.Seq,
+            });
+
+            // 种子落成一条**助手消息**（新窗口一开场先「交代」上一段的状态）。
+            //
+            // 为什么不用 ContextCompactedEvent 承载：摘要型事件走的是「替换被折叠的旧轮次」这条路，
+            // 而新窗口**根本没有旧轮可替换** —— 用它承载种子，投影出来是空的
+            // （这是本工程验证抓到的真实缺陷，不是理论推演）。
+            log.Append(new AssistantMessageEvent
+            {
+                SessionId = newId,
+                Text = seed,
+            });
+        }
+
+        // 打开成新会话的 runtime（装载时已含 header + 种子）。
+        GetOrOpenSession(newId);
+
+        // 重建继承源会话的工作模式与项目目录（换了窗口，实验前提不变）。
+        if (SessionMetas().TryGetValue(sourceSessionId, out var rebuildMeta))
+        {
+            SaveSessionMeta(newId, rebuildMeta.Mode, rebuildMeta.ProjectDir);
+        }
+
+        return newId;
+    }
+
     /// <summary>重命名会话（F4）：标题属"用户可改元数据"，存 titles.json（与 rephrase.json 同类），不进事件流。</summary>
     public void RenameSession(string sessionId, string title)
     {

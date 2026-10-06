@@ -26,10 +26,22 @@ public sealed class AgentConfig
     public string? Plugins { get; set; }
 
     /// <summary>
-    /// 命令沙箱档位：<c>auto</c>（默认，Windows 用 job、其他平台用 process）/ <c>off</c> /
-    /// <c>process</c> / <c>job</c> —— 或插件注册的后端名。
+    /// 命令沙箱档位：<c>auto</c>（默认，Windows 用 job、Linux 有 bwrap 用 bwrap、其他用 process）/
+    /// <c>off</c> / <c>process</c> / <c>job</c> / <c>bwrap</c> / <c>container</c> —— 或插件注册的后端名。
     /// </summary>
     public string? Sandbox { get; set; }
+
+    /// <summary>
+    /// <c>container</c> 档用的镜像（如 <c>node:22</c> / <c>mcr.microsoft.com/dotnet/sdk:10.0</c>）。
+    /// 选容器档必须配它 —— 独立 rootfs 没有普适默认，容器档因此不进 auto。
+    /// </summary>
+    public string? SandboxImage { get; set; }
+
+    /// <summary>容器网络策略：<c>none</c>（默认，禁网）/ <c>bridge</c>（可出网）/ <c>host</c>。</summary>
+    public string? SandboxNetwork { get; set; }
+
+    /// <summary>容器运行时：<c>docker</c> / <c>podman</c> / 可执行文件路径。省略 = 自动探测。</summary>
+    public string? SandboxRuntime { get; set; }
 
     /// <summary>
     /// shell 偏好（会话级一次决定，优先 POSIX）：<c>bash</c>/<c>sh</c>/<c>cmd</c>/<c>powershell</c>/<c>pwsh</c> /
@@ -83,6 +95,13 @@ public sealed class AgentConfig
 
     /// <summary>上下文治理参数（不写就用默认值）。</summary>
     public ContextConfig? Context { get; set; }
+
+    /// <summary>
+    /// checkpoint（状态锚点）参数 —— 与 <see cref="Context"/> 是**两个触发点**：
+    /// 这个是「写盘」（上下文不动，可以早），那个是「裁剪」（必打断前缀缓存，必须晚）。
+    /// 不写 = 默认关（Enabled=false），长任务显式开。
+    /// </summary>
+    public CheckpointConfig? Checkpoint { get; set; }
 
     /// <summary>
     /// 输入级权限规则（MiMo 的 permission rules）：
@@ -238,6 +257,25 @@ public sealed class ContextConfig
     public int? RecentTurnsKeptVerbatim { get; set; }
 
     public bool? InjectTaskCard { get; set; }
+}
+
+/// <summary>checkpoint（状态锚点）参数（不写就用默认值 —— 默认关）。</summary>
+public sealed class CheckpointConfig
+{
+    /// <summary>是否启用。默认 false：每触发一次要花一次旁路模型调用，长任务显式开。</summary>
+    public bool? Enabled { get; set; }
+
+    /// <summary>写盘水位（默认 0.35，必须低于压缩水位 0.8）。</summary>
+    public double? TriggerRatio { get; set; }
+
+    /// <summary>正文上限（字符，默认 2000）—— 恒定大小锚点，超了砍。</summary>
+    public int? MaxChars { get; set; }
+
+    /// <summary>距上次至少新增这么多事件才再写一次（防抖，默认 8）。</summary>
+    public int? MinNewEvents { get; set; }
+
+    /// <summary>是否把「跨任务发现」顺带升进记忆（默认 true）。</summary>
+    public bool? PromoteMemory { get; set; }
 }
 
 /// <summary>一条输入级权限规则（配置单形态）：模式匹配 + 三值处置。</summary>

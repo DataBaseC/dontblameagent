@@ -1,8 +1,10 @@
 name: ci
 
 # 最小质量门禁：能编过 + 全部 Verify 套件通过。
-# 用 windows-latest 是因为 AgentFramework.Desktop 是 net10.0-windows（WinForms），
-# 在 Linux 上整个 sln 编不过；要开 Linux CI 得先给该工程做条件编译或过滤构建。
+# Windows 与 Linux 双跑：AgentFramework.Desktop 虽是 net10.0-windows（WinForms），
+# 但已声明 EnableWindowsTargeting，整个 sln 在 Linux 上也能编译，故无需为 CI 拆条件编译。
+# VerifySandbox 是平台相关套件（Windows Job Object / Linux bwrap，且「超时终结进程树」
+# 在无 bwrap 的 Linux 容器里语义不同），仅在 Windows 跑；Linux 跳过并在下方注明，不静默掩盖。
 on:
   push:
   pull_request:
@@ -10,7 +12,11 @@ on:
 
 jobs:
   build-and-verify:
-    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
 
@@ -29,10 +35,15 @@ jobs:
           $ErrorActionPreference = 'Continue'
           $suites = @(
             'Verify', 'VerifyData', 'VerifyAgent', 'VerifyTools', 'VerifySandbox',
-            'VerifyPlugins', 'VerifyLlm', 'VerifyHost', 'VerifyLauncher', 'VerifyWeb',
-            'VerifySummary', 'VerifyRephrase', 'VerifyContext', 'VerifyMemory',
-            'VerifyToolsets', 'VerifyBaseKit', 'VerifyCheckpoint', 'VerifySecrets'
+            'VerifyComputerUse', 'VerifyPlugins', 'VerifyLlm', 'VerifyHost', 'VerifyLauncher',
+            'VerifyWeb', 'VerifySummary', 'VerifyRephrase', 'VerifyContext', 'VerifyMemory',
+            'VerifyToolsets', 'VerifyBaseKit', 'VerifyCheckpoint', 'VerifyEvolution', 'VerifySecrets'
           )
+          # VerifySandbox 依赖平台特性（Job Object / bwrap / 进程树终结），仅在 Windows 跑。
+          if (-not $IsWindows) {
+            Write-Host "非 Windows：跳过 VerifySandbox（平台相关）" -ForegroundColor Yellow
+            $suites = $suites | Where-Object { $_ -ne 'VerifySandbox' }
+          }
           $failed = @()
           foreach ($name in $suites) {
             $proj = "tests/AgentFramework.$name/AgentFramework.$name.csproj"

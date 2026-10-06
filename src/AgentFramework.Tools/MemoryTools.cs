@@ -18,9 +18,11 @@ namespace AgentFramework.Tools;
 public sealed class RememberTool(
     IMemoryStore store,
     Func<string> scopeProvider,
-    Func<string?> sessionIdProvider) : ITool, IToolWithSchema
+    Func<string?> sessionIdProvider) : IToolWithRisk, ITool, IToolWithSchema
 {
     public string Name => "remember";
+
+    public ToolRisk Risk => ToolRisk.Write;
 
     public string Description =>
         "把一条**值得长期记住**的事实、偏好或结论记下来（跨会话保留）。"
@@ -76,9 +78,11 @@ public sealed class RememberTool(
 /// </summary>
 public sealed class ForgetTool(
     IMemoryStore store,
-    Func<IReadOnlyList<string>> scopeProvider) : ITool, IToolWithSchema
+    Func<IReadOnlyList<string>> scopeProvider) : IToolWithRisk, ITool, IToolWithSchema
 {
     public string Name => "forget";
+
+    public ToolRisk Risk => ToolRisk.Write;
 
     public string Description =>
         "撤销一条**记错了**的记忆（跨会话生效）。id 从 recall_memory 的结果里取。"
@@ -139,9 +143,11 @@ public sealed class ForgetTool(
 public sealed class RecallMemoryTool(
     ToolkitOptions options,
     IMemoryStore store,
-    Func<IReadOnlyList<string>> scopeProvider) : ITool, IToolWithSchema
+    Func<IReadOnlyList<string>> scopeProvider) : IToolWithRisk, ITool, IToolWithSchema
 {
     public string Name => "recall_memory";
+
+    public ToolRisk Risk => ToolRisk.ReadOnly;
 
     public string Description =>
         "检索长期记忆（跨会话保留的事实与偏好）。查历史对话用 search_history；"

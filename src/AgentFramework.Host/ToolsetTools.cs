@@ -16,9 +16,11 @@ namespace AgentFramework.Host;
 /// 工具本身属于 <c>meta</c> 包且不可关闭：关掉它，就再也没有办法把别的包开回来了。
 /// </para>
 /// </summary>
-public sealed class ToolsetsTool(Func<IReadOnlyList<ToolsetView>> views) : ITool, IToolWithSchema
+public sealed class ToolsetsTool(Func<IReadOnlyList<ToolsetView>> views) : IToolWithRisk, ITool, IToolWithSchema
 {
     public string Name => "toolsets";
+
+    public ToolRisk Risk => ToolRisk.ReadOnly;
 
     public string Description =>
         "列出所有工具包（Toolset）及其开关状态与包含的工具。" +
@@ -67,9 +69,11 @@ public sealed class ToolsetsTool(Func<IReadOnlyList<ToolsetView>> views) : ITool
 /// </summary>
 public sealed class UseToolsetTool(
     Func<IReadOnlyList<ToolsetView>> views,
-    Func<string, bool, bool> toggle) : ITool, IToolWithSchema
+    Func<string, bool, bool> toggle) : IToolWithRisk, ITool, IToolWithSchema
 {
     public string Name => "use_toolset";
+
+    public ToolRisk Risk => ToolRisk.Write;
 
     public string Description =>
         "打开或关闭一个工具包。关掉当前任务用不上的包可以省上下文、也让挑选更集中；" +
