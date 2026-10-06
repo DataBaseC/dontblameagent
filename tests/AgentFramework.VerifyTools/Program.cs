@@ -204,7 +204,9 @@ Check("超时命令被终止", !timeoutResult.Success && timeoutResult.Error!.Co
 // 核心修正：退出码非零 = 命令**跑完了**的结论（编译失败 / 测试失败 / grep 无匹配都可能是非零），
 // 不是工具失败。从前它走 ToolResult.Fail，主循环把正文写成 "ERROR: …"，
 // 模型据此以为工具坏了或被拒，而不是去看输出里说了什么。
-var nonZero = await Call(run, ("command", OperatingSystem.IsWindows() ? "exit /b 3" : "exit 3"));
+// 命令按解析出的 shell 选（不能在 Windows 上无条件用 cmd 语法：
+// Windows + Git Bash（CI 形态）下 ShellResolver 解析到 bash，`exit /b 3` 会被当成非法参数退出码 2）。
+var nonZero = await Call(run, ("command", posix ? "exit 3" : "exit /b 3"));
 Check("★ 非零退出仍算「跑完了」（不伪装成工具失败）",
     nonZero.Success && nonZero.Output.Contains("exit=3"), FirstLine(nonZero.Output));
 
